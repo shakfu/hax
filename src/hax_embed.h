@@ -4,7 +4,7 @@
 
 #include <stddef.h>
 
-#include "util.h"
+#include "diag.h"
 
 /* Lifecycle for callers that are not main(): language bindings, test harnesses, and any host
  * process that owns its own locale, libcurl, and exit handling. hax_init() must complete before

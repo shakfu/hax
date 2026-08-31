@@ -15,9 +15,57 @@ struct spend_record {
     double reported_cost; /* -1 when the provider did not report cost */
     struct catalog_entry rates;
     int has_rates;
+    char *provider_id;
     char *catalog_id;
     char *model;
 };
+
+/* "2.0k" reads as noise next to "412" and "2.5k"; print whole multiples bare. */
+static void format_one_decimal(char *out, size_t out_size, double value, char suffix)
+{
+    snprintf(out, out_size, "%.1f%c", value, suffix);
+    char *zero_fraction = strstr(out, ".0");
+    if (zero_fraction)
+        memmove(zero_fraction, zero_fraction + 2, strlen(zero_fraction + 2) + 1);
+}
+
+void format_tokens(char *out, size_t out_size, long tokens)
+{
+    const long million = 1000000L;
+    if (tokens < 0)
+        snprintf(out, out_size, "?");
+    else if (tokens < 1000)
+        snprintf(out, out_size, "%ld", tokens);
+    else if (tokens < 10L * 1000)
+        format_one_decimal(out, out_size, (double)tokens / 1000.0, 'k');
+    else if (tokens < million)
+        snprintf(out, out_size, "%ldk", tokens / 1000 + (tokens % 1000 >= 500));
+    else if (tokens < 10L * million)
+        format_one_decimal(out, out_size, (double)tokens / (double)million, 'M');
+    else
+        snprintf(out, out_size, "%ldM", tokens / million + (tokens % million >= million / 2));
+}
+
+void format_context(char *out, size_t out_size, long context_tokens, long context_limit)
+{
+    char used[32];
+    format_tokens(used, sizeof(used), context_tokens);
+    if (context_limit > 0 && context_tokens >= 0) {
+        char limit[32];
+        /* Usage above the window is real (stale model metadata), so report it rather than
+         * capping at 100; the ceiling only keeps the field three digits wide. */
+        double ratio = (double)context_tokens * 100.0 / (double)context_limit;
+        long percentage = ratio > 999.0 ? 999 : (long)ratio;
+        format_tokens(limit, sizeof(limit), context_limit);
+        snprintf(out, out_size, "%s / %s (%ld%%)", used, limit, percentage);
+    } else if (context_limit > 0) {
+        char limit[32];
+        format_tokens(limit, sizeof(limit), context_limit);
+        snprintf(out, out_size, "%s / %s", used, limit);
+    } else {
+        snprintf(out, out_size, "%s", used);
+    }
+}
 
 int agent_format_stats_segments(char segments[][AGENT_STATS_SEGMENT_LEN], long context_tokens,
                                 long context_limit, long elapsed_ms, double session_spend,
@@ -60,6 +108,8 @@ void agent_spend_account(struct spend_totals *totals, const struct stream_usage 
     record->usage = *usage;
     record->reported_cost = usage->cost;
     record->has_rates = model_meta_rates(provider, model, &record->rates);
+    const char *provider_id = provider ? provider_stable_id(provider) : NULL;
+    record->provider_id = provider_id && *provider_id ? xstrdup(provider_id) : NULL;
     const char *catalog_id = provider ? provider->catalog_id : NULL;
     record->catalog_id = catalog_id && *catalog_id ? xstrdup(catalog_id) : NULL;
     record->model = model && *model ? xstrdup(model) : NULL;
@@ -73,11 +123,11 @@ static double spend_record_estimate(const struct spend_record *record, struct ca
         return catalog_price(&record->rates, usage->input_tokens, usage->output_tokens,
                              usage->cached_tokens, usage->cache_write_tokens,
                              usage->cache_write_1h_tokens, split);
-    if (!record->catalog_id || !record->model)
+    if ((!record->provider_id && !record->catalog_id) || !record->model)
         return -1;
 
     struct catalog_entry rates;
-    if (catalog_lookup(record->catalog_id, record->model, &rates) != 0)
+    if (catalog_lookup(record->provider_id, record->catalog_id, record->model, &rates) != 0)
         return -1;
     return catalog_price(&rates, usage->input_tokens, usage->output_tokens, usage->cached_tokens,
                          usage->cache_write_tokens, usage->cache_write_1h_tokens, split);
@@ -142,6 +192,7 @@ int agent_spend_split(const struct spend_totals *totals, struct catalog_split *s
 void agent_spend_free(struct spend_totals *totals)
 {
     for (size_t i = 0; i < totals->count; i++) {
+        free(totals->records[i].provider_id);
         free(totals->records[i].catalog_id);
         free(totals->records[i].model);
     }

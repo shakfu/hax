@@ -8,6 +8,7 @@
 #include "agent_loop.h"
 #include "catalog.h"
 #include "config.h"
+#include "diag.h"
 #include "provider.h"
 #include "session_prune.h"
 #include "trace.h"

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,8 +8,10 @@
 #include <sys/types.h>
 
 #include "config.h"
+#include "diag.h"
 #include "harness.h"
 #include "util.h"
+#include "system/fs.h"
 
 /* Isolate resolution tests from the developer or CI environment. */
 static void clear_env(void)
@@ -63,7 +66,7 @@ static void test_scalar_normalization(void)
      * the file wrote 64000 or "64000", true or "1". */
     EXPECT(config_load("{\"context_limit\": 64000, \"display_width\": 120,"
                        " \"show_reasoning\": true}") == 0);
-    EXPECT(config_size("context_limit") == 64000);
+    EXPECT(config_tokens("context_limit") == 64000);
     EXPECT(config_int("display_width") == 120);
     EXPECT(config_bool("show_reasoning") == 1);
     EXPECT(config_load("{\"show_reasoning\": false}") == 0);
@@ -75,13 +78,13 @@ static void test_typed_getters(void)
     clear_env();
     EXPECT(config_load("{\"context_limit\": \"64k\", \"display_width\": \"100\","
                        " \"show_reasoning\": \"0\"}") == 0);
-    EXPECT(config_size("context_limit") == 64 * 1024);
+    EXPECT(config_tokens("context_limit") == 64000); /* token counts use decimal suffixes */
     EXPECT(config_int("display_width") == 100);
     EXPECT(config_bool("show_reasoning") == 0); /* explicit "0" is false */
     /* Unset typed reads are type-zero. */
     EXPECT(config_load(NULL) == 0);
     EXPECT(config_int("display_width") == 0);
-    EXPECT(config_size("context_limit") == 0);
+    EXPECT(config_tokens("context_limit") == 0);
     EXPECT(config_bool("show_reasoning") == 0);
 }
 
@@ -149,7 +152,7 @@ static void test_default_on_unset_and_invalid(void)
     EXPECT(config_bool_or("providers.openai-compatible.send_cache_key", 1) == 1); /* unset → def */
     /* No registry default → type-zero, as before. */
     EXPECT(config_load("{\"context_limit\": \"nope\"}") == 0);
-    EXPECT(config_size("context_limit") == 0);
+    EXPECT(config_tokens("context_limit") == 0);
     /* config_default exposes the registry default tier directly. */
     EXPECT_STR_EQ(config_default("providers.llamacpp.port"), "8080");
     EXPECT(config_default("model") == NULL);
@@ -702,7 +705,7 @@ static void test_source_reports_winning_tier(void)
     EXPECT_STR_EQ(config_source("markdown"), "config"); /* empty env skipped */
     EXPECT(config_bool("markdown") == 0);               /* effective from file */
     EXPECT_STR_EQ(config_source("context_limit"), "config");
-    EXPECT(config_size("context_limit") == 128 * 1024);
+    EXPECT(config_tokens("context_limit") == 128000);
     /* A free-form setting keeps empty-as-meaningful: the empty env wins. */
     setenv("HAX_SYSTEM_PROMPT", "", 1);
     EXPECT(config_load("{\"system_prompt\": \"from file\"}") == 0);
@@ -805,7 +808,14 @@ static void test_bounded_and_scaled_value_validation(void)
     EXPECT(!config_value_valid(output_cap, "0"));
     EXPECT(!config_value_valid(output_cap, "lots"));
     config_value_hint(output_cap, hint, sizeof(hint));
-    EXPECT_STR_EQ(hint, "a size like 64k or 1M");
+    EXPECT_STR_EQ(hint, "a byte size like 64k or 1M (k = 1024)");
+
+    const struct config_setting *context_limit = config_setting_find("context_limit");
+    EXPECT(context_limit && context_limit->kind == CONFIG_KIND_TOKENS);
+    EXPECT(config_value_valid(context_limit, "872k"));
+    EXPECT(!config_value_valid(context_limit, "lots"));
+    config_value_hint(context_limit, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "a token count like 200k or 1M (k = 1000)");
 
     const struct config_setting *timeout = config_setting_find("bash.timeout");
     EXPECT(timeout && timeout->kind == CONFIG_KIND_DURATION);
@@ -2086,6 +2096,97 @@ static void test_str_below_run(void)
     config_set_override("tint", NULL);
 }
 
+/* ---------- parse_size / parse_token_count / parse_duration_ms ---------- */
+
+static void test_parse_size_basic(void)
+{
+    EXPECT(parse_size("4096") == 4096);
+    EXPECT(parse_size("256k") == 256L * 1024);
+    EXPECT(parse_size("128K") == 128L * 1024);
+    EXPECT(parse_size("1m") == 1024L * 1024);
+    EXPECT(parse_size("1M") == 1024L * 1024);
+}
+
+static void test_parse_token_count_is_decimal(void)
+{
+    EXPECT(parse_token_count("4096") == 4096);
+    EXPECT(parse_token_count("256k") == 256000);
+    EXPECT(parse_token_count("872K") == 872000);
+    EXPECT(parse_token_count("1m") == 1000000);
+    EXPECT(parse_token_count("1M") == 1000000);
+    EXPECT(parse_token_count("xyz") == 0);
+}
+
+static void test_parse_size_invalid_returns_zero(void)
+{
+    EXPECT(parse_size(NULL) == 0);
+    EXPECT(parse_size("") == 0);
+    EXPECT(parse_size("xyz") == 0);
+    EXPECT(parse_size("0") == 0);   /* explicit zero is still rejected */
+    EXPECT(parse_size("-5k") == 0); /* negative */
+    EXPECT(parse_size("5k junk") == 0);
+}
+
+static void test_parse_size_rejects_overflow(void)
+{
+    /* Numerals strtol clamps to LONG_MAX must NOT slip past — caller
+     * would otherwise allocate / accept absurd cap values. */
+    EXPECT(parse_size("99999999999999999999") == 0);
+    EXPECT(parse_size("99999999999999999999k") == 0);
+    /* Multiply-overflow guard: a value that fits in long but overflows
+     * after the suffix-mul must be rejected. LONG_MAX / 1024 + 1 with
+     * a 'k' suffix overflows. On 64-bit long, that's 9007199254740993k. */
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%ldk", LONG_MAX / 1024L + 1);
+    EXPECT(parse_size(buf) == 0);
+    snprintf(buf, sizeof(buf), "%ldm", LONG_MAX / (1024L * 1024L) + 1);
+    EXPECT(parse_size(buf) == 0);
+}
+
+static void test_parse_duration_plain_seconds(void)
+{
+    /* No suffix: number is interpreted as seconds, returned as ms. */
+    EXPECT(parse_duration_ms("0") == 0);
+    EXPECT(parse_duration_ms("30") == 30000);
+    EXPECT(parse_duration_ms("600") == 600000);
+}
+
+static void test_parse_duration_with_suffix(void)
+{
+    EXPECT(parse_duration_ms("30s") == 30000);
+    EXPECT(parse_duration_ms("30S") == 30000);
+    EXPECT(parse_duration_ms("5m") == 300000);
+    EXPECT(parse_duration_ms("5M") == 300000);
+    EXPECT(parse_duration_ms("2h") == 7200000);
+    EXPECT(parse_duration_ms("2H") == 7200000);
+    /* `ms` must beat bare `m` so "250ms" isn't parsed as 250min + 's'. */
+    EXPECT(parse_duration_ms("250ms") == 250);
+    EXPECT(parse_duration_ms("250MS") == 250);
+}
+
+static void test_parse_duration_whitespace(void)
+{
+    EXPECT(parse_duration_ms("5 m") == 300000);
+    EXPECT(parse_duration_ms("2h ") == 7200000);
+    EXPECT(parse_duration_ms("100 ms") == 100);
+}
+
+static void test_parse_duration_invalid(void)
+{
+    EXPECT(parse_duration_ms(NULL) == -1);
+    EXPECT(parse_duration_ms("") == -1);
+    EXPECT(parse_duration_ms("abc") == -1);
+    EXPECT(parse_duration_ms("5d") == -1);    /* days not supported */
+    EXPECT(parse_duration_ms("-5") == -1);    /* negative rejected */
+    EXPECT(parse_duration_ms("5 m x") == -1); /* trailing garbage */
+    EXPECT(parse_duration_ms("5mm") == -1);
+    EXPECT(parse_duration_ms("5msx") == -1); /* trailing after ms */
+    /* strtol clamps to LONG_MAX with ERANGE; the ms suffix has mul==1
+     * and would otherwise bypass the overflow guard. */
+    EXPECT(parse_duration_ms("99999999999999999999ms") == -1);
+    EXPECT(parse_duration_ms("99999999999999999999") == -1);
+}
+
 int main(void)
 {
     test_load_validation();
@@ -2138,5 +2239,15 @@ int main(void)
     test_preset_save_refuses_bad_presets_container();
     test_persist_into_empty_file();
     config_free();
+
+    test_parse_size_basic();
+    test_parse_token_count_is_decimal();
+    test_parse_size_invalid_returns_zero();
+    test_parse_size_rejects_overflow();
+    test_parse_duration_plain_seconds();
+    test_parse_duration_with_suffix();
+    test_parse_duration_whitespace();
+    test_parse_duration_invalid();
+
     T_REPORT();
 }

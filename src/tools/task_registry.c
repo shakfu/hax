@@ -14,11 +14,13 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include "buf.h"
 #include "config.h"
 #include "tool.h"
 #include "util.h"
 #include "system/bg_job.h"
 #include "system/cancel.h"
+#include "system/fs.h"
 #include "text/utf8_sanitize.h"
 #include "text/width.h"
 #include "tools/bash_output.h"

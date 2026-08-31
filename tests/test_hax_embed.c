@@ -3,10 +3,10 @@
 
 #include "agent_core.h"
 #include "agent_loop.h"
+#include "diag.h"
 #include "harness.h"
 #include "hax_embed.h"
 #include "provider.h"
-#include "util.h"
 
 static int diag_calls;
 

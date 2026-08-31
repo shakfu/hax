@@ -56,7 +56,19 @@ size_t config_object_keys(const char *key, char ***out);
 int config_int(const char *key);
 int config_bool(const char *key);
 long config_size(const char *key);
+long config_tokens(const char *key);
 long config_duration_ms(const char *key);
+
+/* Parsers for setting values, shared by the typed lookups and callers that hold an already-resolved
+ * string. */
+/* Parse positive byte counts with optional case-insensitive k/m binary suffixes; invalid input
+ * yields 0. */
+long parse_size(const char *str);
+/* Parse positive token counts: same grammar, decimal suffixes (k = 1000, m = 1000000). */
+long parse_token_count(const char *str);
+/* Parse a non-negative duration with an optional ms/s/m/h suffix and return milliseconds. A missing
+ * suffix means seconds. Returns -1 for invalid input. */
+long parse_duration_ms(const char *str);
 
 /* Parse a boolean setting, using `default_value` when it is unset or invalid. */
 int config_bool_or(const char *key, int default_value);
@@ -153,7 +165,8 @@ size_t config_preset_names(char ***out);
 enum config_kind {
     CONFIG_KIND_STRING = 0,
     CONFIG_KIND_INT,
-    CONFIG_KIND_SIZE,
+    CONFIG_KIND_SIZE,   /* bytes; binary k/m suffixes */
+    CONFIG_KIND_TOKENS, /* token counts; decimal k/m suffixes */
     CONFIG_KIND_DURATION,
 };
 

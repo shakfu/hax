@@ -192,7 +192,7 @@ void cancel_clear_requests(void);
 /* --- config.h --- */
 void config_set_override(const char *key, const char *value);
 
-/* --- util.h --- */
+/* --- diag.h --- */
 enum hax_diag_level { HAX_DIAG_ERR, HAX_DIAG_WARN };
 
 /* --- hax_embed.h --- */
@@ -245,6 +245,7 @@ def configure() -> None:
         #include "agent_tool.h"
         #include "compact.h"
         #include "config.h"
+        #include "diag.h"
         #include "hax_embed.h"
         #include "provider.h"
         #include "system/cancel.h"

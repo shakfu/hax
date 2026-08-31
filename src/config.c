@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <jansson.h>
 #include <libgen.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "diag.h"
 #include "provider.h"
 #include "util.h"
 #include "system/fs.h"
@@ -61,7 +63,7 @@ static const struct config_setting REGISTRY[] = {
      .choices = CONFIG_CHOICES_TRISTATE, .editable = 1},
     {.key = "context_limit", .env_var = "HAX_CONTEXT_LIMIT",
      .description = "Manual context-window size for the % display; overrides auto-detect",
-     .kind = CONFIG_KIND_SIZE, .editable = 1},
+     .kind = CONFIG_KIND_TOKENS, .editable = 1},
     {.key = "display_width", .env_var = "HAX_DISPLAY_WIDTH", .default_value = "auto",
      .description = "Content width: auto uses full width through 110 columns and 100 beyond that; "
                     "terminal always uses full width; a number sets an exact width",
@@ -653,6 +655,87 @@ static int value_in_bounds(const struct config_setting *setting, long value)
     return 1;
 }
 
+static long parse_scaled(const char *str, long kilo)
+{
+    if (!str || !*str)
+        return 0;
+
+    char *end;
+    errno = 0;
+    long value = strtol(str, &end, 10);
+    if (end == str || value <= 0 || errno == ERANGE)
+        return 0;
+    while (*end == ' ' || *end == '\t')
+        end++;
+
+    long multiplier = 1;
+    switch (*end) {
+    case 'k':
+    case 'K':
+        multiplier = kilo;
+        end++;
+        break;
+    case 'm':
+    case 'M':
+        multiplier = kilo * kilo;
+        end++;
+        break;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0' || value > LONG_MAX / multiplier)
+        return 0;
+    return value * multiplier;
+}
+
+long parse_size(const char *str)
+{
+    return parse_scaled(str, 1024L);
+}
+
+long parse_token_count(const char *str)
+{
+    return parse_scaled(str, 1000L);
+}
+
+long parse_duration_ms(const char *str)
+{
+    if (!str || !*str)
+        return -1;
+
+    char *end;
+    errno = 0;
+    long value = strtol(str, &end, 10);
+    if (end == str || value < 0 || errno == ERANGE)
+        return -1;
+    while (*end == ' ' || *end == '\t')
+        end++;
+
+    long multiplier;
+    /* Match "ms" before "m". */
+    if ((end[0] == 'm' || end[0] == 'M') && (end[1] == 's' || end[1] == 'S')) {
+        multiplier = 1;
+        end += 2;
+    } else if (*end == '\0' || *end == 's' || *end == 'S') {
+        multiplier = 1000;
+        if (*end)
+            end++;
+    } else if (*end == 'm' || *end == 'M') {
+        multiplier = 60000;
+        end++;
+    } else if (*end == 'h' || *end == 'H') {
+        multiplier = 3600000;
+        end++;
+    } else {
+        return -1;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0' || (multiplier > 1 && value > LONG_MAX / multiplier))
+        return -1;
+    return value * multiplier;
+}
+
 int config_int(const char *key)
 {
     const struct config_setting *setting = find_setting(key);
@@ -786,6 +869,10 @@ static int kind_value_valid(const struct config_setting *setting, const char *va
         long parsed = parse_size(value);
         return parsed > 0 && value_in_bounds(setting, parsed);
     }
+    case CONFIG_KIND_TOKENS: {
+        long parsed = parse_token_count(value);
+        return parsed > 0 && value_in_bounds(setting, parsed);
+    }
     case CONFIG_KIND_DURATION: {
         long parsed = parse_duration_ms(value);
         return parsed >= 0 && value_in_bounds(setting, parsed);
@@ -851,7 +938,10 @@ static void kind_value_hint(const struct config_setting *setting, char *buffer, 
             snprintf(buffer, size, "a whole number");
         break;
     case CONFIG_KIND_SIZE:
-        snprintf(buffer, size, "a size like 64k or 1M");
+        snprintf(buffer, size, "a byte size like 64k or 1M (k = 1024)");
+        break;
+    case CONFIG_KIND_TOKENS:
+        snprintf(buffer, size, "a token count like 200k or 1M (k = 1000)");
         break;
     case CONFIG_KIND_DURATION:
         snprintf(buffer, size, "a duration like 2s or 500ms");
@@ -911,6 +1001,15 @@ long config_size(const char *key)
     if (value > 0 && value_in_bounds(setting, value))
         return value;
     return setting ? parse_size(setting->default_value) : 0;
+}
+
+long config_tokens(const char *key)
+{
+    const struct config_setting *setting = find_setting(key);
+    long value = parse_token_count(resolve(key, 1));
+    if (value > 0 && value_in_bounds(setting, value))
+        return value;
+    return setting ? parse_token_count(setting->default_value) : 0;
 }
 
 long config_duration_ms(const char *key)
