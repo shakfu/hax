@@ -250,7 +250,6 @@ def configure() -> None:
         #include "provider.h"
         #include "system/cancel.h"
         #include "tool.h"
-        #include "util.h"
         #include <stdlib.h>
         """,
     )

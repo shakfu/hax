@@ -14,10 +14,11 @@
 #include "buf.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
 #include "text/base64.h"
+#include "text/shell_quote.h"
 #include "text/utf8_sanitize.h"
 #include "tools/image_sniff.h"
 #include "tools/output_cap.h"
@@ -291,7 +292,7 @@ static char *read_image(const char *path, size_t file_size, struct tool_run_ctx 
 
     size_t image_len = 0;
     int truncated = 0;
-    char *data = slurp_file_capped(path, READ_IMAGE_MAX_BYTES, &image_len, &truncated);
+    char *data = fs_read_file_capped(path, READ_IMAGE_MAX_BYTES, &image_len, &truncated);
     if (!data || truncated) {
         free(data);
         return xasprintf("error reading %s: file changed while reading", path);

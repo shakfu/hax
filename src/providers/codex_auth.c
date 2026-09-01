@@ -7,7 +7,7 @@
 
 #include "cred_store.h"
 #include "diag.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/codex_login.h"
 #include "providers/http_provider.h"
 #include "system/fs.h"
@@ -122,7 +122,7 @@ enum codex_auth_status codex_auth_from_store_entry(const json_t *entry, struct c
 static enum codex_auth_status load_codex_cli(struct codex_auth *auth, char **detail)
 {
     char *path = path_expand_home(CODEX_CLI_AUTH_PATH);
-    char *contents = slurp_file(path, NULL);
+    char *contents = fs_read_file(path, NULL);
     if (!contents) {
         if (detail)
             *detail = path;

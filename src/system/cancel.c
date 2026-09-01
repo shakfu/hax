@@ -6,9 +6,14 @@
 static atomic_int pause_requested;
 static atomic_int abort_requested;
 
+int cancel_request_pause_once(void)
+{
+    return atomic_exchange(&pause_requested, 1);
+}
+
 void cancel_request_pause(void)
 {
-    if (atomic_exchange(&pause_requested, 1))
+    if (cancel_request_pause_once())
         atomic_store(&abort_requested, 1);
 }
 

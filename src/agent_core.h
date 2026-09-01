@@ -25,6 +25,7 @@ struct hax_opts {
     int raw;                   /* send only user content and advertise no tools */
     const char *resume_path;   /* borrowed session path; NULL starts a new session */
     int provider_autoselected; /* show the one-shot provider-selection banner */
+    int json;                  /* one-shot: stream conversation records as JSONL on stdout */
 };
 
 const struct tool *agent_find_tool(const char *name);
@@ -112,6 +113,23 @@ void agent_session_add_turn_usage(struct agent_session *session, const struct pr
 
 /* Add an interrupt marker unless the latest content is an already-marked tool result. */
 void agent_session_mark_interrupt(struct agent_session *session);
+
+/* How a continuation without new user input speaks for the recorded tail. */
+enum agent_resume_tail {
+    AGENT_RESUME_TAIL_EMPTY,  /* no conversation to continue */
+    AGENT_RESUME_TAIL_MARKED, /* abort repair stamped the tail: append a continuation message */
+    AGENT_RESUME_TAIL_USER,   /* unanswered user message: re-send history as recorded */
+    AGENT_RESUME_TAIL_CLEAN,  /* finished seam: continue it verbatim, owing a turn boundary */
+};
+
+enum agent_resume_tail agent_session_resume_tail(const struct agent_session *session);
+
+/* Context-window size of the newest request a usage footer records in the model-visible
+ * context, or -1 when none reports it. This is the recorded counterpart of a live run's
+ * latest-usage snapshot, for continuation decisions such as compact-before-send; compaction's
+ * own accounting, which describes the summarized request rather than the fresh seed's window,
+ * is ignored. */
+long agent_session_last_context_tokens(const struct agent_session *session);
 
 struct turn;
 

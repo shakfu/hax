@@ -1,7 +1,7 @@
 # Each entry is just the test's source path; everything else is derived. The
 # registered test name is the path with the `test_` prefix and `.c` suffix
 # stripped, keeping the subdirectory (so `tools/test_read.c` -> `tools/read`,
-# `transport/test_sse.c` -> `transport/sse`, top-level `test_util.c` -> `util`).
+# `transport/test_sse.c` -> `transport/sse`, top-level `test_buf.c` -> `buf`).
 # That makes this list a direct mirror of the `sources` list in the top-level
 # meson.build — keep it grouped by subdirectory and sorted within each group.
 #
@@ -45,7 +45,7 @@ test_sources = [
     'test_trace.c',
     'test_transcript.c',
     'test_turn.c',
-    'test_util.c',
+    'test_xalloc.c',
 
     'providers/test_anthropic_body.c',
     'providers/test_anthropic_events.c',
@@ -83,11 +83,15 @@ test_sources = [
     'system/test_bg_job.c',
     'system/test_browser.c',
     'system/test_cancel.c',
+    'system/test_clock.c',
+    'system/test_fd.c',
     'system/test_fs.c',
     'system/test_git.c',
     'system/test_keepawake.c',
+    'system/test_locale.c',
     'system/test_os.c',
     'system/test_path.c',
+    'system/test_rand.c',
     'system/test_spawn.c',
     'system/test_tempfiles.c',
 
@@ -102,8 +106,10 @@ test_sources = [
 
     'text/test_base64.c',
     'text/test_diff.c',
+    'text/test_fmt.c',
     'text/test_sha256.c',
-    'text/test_urlencode.c',
+    'text/test_shell_quote.c',
+    'text/test_url.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
     'text/test_width.c',
@@ -145,6 +151,8 @@ endforeach
 # e2e/test_oneshot_text.py registers as e2e/oneshot_text, so the name prefix
 # selects the group (`meson test 'e2e/*'`).
 e2e_scenarios = [
+    'oneshot_json',
+    'oneshot_signal_interrupt',
     'oneshot_text',
     'oneshot_tool',
 ]

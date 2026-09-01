@@ -9,6 +9,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- A resumed one-shot run no longer requires a prompt: `hax --resume=ID -p` (or `--json`)
+  continues the conversation from where it stopped, including after an interrupt or pause.
+- `hax --json` (implies `-p`) streams the run as JSON lines on stdout for orchestrators and
+  scripts: the conversation records in the session-file schema as they are appended, closed by a
+  `result` record with the outcome, final text, cost, and session id. Plain `-p` output is
+  unchanged. The session-file format is now documented as a supported read surface. See
+  [docs/sessions.md](docs/sessions.md).
 - An embedding surface for programs that host hax rather than run it: `meson -Dembed=true` builds
   `libhax`, and `hax_init()` / `hax_shutdown()` let a caller keep its own locale, libcurl, and exit
   handling. Diagnostics can be routed to a callback instead of stderr. A Python binding over that
@@ -43,6 +50,14 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- One-shot runs now stop cleanly on signals instead of dying mid-flight. SIGINT/SIGTERM
+  interrupts like the REPL's double Esc — running tools are killed, completed work is saved,
+  `--json` still closes with a `result` record, exit status 130 — and a second signal kills the
+  process at once. SIGUSR1 pauses like a single Esc: work in flight finishes and the run stops
+  at the next turn boundary. See [docs/usage.md](docs/usage.md#cli-modes).
+- `max_turns` now also bounds one-shot runs, which previously stopped only at a built-in limit.
+  The default is now spelled `auto` (interactive unlimited, one-shot 100); `0` still means the
+  same.
 - Token counts are decimal everywhere, unlike byte sizes, which keep 1024-base suffixes. The
   stats line, `/session`, and the `/model` picker agree ("200k" for a 200000-token window rather
   than "195k"), and `context_limit` and catalog `limit` fields written with suffixes now parse
@@ -71,6 +86,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Interactively resuming an interrupted conversation (`--resume`, `-c`, `/resume`) now shows the
+  resume hint and accepts the empty-Enter continue, which previously worked only within the
+  interrupted process.
 - OpenCode Go usage-window limits now surface immediately instead of triggering retries that cannot
   succeed before the window resets.
 - Skill discovery now ignores descriptions from unterminated YAML frontmatter or unsupported block

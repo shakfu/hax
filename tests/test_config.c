@@ -10,7 +10,7 @@
 #include "config.h"
 #include "diag.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 
 /* Isolate resolution tests from the developer or CI environment. */
@@ -776,8 +776,12 @@ static void test_string_and_integer_value_validation(void)
     const struct config_setting *max_turns = config_setting_find("max_turns");
     EXPECT(max_turns && max_turns->kind == CONFIG_KIND_INT && max_turns->min == 0 &&
            max_turns->max == 0);
+    EXPECT_STR_EQ(max_turns->default_value, "auto");
+    EXPECT(config_value_valid(max_turns, "auto"));
+    EXPECT(config_value_valid(max_turns, "0"));
+    EXPECT(config_value_valid(max_turns, "25"));
     config_value_hint(max_turns, hint, sizeof(hint));
-    EXPECT_STR_EQ(hint, "a whole number");
+    EXPECT_STR_EQ(hint, "auto, or a whole number; e.g. 25");
 }
 
 static void test_bounded_and_scaled_value_validation(void)
@@ -1634,7 +1638,7 @@ static void test_preset_save_errors(void)
     EXPECT(config_preset_save("flat", &fresh, &err) == 0);
     EXPECT_STR_EQ(config_preset_model("flat"), "new");
     size_t len = 0;
-    char *written = slurp_file(cfgpath, &len);
+    char *written = fs_read_file(cfgpath, &len);
     EXPECT(written != NULL && strstr(written, "presets.flat") == NULL);
     free(written);
     config_load(NULL);
@@ -1704,7 +1708,7 @@ static void test_write_refuses_unusable_file(void)
     err = NULL;
     EXPECT(config_persist("model", "m") == -1);
     size_t len = 0;
-    char *still = slurp_file(cfgpath, &len);
+    char *still = fs_read_file(cfgpath, &len);
     EXPECT(still != NULL && strcmp(still, "{ this is not json") == 0);
     free(still);
 
@@ -2024,7 +2028,7 @@ static void test_preset_save_refuses_bad_presets_container(void)
         free(err);
         err = NULL;
         size_t len = 0;
-        char *still = slurp_file(cfgpath, &len);
+        char *still = fs_read_file(cfgpath, &len);
         EXPECT(still != NULL && strcmp(still, bad[i]) == 0);
         free(still);
     }

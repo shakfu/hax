@@ -8,7 +8,7 @@
 #include "buf.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
 #include "tools/output_cap.h"
@@ -118,7 +118,7 @@ static char *run(const char *args_json, struct tool_run_ctx *ctx)
 
     size_t original_len = 0;
     int truncated = 0;
-    original = slurp_file_capped(path, EDIT_READ_CAP, &original_len, &truncated);
+    original = fs_read_file_capped(path, EDIT_READ_CAP, &original_len, &truncated);
     if (!original) {
         result = xasprintf("error reading %s: %s", path, strerror(errno));
         goto out;

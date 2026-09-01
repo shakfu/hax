@@ -12,7 +12,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "tools/bash_process.h"
 #include "tools/task_helpers.h"
@@ -361,7 +361,7 @@ static void test_kill_grace_covers_redirected_cleanup(void)
     free(out);
     free(id);
 
-    char *content = slurp_file(path, NULL);
+    char *content = fs_read_file(path, NULL);
     EXPECT(content != NULL);
     if (content)
         EXPECT_STR_EQ(content, "bye\n");

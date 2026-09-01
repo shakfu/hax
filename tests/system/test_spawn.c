@@ -10,7 +10,8 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/locale.h"
 #include "system/spawn.h"
 
 static const char *tmpdir;
@@ -22,7 +23,7 @@ static const char *tmp_path(const char *name)
     return buf;
 }
 
-static char *slurp(const char *path)
+static char *read_file(const char *path)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
@@ -59,7 +60,7 @@ static void test_shell_executes_command(void)
     snprintf(shell_cmd, sizeof(shell_cmd), "echo hello > '%s'", path);
     int status = spawn_shell_wait(shell_cmd);
     EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    char *content = slurp(path);
+    char *content = read_file(path);
     EXPECT(content && strcmp(content, "hello\n") == 0);
     free(content);
 }
@@ -90,7 +91,7 @@ static void test_pipe_writes_to_child_stdin(void)
     fputs("hello from parent\n", pipe.stream);
     int status = spawn_pipe_close(&pipe);
     EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    char *content = slurp(path);
+    char *content = read_file(path);
     EXPECT(content && strcmp(content, "hello from parent\n") == 0);
     free(content);
 }
@@ -307,7 +308,7 @@ static void test_detached_runs_helper(void)
 
     char *content = NULL;
     for (int i = 0; i < 300 && !content; i++) {
-        content = slurp(out_path);
+        content = read_file(out_path);
         if (!content) {
             struct timespec pause_ts = {.tv_nsec = 10 * 1000 * 1000};
             nanosleep(&pause_ts, NULL);

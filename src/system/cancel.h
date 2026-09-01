@@ -13,6 +13,10 @@
  * path: the first press asks a turn to stop at a seam, the second gives up on the seam. */
 void cancel_request_pause(void);
 
+/* Latch a pause without escalating. Returns whether a pause was already latched. For producers
+ * whose repeat carries no extra meaning, such as the SIGUSR1 pause signal. */
+int cancel_request_pause_once(void);
+
 /* Request an immediate abort, which also latches pause. */
 void cancel_request_abort(void);
 

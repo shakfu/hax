@@ -11,7 +11,8 @@
 #include "harness.h"
 #include "provider.h"
 #include "session.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/locale.h"
 #include "text/width.h"
 
 static void test_parse_selection_and_prompt_arguments(void)
@@ -89,6 +90,24 @@ static void test_parse_rejects_missing_values_and_interactive_prompt(void)
 
     char *interactive_prompt[] = {"hax", "hello", NULL};
     EXPECT(cli_parse(2, interactive_prompt, &options) == CLI_PARSE_ERROR);
+}
+
+static void test_parse_json_implies_print(void)
+{
+    struct cli_options options;
+    char *json_alone[] = {"hax", "--json", "hi", NULL};
+    EXPECT(cli_parse(3, json_alone, &options) == CLI_PARSE_OK);
+    EXPECT(options.agent_options.json == 1);
+    EXPECT(options.one_shot == 1);
+
+    char *json_with_print[] = {"hax", "-p", "--json", "hi", NULL};
+    EXPECT(cli_parse(4, json_with_print, &options) == CLI_PARSE_OK);
+    EXPECT(options.agent_options.json == 1);
+    EXPECT(options.one_shot == 1);
+
+    char *plain_oneshot[] = {"hax", "-p", "hi", NULL};
+    EXPECT(cli_parse(3, plain_oneshot, &options) == CLI_PARSE_OK);
+    EXPECT(options.agent_options.json == 0);
 }
 
 static void test_parse_version_prints_and_exits(void)
@@ -229,6 +248,23 @@ static void test_read_prompt_rejects_missing_or_empty_input(void)
     fclose(stream);
 }
 
+/* A resumed one-shot run treats a missing or empty prompt as "continue the conversation". */
+static void test_read_prompt_promptless_resume_continues(void)
+{
+    char *argv[] = {"hax", "--print", "--resume=abc123", NULL};
+    struct cli_options options;
+    EXPECT(cli_parse(3, argv, &options) == CLI_PARSE_OK);
+
+    char *prompt = NULL;
+    EXPECT(cli_read_prompt(&options, 3, argv, stdin, 1, &prompt) == 0);
+    EXPECT(prompt == NULL);
+
+    FILE *stream = prompt_stream("\n");
+    EXPECT(cli_read_prompt(&options, 3, argv, stream, 0, &prompt) == 0);
+    EXPECT(prompt == NULL);
+    fclose(stream);
+}
+
 static void test_resolve_missing_session(void)
 {
     setenv("XDG_STATE_HOME", t_tempdir(), 1);
@@ -350,10 +386,12 @@ int main(void)
     test_parse_resume_modes();
     test_parse_rejects_incompatible_resume_options();
     test_parse_rejects_missing_values_and_interactive_prompt();
+    test_parse_json_implies_print();
     test_parse_version_prints_and_exits();
     test_help_wraps_to_display_width();
     test_read_prompt_from_stream();
     test_read_prompt_rejects_missing_or_empty_input();
+    test_read_prompt_promptless_resume_continues();
     test_resolve_missing_session();
     test_resolve_session_by_latest_id_and_prefix();
     test_subagent_depth_validation();

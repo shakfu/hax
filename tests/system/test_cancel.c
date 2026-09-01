@@ -26,6 +26,15 @@ static void test_repeated_pause_request_escalates(void)
     EXPECT(cancel_abort_requested());
 }
 
+static void test_repeated_pause_once_does_not_escalate(void)
+{
+    cancel_clear_requests();
+    cancel_request_pause_once();
+    cancel_request_pause_once();
+    EXPECT(cancel_pause_requested());
+    EXPECT(!cancel_abort_requested());
+}
+
 static void test_abort_implies_pause(void)
 {
     cancel_clear_requests();
@@ -52,6 +61,7 @@ int main(void)
     test_starts_clear();
     test_first_pause_request_does_not_abort();
     test_repeated_pause_request_escalates();
+    test_repeated_pause_once_does_not_escalate();
     test_abort_implies_pause();
     test_requests_stay_latched();
     T_REPORT();

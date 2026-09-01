@@ -6,7 +6,7 @@
 
 #include "diag.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 
 static void test_diag_sequence(void)
@@ -105,7 +105,7 @@ static void test_clearing_diag_sink_restores_stderr(void)
     close(saved);
     clearerr(stderr);
 
-    char *written = slurp_file(path, NULL);
+    char *written = fs_read_file(path, NULL);
     EXPECT(capture.calls == 0);
     EXPECT(written != NULL);
     if (written)

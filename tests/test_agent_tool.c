@@ -6,7 +6,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "tool.h"
-#include "util.h"
+#include "xalloc.h"
 
 static char *last_args;
 static int preprocess_calls;
@@ -81,6 +81,18 @@ static void test_preprocess_run_and_result(void)
     free(output);
     item_free(&result);
     agent_tool_call_destroy(&tc);
+    item_free(&call);
+}
+
+static void test_result_make_interrupted_provenance(void)
+{
+    struct item call = make_call("read", "{}");
+    struct tool_run_ctx ctx = {.interrupted = 1};
+
+    struct item result = agent_tool_result_make(&call, "partial\n[interrupted]", &ctx);
+    EXPECT(result.origin == ITEM_ORIGIN_INTERRUPTED);
+
+    item_free(&result);
     item_free(&call);
 }
 
@@ -222,6 +234,7 @@ static void test_image_budget_ignores_plain_result(void)
 int main(void)
 {
     test_preprocess_run_and_result();
+    test_result_make_interrupted_provenance();
     test_unknown_tool();
     test_unmodified_args();
     test_result_moves_run_context();

@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "util.h"
+#include "xalloc.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 

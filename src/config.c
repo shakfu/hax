@@ -15,9 +15,10 @@
 
 #include "diag.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
+#include "text/fmt.h"
 #include "text/utf8_sanitize.h"
 
 /* Canonical keys, env bindings, defaults, and /config metadata. Row order is
@@ -92,10 +93,10 @@ static const struct config_setting REGISTRY[] = {
     {.key = "compact.threshold", .env_var = "HAX_COMPACT_THRESHOLD", .default_value = "85",
      .description = "Auto-compact when context usage reaches this percent of the window",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 100, .editable = 1},
-    {.key = "max_turns", .env_var = "HAX_MAX_TURNS",
-     .description = "Interactive: pause for confirmation after this many model round-trips per "
-                    "user turn",
-     .kind = CONFIG_KIND_INT, .editable = 1},
+    {.key = "max_turns", .env_var = "HAX_MAX_TURNS", .default_value = "auto",
+     .description = "Model round-trips per user turn: interactive then pauses for confirmation, "
+                    "one-shot aborts; auto is unlimited interactively and 100 in one-shot",
+     .choices = "auto", .example = "25", .kind = CONFIG_KIND_INT, .editable = 1},
 
     /* model catalog */
     {.key = "catalog.url", .env_var = "HAX_CATALOG_URL",
@@ -384,7 +385,7 @@ static int load_tier_file(json_t **tier, char *path, const char *label)
     int unusable = 0;
     int truncated;
     errno = 0;
-    char *text = slurp_file_capped(path, CONFIG_MAX_BYTES, NULL, &truncated);
+    char *text = fs_read_file_capped(path, CONFIG_MAX_BYTES, NULL, &truncated);
     if (text) {
         if (truncated) {
             hax_warn("ignoring %s at %s: larger than the 1 MiB limit", label, path);
@@ -833,7 +834,7 @@ char *config_prompt_expand(const char *value, char **error)
 
     size_t len = 0;
     int truncated = 0;
-    char *content = slurp_file_capped(path, PROMPT_FILE_CAP, &len, &truncated);
+    char *content = fs_read_file_capped(path, PROMPT_FILE_CAP, &len, &truncated);
     if (!content) {
         if (error)
             *error = xasprintf("couldn't read prompt file %s", path);

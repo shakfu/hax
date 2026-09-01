@@ -10,11 +10,12 @@
 #include <sys/wait.h> // IWYU pragma: keep
 
 #include "diag.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
 #include "system/spawn.h"
 #include "terminal/input_core.h"
+#include "text/shell_quote.h"
 
 /* NUL records preserve non-ASCII paths that git line mode would quote and filenames containing
  * newlines. Keep candidates streaming: fzf reads stdin asynchronously while using /dev/tty. */
@@ -195,7 +196,7 @@ char *file_mention_pick(const char *query_text)
 
     /* The selection may refer to a stale git entry or a file deleted while fzf was open. */
     char *expanded_path = path_expand_home(path);
-    if (ensure_regular_file(expanded_path) != 0) {
+    if (fs_check_regular(expanded_path) != 0) {
         hax_warn("cannot mention '%s': %s", path, strerror(errno));
         free(expanded_path);
         free(path);

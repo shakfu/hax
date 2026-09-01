@@ -13,7 +13,7 @@
 #include "effort.h"
 #include "model_meta.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/anthropic_body.h"
 #include "providers/anthropic_models.h"
 #include "providers/chat_body.h"
@@ -22,7 +22,8 @@
 #include "providers/registry.h"
 #include "providers/stream_retry.h"
 #include "providers/wire.h"
-#include "system/path.h"
+#include "system/rand.h"
+#include "text/url.h"
 #include "transport/http.h"
 
 #define MESSAGES_DEFAULT_VERSION    "2023-06-01"
@@ -593,7 +594,7 @@ static char *def_base_url(const struct provider_def *def)
                 base = expanded;
         }
     }
-    char *trimmed = base ? dup_trim_trailing_slash(base) : NULL;
+    char *trimmed = base ? url_trim_trailing_slashes(base) : NULL;
     free(expanded);
     return trimmed;
 }
