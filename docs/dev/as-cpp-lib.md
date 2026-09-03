@@ -28,16 +28,17 @@ alone is not sufficient and produced a materially wrong list on the first pass. 
 mutable statics are declared inside functions, and three of the races actually observed come from
 those. Both forms have to be enumerated.
 
-**Confirmed hazards, ordered by what the race detector actually reported.** Sites marked
-"observed" produced a TSan report under two or four concurrent agents; the rest are structural.
+**Confirmed hazards, and what happened to them.** Sites marked "observed" produced a TSan report
+under concurrent agents; "fixed" means the race gate in `tests/test_multi_agent.c` now runs clean
+over them.
 
 | Location | State | Status |
 | --- | --- | --- |
-| `tools/bash_env.c` | `selection_env`, `selection_count`, `assignment[64]` | **observed** — 8 distinct race sites, the most of any file |
-| `system/keepawake.c` | `helper_pid`, `supported` | **observed** — on the core path, from `agent_loop_run` |
-| `tools/bash_process.c` | `shell_pgids` | **observed** — `bash_shell_pgid_publish` |
-| `providers/provider_config.c` | `id[37]` | **observed** — and semantically shared, see below |
-| `src/config.c` | `store` | **observed** at `config_preset_names` only; 74 core-path call sites |
+| `tools/bash_env.c` | `selection_env`, `selection_count`, `assignment[64]` | **fixed** — was 8 race sites *and* a double-free crash |
+| `system/keepawake.c` | `helper_pid`, `supported` | **fixed** — `helper_lock` serializes the handle |
+| `tools/bash_process.c` | `shell_pgids` | **fixed** — no longer reached concurrently once the selection moved |
+| `providers/provider_config.c` | `id[37]` | latent; returns a shared static, semantically shared |
+| `src/config.c` | `store` | out of contract to touch off-thread; 74 core-path call sites |
 | `tools/task_registry.c` | `tasks`, `next_task_number` | structural; not exercised |
 | `providers/registry.c` | `defs`, `count`, `built` | structural lazy singleton |
 | `src/hax_embed.c` | `initialized` | the refusal itself |
@@ -74,14 +75,13 @@ model picker. That is the shape of a global that does not reenter.
 Ordered by what the measurement showed actually matters, which is not the order this document
 first proposed:
 
-1. **`tools/bash_env.c` and `tools/bash_process.c` first.** Together they produced nine of the
-   eleven distinct racing locations. `bash_env`'s selection globals and returned static buffer
-   move onto the agent; the pgid publish path takes a lock.
-2. **Fix the two returned-static-buffer functions.** `subagent_depth_assignment()` and
-   `provider_process_session_id()` should write into caller-supplied storage. These are latent
-   bugs on their own merits, independent of multi-agent support.
-3. **`system/keepawake.c` becomes refcounted or per-agent.** It sits directly on the core path at
-   `agent_loop_run`, and two agents currently fight over one inhibitor helper process.
+1. ~~**`tools/bash_env.c` and `tools/bash_process.c` first.**~~ **Done.** The selection moved onto
+   `agent_session` and travels through `tool_run_ctx`; this also removed the double-free crash.
+2. **Fix the remaining returned-static-buffer function.** `subagent_depth_assignment()` is done
+   (a `pthread_once` fill of genuinely process-wide state). `provider_process_session_id()` still
+   returns a shared `static char id[37]`, and is a latent bug on its own merits.
+3. ~~**`system/keepawake.c`.**~~ **Done.** A mutex, not a refcount: the header documents acquire
+   and release as idempotent, and refcounting would have changed that contract and its test.
 4. **Config becomes a handle.** Introduce `config_str_in(cfg, key)` and make `config_str(key)` a
    thin wrapper over a default instance. This is the largest mechanical change but, per the
    measurement, the *least* urgent: the read path resolves at construction and did not race.
@@ -130,9 +130,35 @@ The per-agent config pattern already exists in-tree: `providers/mock.c:634` read
 the override between two constructions gave two agents two different scripts. That is the shape
 the config-handle refactor should generalize, and it is why the config read path did not race.
 
-**What breaks:** TSan reported 3 races with two agents and 26 races across 11 distinct locations
-with four concurrently-constructed agents. Every one is a global; none is in conversation state.
-They are itemized in the table above.
+**What broke, and the fix.** Landing the spike as `tests/test_multi_agent.c` immediately found
+something the sanitizer-free spike had missed: the test **aborted in 11 of 30 runs** on a plain
+build, with `free(): double free detected in tcache 2` in `bash_env_set_selection()` — reached
+from `export_selection()` inside `agent_session_init()` itself. Two agents initializing sessions
+both freed the same `selection_env[]` entries. `bash_env.h` had documented the assumption all
+along ("Called only on the dispatch thread"); multi-agent simply violated it.
+
+The selection is per-agent state, so it moved onto the session: `struct bash_env_selection` is
+owned by `agent_session`, borrowed through a new `tool_run_ctx.env_selection`, and handed to
+`bash_build_child_env()` by the bash tool. The subagent depth string stayed process-wide — how
+deeply *this process* is nested is not an agent's property — but its lazy fill is now a
+`pthread_once`. `keepawake` kept its idempotent acquire/release contract and took a mutex rather
+than a refcount, so its documented semantics and its existing test are unchanged.
+
+Results after the fix, all three build configurations at 121/121:
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Crash rate, plain build | 11 / 30 runs | 0 / 40 runs |
+| Distinct TSan race locations | 11 | 0 |
+| ASan + UBSan | not run | clean |
+
+**One contract clarification came out of it.** The spike had constructed sessions on worker
+threads, which raced `config_preset_names`. AGENTS.md is explicit that config and live provider
+state are foreground state — "resolve config and prepare owned worker inputs before spawning
+background work" — so concurrent *construction* asks for a guarantee the architecture does not
+offer, and the test was corrected to build on the calling thread. Concurrent *running* of
+already-built sessions is the supported shape, and that race disappeared with it. This is worth
+knowing before any binding exposes an agent constructor to a thread pool.
 
 **One semantic bug the race detector would not have caught:** all four agents reported the same
 `provider_process_session_id()` — `04c4f224-…` — because it is a process-wide lazy singleton.
@@ -140,8 +166,9 @@ Provider affinity keys on that id, so N agents in one process would share affini
 `6b9954c` ("Key provider affinity by conversation") already moves in the right direction here.
 
 The cost of this experiment is itself evidence for the recommendation at the end of this document:
-one spike, 126 lines, a few hours including two sanitizer builds, and it produced a corrected
-blocker list and two real bug findings without touching the production tree.
+one spike, a few hours including three sanitizer builds, and it produced a corrected blocker list,
+a crash that no amount of reading would have found, and a fix — before any decision about C++ was
+needed.
 
 ## What the rewrite would cost
 

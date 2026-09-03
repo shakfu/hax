@@ -249,7 +249,8 @@ static struct item loop_run_tool(const struct agent_loop_params *params, const s
     } else {
         struct agent_tool_call prepared;
         agent_tool_call_init(&prepared, call);
-        struct tool_run_ctx run_ctx = {.image_input = image_input};
+        struct tool_run_ctx run_ctx = {.image_input = image_input,
+                                       .env_selection = &params->session->env_selection};
         char *output = agent_tool_call_run(&prepared, &run_ctx);
         result = agent_tool_result_make(call, output, &run_ctx);
         free(output);

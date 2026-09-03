@@ -9,9 +9,13 @@ typedef void (*tool_display_fn)(const char *bytes, size_t n, void *data);
 
 /* Per-call channels for tool execution. NULL and zero-initialized contexts disable display and
  * image attachment. Ownership of result_images transfers to the caller after run returns. */
+struct bash_env_selection;
+
 struct tool_run_ctx {
     tool_display_fn display;
     void *display_data;
+    /* Borrowed from the running agent's session; NULL exports no provider selection. */
+    const struct bash_env_selection *env_selection;
     /* Same tri-state convention as context.image_input; zero means unsupported. */
     int image_input;
     struct item_image *result_images; /* owned array of owned members */

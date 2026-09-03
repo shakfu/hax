@@ -44,6 +44,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- `libhax` hosts can now build and run several `agent_session`s concurrently under one
+  `hax_init()`. Two sessions initializing at once previously double-freed the shared provider
+  selection that child processes inherit; that selection is now owned per session and reaches the
+  bash tool through the tool run context. Idle-sleep inhibition is serialized as well. See
+  [docs/embedding.md](docs/embedding.md).
 - Host tools registered through the Python binding's `@agent.tool` are now advertised to the
   provider, not only dispatched. Previously the decorator recorded a function to run when a call
   arrived but never told the model the tool existed, so a live model could call one only when the

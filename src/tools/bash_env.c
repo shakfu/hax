@@ -1,15 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 #include "tools/bash_env.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "xalloc.h"
 #include "text/fmt.h"
-
-static char *selection_env[4];
-static size_t selection_count;
 
 struct env_override {
     const char *name;
@@ -47,17 +45,25 @@ static const struct env_override FIXED_OVERRIDES[] = {
     {"HAX_TRANSCRIPT", "HAX_TRANSCRIPT="},
 };
 
-void bash_env_set_selection(const char *provider, const char *model, const char *effort)
+void bash_env_selection_free(struct bash_env_selection *selection)
 {
-    for (size_t i = 0; i < selection_count; i++)
-        free(selection_env[i]);
-    selection_count = 0;
+    for (size_t i = 0; i < selection->count; i++) {
+        free(selection->entries[i]);
+        selection->entries[i] = NULL;
+    }
+    selection->count = 0;
+}
+
+void bash_env_selection_set(struct bash_env_selection *selection, const char *provider,
+                            const char *model, const char *effort)
+{
+    bash_env_selection_free(selection);
     if (!provider || !*provider)
         return;
-    selection_env[selection_count++] = xasprintf("HAX_PROVIDER=%s", provider);
-    selection_env[selection_count++] = xasprintf("HAX_MODEL=%s", model ? model : "");
-    selection_env[selection_count++] = xasprintf("HAX_EFFORT=%s", effort ? effort : "");
-    selection_env[selection_count++] = xstrdup("HAX_PRESET=");
+    selection->entries[selection->count++] = xasprintf("HAX_PROVIDER=%s", provider);
+    selection->entries[selection->count++] = xasprintf("HAX_MODEL=%s", model ? model : "");
+    selection->entries[selection->count++] = xasprintf("HAX_EFFORT=%s", effort ? effort : "");
+    selection->entries[selection->count++] = xstrdup("HAX_PRESET=");
 }
 
 static int entry_has_name(const char *entry, const char *name)
@@ -81,23 +87,30 @@ static int entry_is_overridden(const char *entry, const char *const *dynamic, si
     return 0;
 }
 
-static const char *subagent_depth_assignment(void)
-{
-    static char assignment[64];
+static char depth_assignment[64];
 
-    if (!assignment[0]) {
-        const char *value = getenv("HAX_SUBAGENT_DEPTH");
-        int depth = 0;
-        /* Malformed inherited depth must fail closed at the recursion cap. */
-        if (value && *value && (!parse_int(value, &depth) || depth < 0))
-            depth = HAX_SUBAGENT_MAX_DEPTH;
-        int child_depth = depth >= HAX_SUBAGENT_MAX_DEPTH ? depth : depth + 1;
-        snprintf(assignment, sizeof(assignment), "HAX_SUBAGENT_DEPTH=%d", child_depth);
-    }
-    return assignment;
+static void init_depth_assignment(void)
+{
+    const char *value = getenv("HAX_SUBAGENT_DEPTH");
+    int depth = 0;
+    /* Malformed inherited depth must fail closed at the recursion cap. */
+    if (value && *value && (!parse_int(value, &depth) || depth < 0))
+        depth = HAX_SUBAGENT_MAX_DEPTH;
+    int child_depth = depth >= HAX_SUBAGENT_MAX_DEPTH ? depth : depth + 1;
+    snprintf(depth_assignment, sizeof(depth_assignment), "HAX_SUBAGENT_DEPTH=%d", child_depth);
 }
 
-char **bash_build_child_env(void)
+/* How deeply this process is nested is a property of the process, not of an agent, so one
+ * string serves every caller. It is derived from the environment we started with and never
+ * changes; pthread_once keeps concurrent agents from racing the lazy fill. */
+static const char *subagent_depth_assignment(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, init_depth_assignment);
+    return depth_assignment;
+}
+
+char **bash_build_child_env(const struct bash_env_selection *selection)
 {
     extern char **environ;
 
@@ -105,10 +118,11 @@ char **bash_build_child_env(void)
     while (environ[inherited_count])
         inherited_count++;
 
+    size_t selection_count = selection ? selection->count : 0;
     size_t dynamic_count = selection_count + 1;
     const char **dynamic = xmalloc(dynamic_count * sizeof(*dynamic));
     for (size_t i = 0; i < selection_count; i++)
-        dynamic[i] = selection_env[i];
+        dynamic[i] = selection->entries[i];
     dynamic[selection_count] = subagent_depth_assignment();
 
     size_t fixed_count = sizeof(FIXED_OVERRIDES) / sizeof(FIXED_OVERRIDES[0]);
