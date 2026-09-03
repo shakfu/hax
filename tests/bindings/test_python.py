@@ -191,6 +191,32 @@ def test_builtin_tool_still_runs() -> None:
         expect(marker.read_text() == "marker42\n", "built-in tool produced the scripted content")
 
 
+def test_builtin_tool_inherits_the_provider_selection() -> None:
+    """A dispatched built-in must receive this session's selection, not a process-wide one.
+
+    The selection moved onto agent_session and travels through tool_run_ctx, so a binding that
+    builds a run context without it silently stops exporting HAX_PROVIDER to subprocesses.
+    """
+    use_mock("tool_env.txt")
+    workdir = scratch / "work-env"
+    workdir.mkdir(exist_ok=True)
+    marker = workdir / "env.txt"
+    if marker.exists():
+        marker.unlink()
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        with hax.Agent(provider="mock", model="mock-model") as agent:
+            agent.send("go")
+    finally:
+        os.chdir(previous)
+    expect(marker.exists(), "the built-in bash tool ran")
+    if marker.exists():
+        recorded = marker.read_text().strip()
+        expect(recorded == "p=mock m=mock-model",
+               f"the child inherited this session's selection (got {recorded!r})")
+
+
 def test_host_exception_propagates_and_history_stays_paired() -> None:
     use_mock("python_tool.txt")
     with hax.Agent(provider="mock") as agent:
@@ -381,18 +407,64 @@ def test_failed_construction_releases_hax() -> None:
         expect(agent.model == "mock-model", "a later Agent still works after a failed one")
 
 
-def test_second_agent_is_refused() -> None:
+def test_several_agents_coexist() -> None:
+    """hax_init() is per process, an Agent is per session, so Agents nest and outlive each other."""
     use_mock("hello.txt")
-    with hax.Agent(provider="mock"):
-        refused = False
-        try:
-            hax.Agent(provider="mock")
-        except hax.HaxError:
-            refused = True
-        expect(refused, "a second Agent is refused while one is live")
-    # The guard releases on close, so a later Agent works.
-    with hax.Agent(provider="mock") as agent:
-        expect(agent.model == "mock-model", "an Agent can be created after the first closes")
+    with hax.Agent(provider="mock") as first:
+        with hax.Agent(provider="mock") as second:
+            expect(first.model == "mock-model", "the first agent is usable")
+            expect(second.model == "mock-model", "a second agent is usable alongside it")
+            expect(first._session != second._session, "each agent owns its own session")
+
+            first.send("hello to the first")
+            second.send("hello to the second")
+
+            first_text = " ".join(i["text"] or "" for i in first.items)
+            second_text = " ".join(i["text"] or "" for i in second.items)
+            expect("hello to the first" in first_text, "the first agent kept its own prompt")
+            expect("hello to the second" not in first_text, "and none of its sibling's")
+            expect("hello to the second" in second_text, "the second agent kept its own prompt")
+            expect("hello to the first" not in second_text, "and none of its sibling's")
+
+        # Closing one releases only its own session; the runtime stays up for the survivor.
+        expect(first.model == "mock-model", "the outer agent survives the inner one closing")
+        expect(first.send("still here") != "", "and still runs turns")
+
+    # The last close tears the runtime down, and a later Agent brings it back.
+    with hax.Agent(provider="mock") as later:
+        expect(later.model == "mock-model", "an Agent works again after the last one closed")
+
+
+def test_agents_run_concurrently() -> None:
+    """Turns run on separate threads: the loop releases the GIL and the state is per session."""
+    use_mock("hello.txt")
+    with hax.Agent(provider="mock") as first, hax.Agent(provider="mock") as second:
+        replies: dict[str, str] = {}
+        errors: list[BaseException] = []
+
+        def run(name: str, agent) -> None:
+            try:
+                replies[name] = agent.send(f"prompt for {name}")
+            except BaseException as exc:  # reported, not raised, off the main thread
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=run, args=("first", first)),
+            threading.Thread(target=run, args=("second", second)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        expect(not errors, f"neither concurrent turn raised ({errors})")
+        expect(replies.get("first") == "Hello from mock", "the first turn completed")
+        expect(replies.get("second") == "Hello from mock", "the second turn completed")
+        for name, agent in (("first", first), ("second", second)):
+            texts = " ".join(i["text"] or "" for i in agent.items)
+            expect(f"prompt for {name}" in texts, f"the {name} agent kept its own prompt")
+            other = "second" if name == "first" else "first"
+            expect(f"prompt for {other}" not in texts, f"and none of the {other} agent's")
 
 
 def test_unknown_provider_reports_a_diagnostic() -> None:
@@ -413,6 +485,7 @@ test_unannotated_and_novel_types_still_advertise()
 test_kwargs_tool_leaves_the_builtin_definition_alone()
 test_declared_shadow_replaces_the_builtin_definition()
 test_builtin_tool_still_runs()
+test_builtin_tool_inherits_the_provider_selection()
 test_host_exception_propagates_and_history_stays_paired()
 test_skipped_calls_carry_hax_markers()
 test_malformed_arguments_are_recoverable()
@@ -421,7 +494,8 @@ test_cancel_from_another_thread_stops_the_turn()
 test_context_is_compacted_when_it_crosses_the_threshold()
 test_failed_construction_releases_hax()
 test_database_example_enforces_read_only()
-test_second_agent_is_refused()
+test_several_agents_coexist()
+test_agents_run_concurrently()
 test_unknown_provider_reports_a_diagnostic()
 
 sys.exit(1 if failures else 0)

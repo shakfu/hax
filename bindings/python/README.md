@@ -110,8 +110,12 @@ One conversation against one provider. `provider` and `model` fall back to hax's
 when omitted. `record_session=True` writes a resumable session log, off by default so an embedded
 agent leaves nothing behind unless asked.
 
-Use it as a context manager, or call `close()`. Both release the provider and hax's process-wide
-state.
+Use it as a context manager, or call `close()`. Either releases this agent's session and provider;
+hax's process-wide state is torn down when the last live `Agent` closes.
+
+Several agents may exist at once, and their turns may run concurrently on separate threads —
+conversation state, tools, and the subprocess environment are per session. Construction is
+serialized internally, because hax resolves configuration into a session as it is built.
 
 ### `@agent.tool`
 
@@ -180,9 +184,13 @@ clean seam.
 
 ## Limits
 
-- **One agent per process.** hax keeps configuration, provider selection, and diagnostics in
-  process-wide state. Constructing a second `Agent` while one is live raises rather than letting
-  two silently share one configuration.
+- **One configuration per process.** Several agents can run at once, but hax keeps configuration,
+  provider selection, and diagnostics in process-wide state. Each agent copies what it needs as it
+  is constructed, so agents built with different providers or models keep those settings — but
+  anything hax re-reads from configuration later is shared, and `diagnostics` reports everything
+  recorded since that agent was built rather than only its own.
+- **`cancel()` is process-wide.** The cancel flags are latched per process, so with several agents
+  running a cancel stops whichever turns observe it, not only the one it was called on.
 - **No streaming API yet.** `send()` blocks until the turn completes, though `cancel()` can stop
   it. The underlying loop does expose a per-event hook; a callback API over it would be a small
   addition, a generator API a larger one.

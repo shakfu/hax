@@ -9,6 +9,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- The Python binding can hold several `hax.Agent`s at once, and run their turns concurrently on
+  separate threads. `hax_init()` is refcounted behind them, so it is one initialization per
+  process rather than one agent; constructing a second `Agent` used to raise. Configuration stays
+  process-wide, so each agent copies its provider and model as it is built and `cancel()` remains
+  process-wide. See [bindings/python/README.md](bindings/python/README.md).
 - A resumed one-shot run no longer requires a prompt: `hax --resume=ID -p` (or `--json`)
   continues the conversation from where it stopped, including after an interrupt or pause.
 - `hax --json` (implies `-p`) streams the run as JSON lines on stdout for orchestrators and

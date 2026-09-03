@@ -1,0 +1,12 @@
+# One bash tool call that records the provider selection the child inherited. Guards the
+# embedding path: the selection is owned by the session and reaches the tool through the run
+# context, so a binding that forgets to pass it exports nothing here.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/tool_env.txt build/hax -p go
+
+text Checking the environment
+tool bash {"command":"echo p=$HAX_PROVIDER m=$HAX_MODEL > env.txt"}
+end-turn
+
+text Done.
+end-turn

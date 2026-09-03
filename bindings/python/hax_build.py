@@ -69,8 +69,12 @@ struct tool_def {
 };
 
 /* --- tool.h --- */
+/* Opaque: the binding only forwards a session's selection to the tools it dispatches. */
+struct bash_env_selection { ...; };
+
 struct tool_run_ctx {
     int image_input;
+    const struct bash_env_selection *env_selection;
     ...;
 };
 
@@ -93,6 +97,7 @@ struct agent_session {
     char *system_prompt;
     struct tool_def *tools;
     size_t n_tools;
+    struct bash_env_selection env_selection;
     struct item *items;
     size_t n_items;
     ...;
