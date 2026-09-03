@@ -9,6 +9,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `bindings/python/example_async.py` drives several agents concurrently from asyncio and cancels
+  one of them mid-turn. No async API was needed: `send()` releases the GIL, so a thread executor
+  gives real concurrency, and `Agent.cancel()` maps onto task cancellation. The binding README
+  documents the pattern.
 - Cancellation can be scoped to one agent. `agent_loop_params.cancel` and `tool_run_ctx.cancel`
   select which `struct cancel_state` a run and its tools watch, and a NULL keeps the process-wide
   flags the terminal watcher and signal handlers write. `hax.Agent.cancel()` now stops only the

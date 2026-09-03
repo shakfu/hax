@@ -5,6 +5,7 @@ Registered only when -Dembed=true builds libhax and the cffi extension. Otherwis
 the e2e scenarios.
 """
 
+import asyncio
 import os
 import sys
 import threading
@@ -414,6 +415,62 @@ def test_cancel_stops_only_the_targeted_agent() -> None:
         expect(bool(target.send("still there?")), "the cancelled agent is usable again")
 
 
+async def _send_async(agent, prompt: str) -> str:
+    """The pattern bindings/python/example_async.py documents: task cancellation -> agent.cancel().
+
+    A thread cannot be interrupted from outside, so the executor future is shielded, hax is asked
+    to stop, and the turn unwinds through HaxCancelled.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(None, agent.send, prompt)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        agent.cancel()
+        try:
+            await future
+        except hax.HaxCancelled:
+            pass
+        raise
+
+
+def test_asyncio_runs_agents_concurrently() -> None:
+    """send() releases the GIL, so a thread executor is all asyncio needs — no async API required.
+
+    The mock stalls each turn for two seconds, so three of them overlapping have to finish in
+    well under the six a serial run would take.
+    """
+    use_mock("interrupt_stall.txt")
+
+    async def scenario() -> None:
+        with hax.Agent(provider="mock") as one, hax.Agent(provider="mock") as two, \
+             hax.Agent(provider="mock") as three:
+            started = time.monotonic()
+            replies = await asyncio.gather(
+                _send_async(one, "one"), _send_async(two, "two"), _send_async(three, "three")
+            )
+            elapsed = time.monotonic() - started
+            expect(all(replies), "every concurrent turn returned text")
+            expect(elapsed < 4.5, f"three 2s turns overlapped rather than serializing ({elapsed:.1f}s)")
+
+        # Cancelling one task stops one agent. Fresh agents: the script above is one turn long.
+        with hax.Agent(provider="mock") as target, hax.Agent(provider="mock") as bystander:
+            stopped = asyncio.create_task(_send_async(target, "cancel me"))
+            survivor = asyncio.create_task(_send_async(bystander, "let me finish"))
+            await asyncio.sleep(0.4)
+            stopped.cancel()
+
+            cancelled = False
+            try:
+                await stopped
+            except asyncio.CancelledError:
+                cancelled = True
+            expect(cancelled, "cancelling the task cancelled that agent's turn")
+            expect(bool(await survivor), "its sibling's turn completed")
+
+    asyncio.run(scenario())
+
+
 def test_context_is_compacted_when_it_crosses_the_threshold() -> None:
     """Without the compaction hook a long conversation just grows until the provider rejects it."""
     use_mock("python_tool_compact.txt")
@@ -538,6 +595,7 @@ test_malformed_arguments_are_recoverable()
 test_structured_return_values_are_json()
 test_cancel_from_another_thread_stops_the_turn()
 test_cancel_stops_only_the_targeted_agent()
+test_asyncio_runs_agents_concurrently()
 test_context_is_compacted_when_it_crosses_the_threshold()
 test_failed_construction_releases_hax()
 test_database_example_enforces_read_only()

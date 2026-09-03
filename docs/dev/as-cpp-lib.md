@@ -270,10 +270,32 @@ question that matters: is the multi-agent Python API the thing you actually want
   passing test suite to check against.
 - If the answer is "this is fine," roughly 30,000 lines were not written.
 
-As of this writing the binding holds several agents, runs their turns concurrently on threads, and
-cancels them independently. Since `send()` releases the GIL, `asyncio.to_thread` should already
-give an async multi-agent API with no further C work — confirming that is the cheapest remaining
-step, and if it holds, the coroutine argument is left carrying only the internal-composition case.
+### The verdict
+
+Every step above was taken, and the answer came back the same way each time.
+
+The binding holds several agents, runs their turns concurrently, and cancels them independently.
+Asyncio needed nothing: `send()` releases the GIL, so a thread executor overlaps three two-second
+turns into two seconds, and task cancellation maps onto `Agent.cancel()` through a shielded
+future. `bindings/python/example_async.py` is the whole story, and the suite runs it.
+
+So the multi-agent case for the rewrite is closed, and it was answered entirely in C — five
+scoped fixes, no new language, no coroutines. What the measurements kept showing is that the
+limitation was never architectural: `agent_session` was already per-instance, `turn.c` and
+`agent_loop.c` already read no globals, and every core signature was already
+instance-parameterized. What stood in the way was a handful of process-wide variables and one
+double-free, none of which a rewrite was needed to reach.
+
+The internal-composition argument for coroutines survives on its own merits — `turn.c`'s state
+machine and the SSE layer would read better as linear code — but it is now the *only* argument,
+and it should be priced against ~29,500 ported lines rather than carried along by a multi-agent
+case that no longer needs it. Nothing in this work suggested that composition is unmanageable:
+the loop stayed untouched throughout.
+
+What remains genuinely open is smaller than the document originally implied: config-as-handle (74
+core call sites), which the measurement ranked least urgent and which nothing has yet demanded;
+and per-agent semantics for anything else that is still process-wide by choice, such as the
+keepawake inhibitor. Neither is a language question.
 
 The one finding that would change this recommendation is a concrete internal composition problem
 that survives the reentrancy work: if driving many concurrent turns through `turn.c` and the SSE

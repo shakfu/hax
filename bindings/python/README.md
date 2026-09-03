@@ -99,8 +99,11 @@ uv run python bindings/python/example_database.py --provider anthropic \
     --model claude-sonnet-5 "which customer spent the most, and on what?"
 ```
 
-Both accept `--provider mock` with `HAX_MOCK_SCRIPT` to replay a fixture instead of calling a
-model, which is how the test suite exercises them.
+**`example_async.py`** — several agents driven concurrently from asyncio, and one of them
+cancelled while the others run on. See [Async](#async) below.
+
+The first two accept `--provider mock` with `HAX_MOCK_SCRIPT` to replay a fixture instead of
+calling a model, which is how the test suite exercises them.
 
 ## API
 
@@ -172,6 +175,41 @@ legitimately return the same text.
 Every hax diagnostic since construction. hax normally writes these to stderr; the binding captures
 them instead and attaches the most recent one to errors it raises.
 
+## Async
+
+There is no separate async API and none is needed. `send()` blocks, but it releases the GIL for
+the whole turn, so a thread executor gives you real concurrency:
+
+```python
+replies = await asyncio.gather(
+    asyncio.to_thread(first.send, "one"),
+    asyncio.to_thread(second.send, "two"),
+)
+```
+
+Three turns that each take two seconds finish in about two, not six.
+
+Cancellation needs one more step, because a thread cannot be interrupted from outside. Shield the
+executor future, ask hax to stop, and let the turn unwind:
+
+```python
+async def send(agent, prompt):
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(None, agent.send, prompt)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        agent.cancel()
+        try:
+            await future
+        except hax.HaxCancelled:
+            pass
+        raise
+```
+
+Without the shield the future is abandoned and its thread keeps running the turn.
+`example_async.py` is this pattern end to end, and the test suite runs it.
+
 ## Errors
 
 `HaxError` is the base. `HaxProviderError` covers a failed or rejected provider stream, and
@@ -191,8 +229,8 @@ clean seam.
   recorded since that agent was built rather than only its own.
 - **No per-agent pause.** `cancel()` aborts one agent and leaves its siblings running, but hax's
   softer pause-at-a-seam is not exposed; a cancelled turn always ends as `HaxCancelled`.
-- **No streaming API yet.** `send()` blocks until the turn completes, though `cancel()` can stop
-  it. The underlying loop does expose a per-event hook; a callback API over it would be a small
+- **No streaming API yet.** `send()` returns the finished turn, though `cancel()` can stop it.
+  The underlying loop does expose a per-event hook; a callback API over it would be a small
   addition, a generator API a larger one.
 - **The GIL is released** around the loop and reacquired for each callback, so other Python
   threads run during a provider round-trip. That is what makes `cancel()` from another thread

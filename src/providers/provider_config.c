@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <jansson.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -233,12 +234,18 @@ char **provider_extra_headers(const char *config_prefix)
     return headers;
 }
 
+static char process_session_id[37];
+
+static void init_process_session_id(void)
+{
+    gen_uuid_v4(process_session_id);
+}
+
 const char *provider_process_session_id(void)
 {
-    static char id[37];
-    if (!id[0])
-        gen_uuid_v4(id);
-    return id;
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, init_process_session_id);
+    return process_session_id;
 }
 
 static int header_names_equal(const char *first, const char *second)

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -303,8 +304,47 @@ static const char CONFIG_JSON[] =
     "  \"extra_body\": {\"stray\": 5}"
     "}";
 
+/* Every thread must see one id: it is the affinity key for requests that belong to no
+ * conversation, so a racing lazy init would hand concurrent agents different keys — or a
+ * half-written one. Runs first in main(), because the race is in the first use: once any
+ * caller has cached the value these threads would only read it. */
+#define SESSION_ID_THREADS 8
+
+static void *read_process_session_id(void *arg)
+{
+    const char **out = arg;
+    *out = provider_process_session_id();
+    return NULL;
+}
+
+static void test_process_session_id_is_one_stable_value(void)
+{
+    const char *seen[SESSION_ID_THREADS] = {0};
+    pthread_t threads[SESSION_ID_THREADS];
+    for (size_t i = 0; i < SESSION_ID_THREADS; i++)
+        EXPECT(pthread_create(&threads[i], NULL, read_process_session_id, &seen[i]) == 0);
+    for (size_t i = 0; i < SESSION_ID_THREADS; i++)
+        pthread_join(threads[i], NULL);
+
+    EXPECT(seen[0] != NULL);
+    if (!seen[0])
+        return;
+    /* A uuid, fully written: 36 characters, not a prefix of one. */
+    EXPECT(strlen(seen[0]) == 36);
+    for (size_t i = 1; i < SESSION_ID_THREADS; i++) {
+        EXPECT(seen[i] == seen[0]);
+        EXPECT_STR_EQ(seen[i], seen[0]);
+    }
+    /* Stable afterwards, too. */
+    EXPECT_STR_EQ(provider_process_session_id(), seen[0]);
+}
+
 int main(void)
 {
+    /* First, before anything on this thread fills the id: the point is the concurrent first
+     * use, and a value already cached would leave the threads doing reads only. */
+    test_process_session_id_is_one_stable_value();
+
     /* Constructing a provider starts a metadata probe for the configured
      * model, and this file mutates config while one could be in flight. The
      * providers here name no model of their own, so an ambient HAX_MODEL is
