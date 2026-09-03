@@ -193,13 +193,14 @@ def hax_py_diag(level, message, user) -> None:
 def hax_py_checkpoint(user) -> int:
     """Report what should happen at the next seam, from every producer of that answer.
 
-    The cancel flags are process-wide and any thread may set them, so a host calling cancel()
-    while send() blocks is answered here. Abort latches pause too, so it is tested first.
+    The flags are this agent's own, so a cancel() aimed at one agent leaves its siblings running.
+    Any thread may set them, so a host calling cancel() while send() blocks is answered here.
+    Abort latches pause too, so it is tested first.
     """
     agent = ffi.from_handle(user)
-    if agent._pending_exc or lib.cancel_abort_requested():
+    if agent._pending_exc or lib.cancel_state_abort_requested(agent._cancel):
         return lib.AGENT_LOOP_SIG_ABORT
-    if lib.cancel_pause_requested():
+    if lib.cancel_state_pause_requested(agent._cancel):
         return lib.AGENT_LOOP_SIG_PAUSE
     return lib.AGENT_LOOP_SIG_NONE
 
@@ -209,9 +210,13 @@ def hax_py_tick(user) -> int:
     """Stop an in-flight transfer. Without this a cancel would wait out the whole response.
 
     Also serves compaction's is_cancelled hook, which asks the same question at a different
-    moment: a summary streamed through a cancel must not be kept.
+    moment: a summary streamed through a cancel must not be kept. The loop passes the hooks'
+    user here, so this aborts only the transfer belonging to the cancelled agent.
     """
-    return 1 if lib.cancel_abort_requested() or lib.cancel_pause_requested() else 0
+    agent = ffi.from_handle(user)
+    state = agent._cancel
+    return 1 if lib.cancel_state_abort_requested(state) or lib.cancel_state_pause_requested(
+        state) else 0
 
 
 @ffi.def_extern()
@@ -248,10 +253,11 @@ def hax_py_tool_call(call, action, image_input, user):
         text = "" if output is None else _stringify(output)
         return lib.agent_tool_result_make(call, text.encode(), ffi.NULL)
     except BaseException:
-        # A Python exception cannot unwind through agent_loop_run. Stash it, ask the loop to stop,
-        # and still hand back a well-formed result.
+        # A Python exception cannot unwind through agent_loop_run. Stash it, ask this agent's
+        # loop to stop — a sibling's run is not implicated — and still hand back a well-formed
+        # result.
         agent._pending_exc = sys.exc_info()
-        lib.cancel_request_abort()
+        lib.cancel_state_request_abort(agent._cancel)
         return lib.agent_tool_result_make(call, b"error: the host tool raised an exception",
                                           ffi.NULL)
 
@@ -470,6 +476,9 @@ class Agent:
         self._compactions = 0
         self._tools: dict[str, Callable[..., Any]] = {}
         self._max_turns = max_turns
+        # This agent's own cancellation, so cancel() stops one turn rather than every turn in
+        # the process. Allocated before anything can raise, since the callbacks read it.
+        self._cancel = ffi.new("struct cancel_state *")
         # Keep the handle alive for as long as C may call back through it.
         self._handle = ffi.new_handle(self)
 
@@ -630,8 +639,11 @@ class Agent:
         # agent's copy or its subprocesses inherit no HAX_PROVIDER/HAX_MODEL at all.
         ctx = ffi.new(
             "struct tool_run_ctx *",
-            {"image_input": image_input, "env_selection": ffi.addressof(
-                self._session, "env_selection")},
+            {
+                "image_input": image_input,
+                "env_selection": ffi.addressof(self._session, "env_selection"),
+                "cancel": self._cancel,
+            },
         )
         tc = ffi.new("struct agent_tool_call *")
         lib.agent_tool_call_init(tc, call)
@@ -654,16 +666,13 @@ class Agent:
     # --- running ---
 
     def cancel(self) -> None:
-        """Ask a running send() to stop, raising HaxCancelled in the thread that called it.
+        """Ask this agent's running send() to stop, raising HaxCancelled in the calling thread.
 
-        Safe from another thread: the GIL is released for the duration of the loop, and the
-        cancel flags are process-wide and atomic. A cancel with no turn running is latched and
-        consumed by the next send(), which clears the flags before it starts.
-
-        The flags being process-wide is also this method's limitation: with several Agents
-        running, a cancel stops whichever turns observe it, not only this one's.
+        Safe from another thread: the GIL is released for the duration of the loop and the flags
+        are atomic. A cancel with no turn running is latched and consumed by the next send(),
+        which clears this agent's flags before it starts. Other agents are unaffected.
         """
-        lib.cancel_request_abort()
+        lib.cancel_state_request_abort(self._cancel)
 
     def compact(self) -> bool:
         """Summarize the conversation in place and return whether a summary was appended.
@@ -709,7 +718,8 @@ class Agent:
         if self._closed:
             raise HaxError("this Agent is closed")
 
-        lib.cancel_clear_requests()
+        # Only this agent's flags: a sibling's pending cancel is not ours to consume.
+        lib.cancel_state_clear(self._cancel)
         self._pending_exc = None
         before = self._session.n_items
 
@@ -720,6 +730,7 @@ class Agent:
             {
                 "session": self._session,
                 "provider": self._provider,
+                "cancel": self._cancel,
                 "tlog": ffi.NULL,
                 "slog": ffi.NULL,
                 "max_turns": self._max_turns,

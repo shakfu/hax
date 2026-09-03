@@ -189,8 +189,8 @@ clean seam.
   is constructed, so agents built with different providers or models keep those settings — but
   anything hax re-reads from configuration later is shared, and `diagnostics` reports everything
   recorded since that agent was built rather than only its own.
-- **`cancel()` is process-wide.** The cancel flags are latched per process, so with several agents
-  running a cancel stops whichever turns observe it, not only the one it was called on.
+- **No per-agent pause.** `cancel()` aborts one agent and leaves its siblings running, but hax's
+  softer pause-at-a-seam is not exposed; a cancelled turn always ends as `HaxCancelled`.
 - **No streaming API yet.** `send()` blocks until the turn completes, though `cancel()` can stop
   it. The underlying loop does expose a per-event hook; a callback API over it would be a small
   addition, a generator API a larger one.

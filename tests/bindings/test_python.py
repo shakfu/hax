@@ -368,6 +368,52 @@ def test_cancel_from_another_thread_stops_the_turn() -> None:
         expect(bool(agent.send("still there?")), "a later send() runs normally after a cancel")
 
 
+def test_cancel_stops_only_the_targeted_agent() -> None:
+    """Cancellation is per agent, so one stopped turn leaves its siblings running.
+
+    The flags used to be process-wide: cancelling either agent stopped whichever turn noticed
+    first, and each send() cleared the other's pending request on the way in.
+    """
+    use_mock("interrupt_stall.txt")
+    with hax.Agent(provider="mock") as target, hax.Agent(provider="mock") as bystander:
+        outcome: dict[str, str] = {}
+
+        def run(name: str, agent) -> None:
+            try:
+                agent.send(f"stall for {name}")
+                outcome[name] = "completed"
+            except hax.HaxCancelled:
+                outcome[name] = "cancelled"
+            except BaseException as exc:
+                outcome[name] = f"raised {exc!r}"
+
+        threads = [
+            threading.Thread(target=run, args=("target", target)),
+            threading.Thread(target=run, args=("bystander", bystander)),
+        ]
+        for thread in threads:
+            thread.start()
+        # Both turns stall for two seconds; cancel one well inside that window.
+        time.sleep(0.4)
+        target.cancel()
+        for thread in threads:
+            thread.join()
+
+        expect(outcome.get("target") == "cancelled",
+               f"the cancelled agent stopped ({outcome.get('target')})")
+        expect(outcome.get("bystander") == "completed",
+               f"its sibling ran to completion ({outcome.get('bystander')})")
+
+        # Each agent's history is its own and stays paired whichever way its turn ended.
+        for agent in (target, bystander):
+            kinds = [i["kind"] for i in agent.items]
+            expect(kinds.count("tool_call") == kinds.count("tool_result"),
+                   f"history stays paired: {kinds}")
+
+        use_mock("hello.txt")
+        expect(bool(target.send("still there?")), "the cancelled agent is usable again")
+
+
 def test_context_is_compacted_when_it_crosses_the_threshold() -> None:
     """Without the compaction hook a long conversation just grows until the provider rejects it."""
     use_mock("python_tool_compact.txt")
@@ -491,6 +537,7 @@ test_skipped_calls_carry_hax_markers()
 test_malformed_arguments_are_recoverable()
 test_structured_return_values_are_json()
 test_cancel_from_another_thread_stops_the_turn()
+test_cancel_stops_only_the_targeted_agent()
 test_context_is_compacted_when_it_crosses_the_threshold()
 test_failed_construction_releases_hax()
 test_database_example_enforces_read_only()

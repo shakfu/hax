@@ -49,6 +49,13 @@ resolve each session's settings by constructing it on the calling thread, the wa
 configuration store. Once built, running them concurrently is supported and covered by
 `tests/test_multi_agent.c`.
 
+Cancellation is per agent when you ask for one. `struct cancel_state` on `agent_loop_params`
+selects which flags a run and its tools watch, and a NULL means the process state — what the
+terminal's Esc watcher and a signal handler write, and what a single-agent host wants. Give each
+concurrent agent its own state, and pass the same pointer to `tool_run_ctx.cancel` for any tool
+you dispatch yourself, so cancelling one agent stops its turn and its running tool while its
+siblings continue.
+
 ## Tool calls from the host
 
 Advertising a tool and dispatching one are separate steps, and a host needs both. The model can

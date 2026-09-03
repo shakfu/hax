@@ -129,9 +129,14 @@ struct agent_loop_result {
     char *error_message;
 };
 
+struct cancel_state;
+
 struct agent_loop_params {
     struct agent_session *session;
     struct provider *provider;
+    /* Which cancellation this run's tools watch; NULL means the process state. A frontend owning
+     * the terminal leaves it NULL, while a host running concurrent agents passes each its own. */
+    struct cancel_state *cancel;
     struct transcript_log *tlog;
     struct session_log *slog;
     int max_turns; /* < 0 means unlimited */

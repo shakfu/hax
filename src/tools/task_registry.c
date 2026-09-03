@@ -634,7 +634,7 @@ enum wait_stop {
 };
 
 char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
-                       tool_display_fn display, void *display_data)
+                       tool_display_fn display, void *display_data, struct cancel_state *cancel)
 {
     task_poll_all();
     struct task *t = id && *id ? task_find(id) : NULL;
@@ -688,7 +688,7 @@ char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
             stop = WAIT_OTHER_DONE;
             break;
         }
-        if (cancel_abort_requested()) {
+        if (cancel_state_abort_requested(cancel)) {
             stop = WAIT_INTERRUPTED;
             break;
         }

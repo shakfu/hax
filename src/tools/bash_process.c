@@ -273,6 +273,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
 {
     tool_display_fn display = ctx ? ctx->display : NULL;
     void *display_data = ctx ? ctx->display_data : NULL;
+    struct cancel_state *cancel = ctx ? ctx->cancel : NULL;
     int tasks_enabled = !config_bool("no_tasks");
     if (!tasks_enabled)
         background = 0;
@@ -321,7 +322,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
         }
 
         /* User interruption wins if it coincides with the timeout. */
-        if (stop_reason == BASH_STOP_NONE && cancel_abort_requested()) {
+        if (stop_reason == BASH_STOP_NONE && cancel_state_abort_requested(cancel)) {
             stop_reason = BASH_STOP_INTERRUPT;
             if (shell_exited) {
                 /* Background suppressed the shell-exit kill; orphans die on the way out. */

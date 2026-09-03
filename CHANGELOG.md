@@ -9,6 +9,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- Cancellation can be scoped to one agent. `agent_loop_params.cancel` and `tool_run_ctx.cancel`
+  select which `struct cancel_state` a run and its tools watch, and a NULL keeps the process-wide
+  flags the terminal watcher and signal handlers write. `hax.Agent.cancel()` now stops only the
+  agent it was called on, where it previously stopped whichever turns noticed first and could
+  swallow a sibling's pending cancel.
 - The Python binding can hold several `hax.Agent`s at once, and run their turns concurrently on
   separate threads. `hax_init()` is refcounted behind them, so it is one initialization per
   process rather than one agent; constructing a second `Agent` used to raise. Configuration stays

@@ -85,8 +85,10 @@ first proposed:
 4. **Config becomes a handle.** Introduce `config_str_in(cfg, key)` and make `config_str(key)` a
    thin wrapper over a default instance. This is the largest mechanical change but, per the
    measurement, the *least* urgent: the read path resolves at construction and did not race.
-5. **Cancellation gets per-agent scoping.** Not a race — the flags are already atomic — but an
-   abort must be able to cancel one agent without cancelling its siblings.
+5. ~~**Cancellation gets per-agent scoping.**~~ **Done.** Never a race — the flags were already
+   atomic — but an abort now cancels one agent without cancelling its siblings. `struct
+   cancel_state` is selectable through `agent_loop_params` and `tool_run_ctx`, so a cancelled
+   agent's running tool stops too; NULL keeps the process flags the terminal watcher writes.
 
 Only the config item is large, and dropping the terminal roughly halves it:
 
@@ -267,6 +269,11 @@ question that matters: is the multi-agent Python API the thing you actually want
   have earned their rewrite — and it would proceed with a working reference implementation and a
   passing test suite to check against.
 - If the answer is "this is fine," roughly 30,000 lines were not written.
+
+As of this writing the binding holds several agents, runs their turns concurrently on threads, and
+cancels them independently. Since `send()` releases the GIL, `asyncio.to_thread` should already
+give an async multi-agent API with no further C work — confirming that is the cheapest remaining
+step, and if it holds, the coroutine argument is left carrying only the internal-composition case.
 
 The one finding that would change this recommendation is a concrete internal composition problem
 that survives the reentrancy work: if driving many concurrent turns through `turn.c` and the SSE
