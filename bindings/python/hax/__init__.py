@@ -8,8 +8,9 @@ Meson builds the _hax_cffi extension; nothing here compiles anything:
 
     meson setup build-embed -Dembed=true && meson compile -C build-embed
 
-HAX_EXTENSION_DIR points at the directory holding it. Without that, the build directories beside
-the source tree are searched, so a plain `meson compile` is enough to make `import hax` work.
+An installed wheel carries the extension inside this package. Otherwise HAX_EXTENSION_DIR points
+at the directory holding it, and without that the build directories beside the source tree are
+searched, so a plain `meson compile` is enough to make `import hax` work.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ def _locate_extension():
     return None
 
 
-_EXTENSION_DIR = _locate_extension()
+_EXTENSION_DIR = None
 
 _BUILD_HINT = (
     "_hax_cffi is not built; run: meson setup build-embed -Dembed=true "
@@ -77,9 +78,15 @@ def _import_failure(exc: ImportError) -> ImportError:
 
 
 try:
-    from _hax_cffi import ffi, lib
-except ImportError as exc:  # pragma: no cover - build guidance, not a runtime path
-    raise _import_failure(exc) from exc
+    from ._hax_cffi import ffi, lib
+except ModuleNotFoundError:
+    # Not an installed wheel; fall back to an uninstalled meson build tree. A present but
+    # unloadable in-package extension raises plain ImportError and is left to propagate.
+    _EXTENSION_DIR = _locate_extension()
+    try:
+        from _hax_cffi import ffi, lib
+    except ImportError as exc:  # pragma: no cover - build guidance, not a runtime path
+        raise _import_failure(exc) from exc
 
 __all__ = ["Agent", "HaxError", "HaxProviderError", "HaxCancelled"]
 

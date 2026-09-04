@@ -2,15 +2,17 @@
 # checks from toolchain upgrades surface for triage instead of staying off.
 #
 # Excluded because the codebase deliberately uses what they flag:
-#   bugprone-assignment-in-if-condition   kernel-style `if ((x = f()))`
-#   bugprone-branch-clone                 parallel branches kept for readability
-#   bugprone-command-processor            shelling out is hax's job
-#   bugprone-suspicious-missing-comma     ANSI escape string concatenation in themes
-#   bugprone-unchecked-string-to-number   atoi/fscanf on test-controlled data
-#   bugprone-unsafe-functions             rewind() etc. on test temp files
-#   misc-misleading-bidirectional         flags even hex-escaped U+202E test fixtures
-#   misc-no-recursion                     markdown/JSON walkers recurse by design
-#   misc-use-internal-linkage             tests define extern mocks to override linking
+#   bugprone-assignment-in-if-condition        kernel-style `if ((x = f()))`
+#   bugprone-assignment-in-selection-statement the same idiom in `while` and `for`
+#   bugprone-branch-clone                      parallel branches kept for readability
+#   bugprone-command-processor                 shelling out is hax's job
+#   bugprone-suspicious-missing-comma          ANSI escape string concatenation in themes
+#   bugprone-unchecked-string-to-number        atoi/fscanf on test-controlled data
+#   bugprone-unhandled-code-paths              a switch whose cases return falls out to one return
+#   bugprone-unsafe-functions                  rewind() etc. on test temp files
+#   misc-misleading-bidirectional              flags even hex-escaped U+202E test fixtures
+#   misc-no-recursion                          markdown/JSON walkers recurse by design
+#   misc-use-internal-linkage                  tests define extern mocks to override linking
 #
 # Excluded as noise for this codebase (high count, no real defects found):
 #   bugprone-easily-swappable-parameters
@@ -19,6 +21,10 @@
 #   bugprone-narrowing-conversions
 #   bugprone-not-null-terminated-result
 #   bugprone-switch-missing-default-case
+#
+# bugprone-signed-bitwise is off because C cannot satisfy it: integer promotion makes every
+# uint8_t, char, and enum operand signed, and POSIX types O_NONBLOCK, POLLIN, and ECHO as signed
+# ints. 212 findings, no defects; IgnorePositiveIntegerLiterals only masks 130 of them.
 #
 # clang-analyzer-* is left to scan-build runs; too slow for the lint gate.
 #
@@ -31,6 +37,7 @@ Checks: >
   -*,
   bugprone-*,
   -bugprone-assignment-in-if-condition,
+  -bugprone-assignment-in-selection-statement,
   -bugprone-branch-clone,
   -bugprone-command-processor,
   -bugprone-easily-swappable-parameters,
@@ -38,9 +45,11 @@ Checks: >
   -bugprone-multi-level-implicit-pointer-conversion,
   -bugprone-narrowing-conversions,
   -bugprone-not-null-terminated-result,
+  -bugprone-signed-bitwise,
   -bugprone-suspicious-missing-comma,
   -bugprone-switch-missing-default-case,
   -bugprone-unchecked-string-to-number-conversion,
+  -bugprone-unhandled-code-paths,
   -bugprone-unsafe-functions,
   misc-*,
   -misc-misleading-bidirectional,

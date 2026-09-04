@@ -29,8 +29,7 @@ If none of those apply, use the binary.
 ## Build
 
 ```sh
-meson setup build-embed -Dembed=true
-meson compile -C build-embed
+make bindings            # or: meson setup build-embed -Dembed=true && meson compile -C build-embed
 ```
 
 Meson generates and compiles the extension along with everything else — there is no separate
@@ -39,6 +38,27 @@ prints a message and skips the binding; the rest of the build is unaffected.
 
 Set `HAX_EXTENSION_DIR` to select a built extension. Without it, `build-embed/bindings` and
 `build/bindings` beside the source tree are searched, so a plain `meson compile` is enough.
+Scripts in this directory find the package beside them; run them from the repository root as
+`uv run python bindings/python/example.py`.
+
+## Wheel
+
+```sh
+make wheel               # or: uv build --wheel
+```
+
+meson-python drives the same meson build and packages what it installs, so the wheel carries the
+extension as `hax._hax_cffi`, `libhax` beside it with the load path rewritten, and the `hax`
+binary. Installing it puts `import hax` and the binary in the environment, with no build
+directory to point at:
+
+```sh
+uv pip install dist/hax-*.whl
+```
+
+The wheel is built for one interpreter version and one platform, and it links the system
+`libcurl` and `jansson` rather than bundling them. It installs on the machine that built it;
+publishing to an index needs `auditwheel` or `delocate` to vendor those libraries first.
 
 ## Quick start
 

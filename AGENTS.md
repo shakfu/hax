@@ -10,6 +10,8 @@ headers.
 make                                      # build (quiet; sets up build/ on first run)
 make tests                                # build + all tests (unit + e2e)
 make lint                                 # clang-format + style script + clang-tidy
+make bindings                             # build + the Python binding (build-embed/)
+make wheel                                # build the Python wheel into dist/
 scripts/check.sh test <name>...           # build + selected tests (one or more names)
 ```
 
@@ -192,3 +194,9 @@ Dependencies are declared in `meson.build`. Keep the footprint small; before add
 [`docs/philosophy.md`](docs/philosophy.md#small-dependency-footprint). Every new dependency must be
 in Debian main and either ship with macOS or be available via a single `brew install`. Do not add
 GPL libraries.
+
+Builds resolve them from the system. `subprojects/*.wrap` is the exception, and only `make wheel`
+uses it: a wheel has to carry its dependencies, and the packaged builds are not redistributable --
+they sit outside the loader's search path and record the build machine's minimum OS. Only the
+`.wrap` files are tracked; the fetched sources are ignored. A wrap is not a way to add a
+dependency that fails the rule above.

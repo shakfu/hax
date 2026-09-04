@@ -100,6 +100,12 @@ setup_build_dir() {
     build-asan)
         set -- -Db_sanitize=address,undefined
         ;;
+    build-embed)
+        set -- -Dembed=true
+        ;;
+    build-embed-asan)
+        set -- -Dembed=true -Db_sanitize=address,undefined
+        ;;
     build-release)
         set -- --buildtype=release
         ;;

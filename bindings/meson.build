@@ -5,6 +5,7 @@
 py_installation = import('python').find_installation(
     fs.exists(venv_python) ? venv_python : 'python3',
     required: false,
+    pure: false,
 )
 
 binding_extension = []
@@ -23,13 +24,18 @@ if python_headers
             command: [py_installation, '@INPUT@', '@OUTPUT@'],
         )
         have_binding = true
+        # Installed inside the package rather than beside it, so a wheel carries the extension
+        # as hax._hax_cffi. An uninstalled build keeps it in build-*/bindings, which
+        # HAX_EXTENSION_DIR and the package's own search still find.
         binding_extension = py_installation.extension_module('_hax_cffi',
             cffi_source,
             link_with: hax_shared,
             dependencies: [libcurl.partial_dependency(compile_args: true, includes: true),
                            jansson.partial_dependency(compile_args: true, includes: true)],
-            install: false,
+            install: true,
+            subdir: 'hax',
         )
+        py_installation.install_sources('python/hax/__init__.py', subdir: 'hax')
     endif
 else
     message('no Python installation with development headers; skipping the Python binding')

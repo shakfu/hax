@@ -15,3 +15,11 @@ __pycache__/
 /bindings/python/_hax_cffi*
 /bindings/python/*.o
 /.venv/
+
+# Wheel build output, and the build directory meson-python leaves behind on a failed build
+/dist/
+/.mesonpy-*/
+
+# Wrap subprojects are fetched at build time; only the .wrap files are tracked
+/subprojects/*
+!/subprojects/*.wrap

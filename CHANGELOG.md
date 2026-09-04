@@ -25,8 +25,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   extension alongside everything else. Configuration stays process-wide, so one agent per process.
   A turn is interruptible with `Agent.cancel()` from another thread, the context is compacted
   automatically once it crosses the configured threshold, and history reports hax's own item
-  provenance so a call that never ran is distinguishable from one that did. See
-  [bindings/python/README.md](bindings/python/README.md).
+  provenance so a call that never ran is distinguishable from one that did. `make wheel` packages
+  the same build output as an installable wheel: the extension, `libhax`, and the `hax` binary.
+  See [bindings/python/README.md](bindings/python/README.md).
 - `/login` for the codex provider now offers a browser flow (authorization code with PKCE through
   a `localhost` redirect) alongside device login, for organizations that block the device flow.
   Device login remains the ssh-friendly path. See [docs/providers.md](docs/providers.md#codex).
@@ -44,6 +45,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- `system/browser` no longer fails intermittently during a parallel test run. It waited a fixed
+  300 polls for the detached opener to record its URL, which is 3.6 seconds -- less than the
+  detached grandchild plus three execs can take while the rest of the suite is spawning. The wait
+  is now bounded on the clock.
 - Host tools registered through the Python binding's `@agent.tool` are now advertised to the
   provider, not only dispatched. Previously the decorator recorded a function to run when a call
   arrived but never told the model the tool existed, so a live model could call one only when the
@@ -55,6 +60,20 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- The lint gate no longer fails under LLVM 23. Three new `bugprone` checks fire on idiomatic C
+  the project uses everywhere and are now excluded with the others: assignment in a `while` or
+  `for` condition, a `switch` whose cases all return, and signed bitwise operands. The last is
+  the bulk of it and C cannot satisfy it -- integer promotion makes every `uint8_t`, `char`, and
+  enum operand signed, and POSIX types `O_NONBLOCK`, `POLLIN`, and `ECHO` as signed ints.
+- The wheel is now installable on a machine other than the one that built it. It previously
+  linked the packager's own jansson by absolute path -- `/opt/homebrew/opt/jansson/...` -- and
+  loaded nowhere else, and on macOS it was tagged for the OS version of the build machine rather
+  than a floor. The wheel build now compiles jansson from `subprojects/jansson.wrap` and links it
+  statically, leaving `libhax`, the extension, and the bundled `hax` binary dependent only on
+  system libraries, and targets macOS 11. Ordinary builds are unchanged and still use the system
+  jansson; only `make wheel` forces the fallback. Building the dependency is what makes the macOS
+  target honest: package-manager builds carry the build machine's minimum-OS metadata, so a wheel
+  reusing them cannot truthfully claim to support anything older.
 - One-shot runs now stop cleanly on signals instead of dying mid-flight. SIGINT/SIGTERM
   interrupts like the REPL's double Esc — running tools are killed, completed work is saved,
   `--json` still closes with a `result` record, exit status 130 — and a second signal kills the

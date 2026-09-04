@@ -41,9 +41,15 @@ static void test_hands_url_to_opener(void)
     setenv("PATH", saved_path ? saved_path : "", 1);
     free(saved_path);
 
-    /* The opener runs detached, so the recording lands asynchronously. */
+    /* The opener runs detached: spawn_detached() returns when the intermediate child exits, before
+     * the grandchild reaches execvp, and the recording costs three more execs after that. So the
+     * wait is bounded on the clock, not on a poll count, and the bound is wider than the 10s the
+     * task helpers use for a directly spawned child: measured worst case grows with how many
+     * tests are spawning at once, from 1s alone to 9s at 24-way. Well under meson's 30s test
+     * timeout, so a genuinely broken opener still fails as a failure rather than a timeout. */
     char *recorded = NULL;
-    for (int i = 0; i < 300 && !recorded; i++) {
+    time_t started = time(NULL);
+    while (!recorded && time(NULL) - started < 20) {
         recorded = fs_read_file(out_path, NULL);
         if (!recorded) {
             struct timespec pause = {.tv_nsec = 10 * 1000 * 1000};

@@ -1,8 +1,9 @@
 [project]
 name = "hax"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Python binding for hax, built on libhax through cffi"
-readme = "README.md"
+readme = "bindings/python/README.md"
+license = "MIT"
 authors = [
     { name = "Shakeeb Alireza", email = "shakfu@users.noreply.github.com" }
 ]
@@ -11,15 +12,38 @@ dependencies = [
     "cffi>=2.1.1",
 ]
 
-
-[tool.uv.build-backend]
-# src/ is the C source tree, so the Python package lives beside it rather than inside it.
-module-root = "bindings/python"
-module-name = "hax"
-
+# The wheel is the meson build's install output, so the C sources, the cffi extension, and the
+# Python package come from one build system. -Dembed=true is what turns the binding on.
+#
+# jansson comes from the wrap rather than the system, because a wheel has to carry it: Homebrew
+# and the distributions install it outside the loader's search path, and their binaries are built
+# for the machine that built them, so a wheel linking them loads nowhere else. Building it here
+# links it statically at our own deployment target. The ordinary build still uses the system
+# library -- only the wheel forces the fallback.
 [build-system]
-requires = ["uv_build>=0.12.3,<0.13.0"]
-build-backend = "uv_build"
+requires = ["meson-python>=0.20", "meson>=1.4", "ninja", "cffi>=2.1.1"]
+build-backend = "mesonpy"
+
+[tool.meson-python.args]
+setup = [
+    "-Dembed=true",
+    "--force-fallback-for=jansson",
+    "-Djansson:default_library=static",
+    # warning_level=0 drops meson's own flags. One clang default-on -Wformat diagnostic in
+    # jansson's dump.c survives it, because compiler arguments are per-machine in meson and
+    # cannot be scoped to a subproject.
+    "-Djansson:warning_level=0",
+]
+# jansson is linked into libhax, so its archive and headers have no place in the wheel -- and a
+# static library has no wheel directory to map to, which fails the build rather than adding a
+# stray file.
+install = ["--skip-subprojects"]
 
 [dependency-groups]
 dev = []
+
+# The venv exists to give meson cffi and Python headers, not to hold hax itself: an editable
+# install would configure a third meson build directory and rebuild it on every import. Scripts
+# under bindings/python import the package from beside them; anything else installs the wheel.
+[tool.uv]
+package = false
