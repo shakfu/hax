@@ -35,6 +35,10 @@ generic compatible endpoints and any user-defined providers. Auto-selection is c
 interactively; pass a provider explicitly in automation so a newly available backend cannot change
 a script's behavior.
 
+An auto-selected provider applies to that run only. Unlike a `/provider` choice, which is written
+to `state.json` and used again next launch, it is never persisted -- so the same command can pick
+a different backend once another one's key is present.
+
 If an explicitly selected provider cannot start, the REPL opens without one and directs you to
 `/provider`; one-shot mode exits with an error. A one-shot banner on stderr identifies the provider,
 model, effort, and whether selection was automatic.
@@ -174,6 +178,10 @@ not expose usage through its API, so check the OpenCode dashboard instead.
 Requests carry the conversation id as `x-opencode-session`, which the gateway requires for
 routing and prompt caching, and `x-opencode-client: hax`. Both can be overridden in
 `extra_headers` ([below](#request-passthrough)).
+
+Unlike Codex, OpenAI, Anthropic, and OpenRouter, whose endpoints are pinned, both OpenCode
+providers accept `base_url`, `api`, and `api_key_env` in their config blocks, so either can be
+pointed at a gateway that speaks the same protocol.
 
 ## llama.cpp
 

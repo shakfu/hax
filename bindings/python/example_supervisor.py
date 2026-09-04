@@ -11,7 +11,9 @@ Two properties of the binding make this work, and neither is available to a `hax
 - A specialist is built once and reused, so it remembers what it was asked before. A follow-up
   costs one turn instead of restating the whole thread.
 - A specialist's tools run in this process. The librarian's read_file is a Python function that
-  enforces its own root, not a shell command the model composes.
+  enforces its own root, not a shell command the model composes. Every other specialist is
+  sealed: reading the repository is the librarian's job, and a critic that can also read it
+  spends its turn redoing that work instead of checking the draft it was handed.
 
     meson setup build-embed -Dembed=true && meson compile -C build-embed
 
@@ -26,23 +28,36 @@ still running, which is what a per-agent cancel is for.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import hax
+from hermetic import seal
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAX_FILE_BYTES = 40000
+MAX_LISTED = 400
+# Only consulted when the root is not a git checkout; git's own ignore rules cover the rest.
+# "build" is a prefix match because the project's sanitizer and release trees are build-asan,
+# build-embed and so on.
+IGNORED_DIRS = frozenset({"dist", "node_modules", "__pycache__", "subprojects"})
 
+# Each specialist sees only the text of the question it is asked -- it has no view of the other
+# conversations. Saying so is what stops the critic being sent a draft with no evidence to check
+# it against, which costs a refusal and a second delegation to correct.
 SUPERVISOR_PROMPT = (
     "You coordinate a small team and do no research yourself. Call list_specialists first, then "
-    "delegate with ask or ask_all. Ground every factual claim in something a specialist reported, "
-    "and have the critic check the draft before you answer. Answer in at most two paragraphs."
+    "delegate with ask or ask_all. A specialist sees only the question you send it, so quote the "
+    "evidence you want used inside the question itself. Ground every factual claim in something "
+    "a specialist reported, and send the critic your draft together with the evidence it rests "
+    "on, in one question, before you answer. Answer in at most two paragraphs."
 )
 
 SPECIALISTS = {
@@ -62,6 +77,49 @@ SPECIALISTS = {
 }
 
 
+
+def _tracked_files(root: Path, target: Path) -> list[str]:
+    """Files under `target`, by preference the ones the repository tracks.
+
+    A plain walk is unusable on a working repository: build directories outnumber the source by
+    an order of magnitude, so a truncated listing is all object files and the librarian never
+    learns that docs/ exists. `git ls-files` is the project's own answer to which files matter,
+    and it needs no exclusion list to maintain. Anything that is not a git checkout falls back
+    to the walk, minus the obvious build output.
+    """
+    listing = subprocess.run(
+        ["git", "-C", str(target), "ls-files", "--cached", "--others",
+         "--exclude-standard"],
+        capture_output=True, text=True, check=False,
+    )
+    if listing.returncode == 0:
+        prefix = target.relative_to(root)
+        return sorted(str(prefix / name) if prefix.parts else name
+                      for name in listing.stdout.splitlines() if name)
+
+    return sorted(
+        str(path.relative_to(root))
+        for path in target.rglob("*")
+        if path.is_file()
+        and not any(part.startswith((".", "build")) or part in IGNORED_DIRS
+                    for part in path.parts)
+    )
+
+
+@dataclass
+class Delegation:
+    """One ask, with what it cost. A supervisor run is opaque without this: the wall clock is
+    spent inside specialist turns, and which specialist, over how many round trips, is the only
+    thing that explains a slow run."""
+
+    specialist: str
+    question: str
+    answer: str
+    seconds: float
+    tool_calls: int
+    items: int
+
+
 class Team:
     """The specialists, built on first use and kept for the rest of the run.
 
@@ -78,7 +136,7 @@ class Team:
         self._root = root.resolve()
         self._agents: dict[str, hax.Agent] = {}
         self._lock = threading.Lock()
-        self.transcript: list[tuple[str, str, str]] = []
+        self.transcript: list[Delegation] = []
 
     def _build(self, name: str) -> hax.Agent:
         agent = hax.Agent(
@@ -86,6 +144,12 @@ class Team:
         )
         if name == "librarian":
             self._equip_librarian(agent)
+        else:
+            # A specialist that was given no tools still inherits hax's own. Unsealed, the
+            # critic answered a "check this draft" question with 27 tool calls, re-reading the
+            # repository the librarian had already been paid to read -- and it held write, edit
+            # and bash against a live checkout while doing it.
+            seal(agent)
         return agent
 
     def _equip_librarian(self, agent: hax.Agent) -> None:
@@ -97,12 +161,10 @@ class Team:
             target = (root / subdirectory).resolve()
             if not target.is_relative_to(root) or not target.is_dir():
                 return f"error: {subdirectory!r} is not a directory inside the root"
-            names = sorted(
-                str(path.relative_to(root))
-                for path in target.rglob("*")
-                if path.is_file() and not any(part.startswith(".") for part in path.parts)
-            )
-            return "\n".join(names[:400]) or "(empty)"
+            names = _tracked_files(root, target)
+            if len(names) > MAX_LISTED:
+                return "\n".join(names[:MAX_LISTED]) + f"\n[{len(names) - MAX_LISTED} more]"
+            return "\n".join(names) or "(empty)"
 
         @agent.tool
         def read_file(path: str):
@@ -124,8 +186,22 @@ class Team:
             agent = self._agents.get(name)
             if agent is None:
                 agent = self._agents[name] = self._build(name)
+        started = time.monotonic()
         answer = agent.send(question)
-        self.transcript.append((name, question, answer))
+        elapsed = time.monotonic() - started
+        items = agent.items
+        self.transcript.append(
+            Delegation(
+                specialist=name,
+                question=question,
+                answer=answer,
+                seconds=elapsed,
+                # Cumulative for this specialist: it keeps its conversation between delegations,
+                # so the count rising faster than the questions is the context growing.
+                tool_calls=sum(1 for item in items if item["kind"] == "tool_call"),
+                items=len(items),
+            )
+        )
         return answer
 
     def cancel_all(self) -> None:
@@ -204,10 +280,16 @@ def main() -> int:
                     watchdog.cancel()
 
         print(answer)
-        print(f"\n--- delegations ({time.monotonic() - started:.1f}s) ---")
-        for name, question, reply in team.transcript:
-            print(f"  {name:<10} {question.splitlines()[0][:60]}")
-            print(f"  {'':<10} -> {reply.splitlines()[0][:60]}")
+        total = time.monotonic() - started
+        delegated = sum(record.seconds for record in team.transcript)
+        count = len(team.transcript)
+        print(f"\n--- {count} delegation{'s' if count != 1 else ''}, "
+              f"{delegated:.0f}s of {total:.0f}s ---")
+        for record in team.transcript:
+            print(f"  {record.specialist:<10} {record.seconds:6.1f}s  "
+                  f"{record.tool_calls:3d} calls  {record.items:3d} items  "
+                  f"{record.question.splitlines()[0][:44]}")
+            print(f"  {'':<10} {'':>6}   -> {record.answer.splitlines()[0][:60]}")
     except hax.HaxCancelled:
         print(f"deadline reached after {args.deadline}s", file=sys.stderr)
         return 130

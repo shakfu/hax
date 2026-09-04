@@ -214,7 +214,7 @@ provider-dependent.
 | Config key | Environment | Default | Purpose |
 | --- | --- | --- | --- |
 | `preset` | `HAX_PRESET` | — | Startup preset; an empty environment value disables a config default. |
-| `provider` | `HAX_PROVIDER` | auto | Provider id. |
+| `provider` | `HAX_PROVIDER` | — | Provider id; unset auto-selects. `auto` is not a value. |
 | `model` | `HAX_MODEL` | — | Provider-specific model id. |
 | `effort` | `HAX_EFFORT` | — | Provider-specific reasoning effort; empty omits it. |
 | `system_prompt` | `HAX_SYSTEM_PROMPT` | built in | Replace the base prompt; `@path` reads a file; `(none)` removes the entire system message. |

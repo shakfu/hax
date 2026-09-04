@@ -617,10 +617,12 @@ def test_supervisor_example_delegates_from_inside_a_tool_call() -> None:
             reply = supervisor.send("explain provider selection")
 
         expect(bool(reply), f"the supervisor turn completed (got {reply!r})")
-        expect([name for name, _, _ in team.transcript] == ["librarian"],
+        expect([record.specialist for record in team.transcript] == ["librarian"],
                f"exactly the delegated specialist ran (got {team.transcript})")
-        expect(team.transcript and team.transcript[0][2] == "Hello from mock",
+        expect(team.transcript and team.transcript[0].answer == "Hello from mock",
                f"the specialist's own reply came back through the tool (got {team.transcript})")
+        expect(team.transcript and team.transcript[0].items > 0,
+               "the delegation records what the specialist's turn cost")
     finally:
         team.close()
 
@@ -802,6 +804,72 @@ def test_hermetic_agents_get_only_their_host_tools() -> None:
                 os.environ[name] = value
 
 
+def test_supervisor_librarian_sees_source_not_build_output() -> None:
+    """A plain walk made the listing useless: build trees outnumber the source ten to one.
+
+    Truncated at 400 names it was 374 object files from build-asan, with no src/ and no docs/ at
+    all, so the librarian could not learn that the documentation it was asked to check against
+    even existed and guessed paths through read_file instead.
+    """
+    use_mock("hello.txt")
+    from example_supervisor import Team
+
+    team = Team("mock", None, REPO_ROOT)
+    try:
+        agent = team._build("librarian")
+        try:
+            names = agent._tools["list_files"]().splitlines()
+            expect(any(n.startswith("docs/") for n in names),
+                   "the documentation directory is listed")
+            expect(any(n.startswith("src/") for n in names), "so is the source")
+            build = [n for n in names if n.startswith("build")]
+            expect(not build, f"build output is not (got {build[:3]})")
+
+            scoped = agent._tools["list_files"](subdirectory="docs").splitlines()
+            expect(scoped and all(n.startswith("docs/") for n in scoped),
+                   f"a subdirectory listing stays root-relative (got {scoped[:3]})")
+        finally:
+            agent.close()
+    finally:
+        team.close()
+
+
+def test_supervisor_seals_every_specialist_but_the_librarian() -> None:
+    """A specialist given no tools still inherits hax's own, which is not what its prompt says.
+
+    Unsealed, the critic answered a "check this draft" delegation with 27 built-in tool calls,
+    re-reading the repository the librarian had already covered -- 119s of a 271s run -- while
+    holding write, edit and bash against a live checkout.
+    """
+    use_mock("hello.txt")
+    from example_supervisor import SPECIALISTS, Team
+
+    team = Team("mock", None, REPO_ROOT)
+    try:
+        librarian = team._build("librarian")
+        try:
+            advertised = {t["name"]: t for t in librarian.tools}
+            expect(bool(advertised["read"]["parameters"]),
+                   "the librarian keeps hax's read, which is what it is for")
+            expect("read_file" in advertised, "alongside its own host tools")
+        finally:
+            librarian.close()
+
+        for name in (n for n in SPECIALISTS if n != "librarian"):
+            agent = team._build(name)
+            try:
+                advertised = {t["name"]: t for t in agent.tools}
+                for builtin in ("read", "edit", "write", "bash"):
+                    expect(advertised.get(builtin, {}).get("parameters") == [],
+                           f"{name} cannot use {builtin} (got {advertised.get(builtin)})")
+                expect(agent._tools["bash"]().startswith("error:"),
+                       f"{name}'s bash refuses when dispatched")
+            finally:
+                agent.close()
+    finally:
+        team.close()
+
+
 test_plain_turn()
 test_host_tool_runs()
 test_host_tool_is_advertised()
@@ -826,6 +894,8 @@ test_unknown_provider_reports_a_diagnostic()
 test_fanout_example_gives_each_worker_its_own_document()
 test_supervisor_example_delegates_from_inside_a_tool_call()
 test_supervisor_librarian_cannot_read_outside_its_root()
+test_supervisor_librarian_sees_source_not_build_output()
+test_supervisor_seals_every_specialist_but_the_librarian()
 test_triage_board_enforces_ownership_and_vocabulary()
 test_triage_tools_reach_the_shared_board()
 test_judge_example_records_a_failed_candidate()

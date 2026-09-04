@@ -198,7 +198,8 @@ hax --resume=ID --preset=review
 ```
 
 The new selection is recorded in the resumed session. If its old provider or preset is unavailable,
-hax reports the problem rather than silently choosing another backend.
+hax reports the problem rather than silently choosing another backend: a one-shot run exits with an
+error naming what the session recorded, while the REPL warns and resumes without it.
 
 `--no-session` (or `no_session`) prevents new session and prompt-history writes. It does not hide or
 disable existing sessions and prompt recall.

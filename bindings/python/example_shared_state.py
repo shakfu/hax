@@ -144,12 +144,15 @@ def run_worker(name: str, board: Board, provider: str, model: str | None,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--workers", type=int, default=3)
+    parser.add_argument("--reports", type=int, default=len(REPORTS),
+                        help=f"how many of the {len(REPORTS)} reports to queue")
     parser.add_argument("--provider", default="anthropic")
     parser.add_argument("--model", default=None, help="defaults to the provider's configuration")
     args = parser.parse_args()
 
     confine()
-    board = Board([Job(f"BUG-{index:03d}", report) for index, report in enumerate(REPORTS, 1)])
+    board = Board([Job(f"BUG-{index:03d}", report)
+                   for index, report in enumerate(REPORTS[:args.reports], 1)])
     failures: list[str] = []
 
     names = [f"worker-{index}" for index in range(1, args.workers + 1)]

@@ -139,8 +139,11 @@ uv run python bindings/python/example_fanout.py --provider anthropic \
 **`example_supervisor.py`** — delegation as a tool the model calls. `ask` and `ask_all` run
 specialist agents from inside the supervisor's turn; each specialist keeps its conversation
 across delegations, so a follow-up costs one turn rather than a restated thread. The librarian's
-`read_file` enforces its own root in Python. `--deadline` cancels the supervisor and every
-specialist still running.
+`read_file` enforces its own root in Python and lists files through `git ls-files`; every other
+specialist is sealed, so a critic checks the draft it was handed instead of re-reading the
+repository itself. Each delegation reports its time, tool calls and item count, which is the
+only thing that explains a slow run. `--deadline` cancels the supervisor and every specialist
+still running.
 
 ```sh
 uv run python bindings/python/example_supervisor.py --provider anthropic \
@@ -356,5 +359,10 @@ rather than misreading memory at runtime. After changing a header the binding de
 ```sh
 meson test -C build-embed bindings/python
 ```
+
+The tests cover the functions the examples expose, not their `main()`. `scripts/run_examples.sh`
+covers that: it runs all seven against the mock provider with the fixture each one needs, and
+reports which still work. `--provider NAME [--model ID]` runs the same set against a live model
+instead, skipping `example.py` and `example_async.py`, which hard-code the mock provider.
 
 See [docs/embedding.md](../../docs/embedding.md) for the C side — lifecycle, hooks, cancellation.

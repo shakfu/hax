@@ -13,6 +13,7 @@ make lint                                 # clang-format + style script + clang-
 make bindings                             # build + the Python binding (build-embed/)
 make wheel                                # build the Python wheel into dist/
 scripts/check.sh test <name>...           # build + selected tests (one or more names)
+scripts/run_examples.sh                   # run every bindings/python example against the mock
 ```
 
 `Makefile` delegates to `scripts/check.sh`, which drops routine runner progress but relays
