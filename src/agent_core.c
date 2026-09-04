@@ -196,9 +196,10 @@ int agent_recording_enabled(const struct provider *provider)
 }
 
 /* Keep subprocess inheritance synchronized at every settings-resolution point. */
-static void export_selection(const struct provider *provider, const struct agent_session *session)
+static void export_selection(const struct provider *provider, struct agent_session *session)
 {
-    bash_env_set_selection(agent_provider_id(provider), session->model, session->effort);
+    bash_env_selection_set(&session->env_selection, agent_provider_id(provider), session->model,
+                           session->effort);
 }
 
 void agent_session_init(struct agent_session *session, struct provider *provider,
@@ -388,6 +389,7 @@ void agent_session_free(struct agent_session *session)
     free(session->model);
     free(session->model_label);
     free(session->effort);
+    bash_env_selection_free(&session->env_selection);
     memset(session, 0, sizeof(*session));
 }
 

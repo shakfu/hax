@@ -27,6 +27,18 @@ static char *call_bash(const char *escaped_command)
     return out;
 }
 
+/* The selection now travels on the run context rather than a process-wide export, so the
+ * environment test has to hand the tool the same struct an agent session would own. */
+static char *call_bash_with_selection(const char *escaped_command,
+                                      const struct bash_env_selection *selection)
+{
+    char *args = xasprintf("{\"command\":\"%s\"}", escaped_command);
+    struct tool_run_ctx ctx = {.env_selection = selection};
+    char *out = TOOL_BASH.run(args, &ctx);
+    free(args);
+    return out;
+}
+
 /* Runs a command emitting one line of `bytes` 'x' characters, with no trailing newline. A printf
  * field width keeps the generator POSIX: `head -c` is a GNU/BSD extension that OpenBSD lacks. */
 static char *call_bash_long_line(size_t bytes)
@@ -845,11 +857,13 @@ static void test_bash_subagent_env(void)
     setenv("HAX_PRESET", "parent-preset", 1);
     setenv("HAX_TRACE", "/tmp/parent.trace", 1);
     setenv("HAX_TRANSCRIPT", "/tmp/parent.transcript", 1);
-    bash_env_set_selection("mock", "m-1", NULL);
-    char *out = call_bash("echo p=$HAX_PROVIDER; echo m=$HAX_MODEL; "
-                          "echo e=$HAX_EFFORT; echo ps=$HAX_PRESET; "
-                          "echo d=$HAX_SUBAGENT_DEPTH; echo tr=$HAX_TRACE; "
-                          "echo tl=$HAX_TRANSCRIPT");
+    struct bash_env_selection selection = {0};
+    bash_env_selection_set(&selection, "mock", "m-1", NULL);
+    char *out = call_bash_with_selection("echo p=$HAX_PROVIDER; echo m=$HAX_MODEL; "
+                                         "echo e=$HAX_EFFORT; echo ps=$HAX_PRESET; "
+                                         "echo d=$HAX_SUBAGENT_DEPTH; echo tr=$HAX_TRACE; "
+                                         "echo tl=$HAX_TRANSCRIPT",
+                                         &selection);
     char *want = xasprintf("p=mock\nm=m-1\ne=\nps=\n%str=\ntl=\n", depth_expect);
     EXPECT_STR_EQ(out, want);
     free(want);
@@ -859,14 +873,17 @@ static void test_bash_subagent_env(void)
      * the depth marker and the trace/transcript clearing are unconditional
      * (a nested hax truncates those paths at startup — inheriting them
      * would destroy this process's live logs). */
-    bash_env_set_selection(NULL, NULL, NULL);
-    out = call_bash("echo p=$HAX_PROVIDER; echo ps=$HAX_PRESET; echo d=$HAX_SUBAGENT_DEPTH; "
-                    "echo tr=$HAX_TRACE; echo tl=$HAX_TRANSCRIPT");
+    bash_env_selection_set(&selection, NULL, NULL, NULL);
+    out = call_bash_with_selection("echo p=$HAX_PROVIDER; echo ps=$HAX_PRESET; "
+                                   "echo d=$HAX_SUBAGENT_DEPTH; echo tr=$HAX_TRACE; "
+                                   "echo tl=$HAX_TRANSCRIPT",
+                                   &selection);
     want = xasprintf("p=parent-provider\nps=parent-preset\n%str=\ntl=\n", depth_expect);
     EXPECT_STR_EQ(out, want);
     free(want);
     free(out);
 
+    bash_env_selection_free(&selection);
     unsetenv("HAX_PROVIDER");
     unsetenv("HAX_MODEL");
     unsetenv("HAX_EFFORT");

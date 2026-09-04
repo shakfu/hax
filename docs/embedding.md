@@ -37,9 +37,24 @@ if (hax_init(&options) != 0)
 Destroy every provider before `hax_shutdown()`: providers join background work that global libcurl
 teardown must outlive.
 
-**One agent per process.** Configuration, provider selection, theme, and diagnostics are
-process-wide state. `hax_init()` refuses a second call rather than letting two agents silently
-share one configuration.
+**One initialization per process, but several sessions.** `hax_init()` refuses a second call
+rather than letting two agents silently share one configuration: configuration, provider
+selection, theme, and diagnostics are process-wide state. Several `agent_session`s may be built
+and run under that one initialization, including concurrently on separate threads — their
+conversation state, tools, and subprocess environments are per-session.
+
+What stays process-wide constrains how they are built. Configuration is foreground state, so
+resolve each session's settings by constructing it on the calling thread, the way
+`providers/mock.c` copies its script at construction; building sessions concurrently races the
+configuration store. Once built, running them concurrently is supported and covered by
+`tests/test_multi_agent.c`.
+
+Cancellation is per agent when you ask for one. `struct cancel_state` on `agent_loop_params`
+selects which flags a run and its tools watch, and a NULL means the process state — what the
+terminal's Esc watcher and a signal handler write, and what a single-agent host wants. Give each
+concurrent agent its own state, and pass the same pointer to `tool_run_ctx.cancel` for any tool
+you dispatch yourself, so cancelling one agent stops its turn and its running tool while its
+siblings continue.
 
 ## Tool calls from the host
 

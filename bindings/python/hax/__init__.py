@@ -188,22 +188,26 @@ def _text(value) -> str:
 
 @ffi.def_extern()
 def hax_py_diag(level, message, user) -> None:
-    agent = ffi.from_handle(user) if user != ffi.NULL else None
-    if agent is not None:
-        agent._diagnostics.append((int(level), _text(message)))
+    """Diagnostics land on the runtime, not an Agent: hax installs one sink per process.
+
+    An Agent reports the slice recorded since it was constructed, which is the best attribution
+    available once several of them share the sink.
+    """
+    _Runtime.record(int(level), _text(message))
 
 
 @ffi.def_extern()
 def hax_py_checkpoint(user) -> int:
     """Report what should happen at the next seam, from every producer of that answer.
 
-    The cancel flags are process-wide and any thread may set them, so a host calling cancel()
-    while send() blocks is answered here. Abort latches pause too, so it is tested first.
+    The flags are this agent's own, so a cancel() aimed at one agent leaves its siblings running.
+    Any thread may set them, so a host calling cancel() while send() blocks is answered here.
+    Abort latches pause too, so it is tested first.
     """
     agent = ffi.from_handle(user)
-    if agent._pending_exc or lib.cancel_abort_requested():
+    if agent._pending_exc or lib.cancel_state_abort_requested(agent._cancel):
         return lib.AGENT_LOOP_SIG_ABORT
-    if lib.cancel_pause_requested():
+    if lib.cancel_state_pause_requested(agent._cancel):
         return lib.AGENT_LOOP_SIG_PAUSE
     return lib.AGENT_LOOP_SIG_NONE
 
@@ -213,9 +217,13 @@ def hax_py_tick(user) -> int:
     """Stop an in-flight transfer. Without this a cancel would wait out the whole response.
 
     Also serves compaction's is_cancelled hook, which asks the same question at a different
-    moment: a summary streamed through a cancel must not be kept.
+    moment: a summary streamed through a cancel must not be kept. The loop passes the hooks'
+    user here, so this aborts only the transfer belonging to the cancelled agent.
     """
-    return 1 if lib.cancel_abort_requested() or lib.cancel_pause_requested() else 0
+    agent = ffi.from_handle(user)
+    state = agent._cancel
+    return 1 if lib.cancel_state_abort_requested(state) or lib.cancel_state_pause_requested(
+        state) else 0
 
 
 @ffi.def_extern()
@@ -252,10 +260,11 @@ def hax_py_tool_call(call, action, image_input, user):
         text = "" if output is None else _stringify(output)
         return lib.agent_tool_result_make(call, text.encode(), ffi.NULL)
     except BaseException:
-        # A Python exception cannot unwind through agent_loop_run. Stash it, ask the loop to stop,
-        # and still hand back a well-formed result.
+        # A Python exception cannot unwind through agent_loop_run. Stash it, ask this agent's
+        # loop to stop — a sibling's run is not implicated — and still hand back a well-formed
+        # result.
         agent._pending_exc = sys.exc_info()
-        lib.cancel_request_abort()
+        lib.cancel_state_request_abort(agent._cancel)
         return lib.agent_tool_result_make(call, b"error: the host tool raised an exception",
                                           ffi.NULL)
 
@@ -373,15 +382,84 @@ def _stringify(output: Any) -> str:
     return str(output)
 
 
+class _Runtime:
+    """Process-wide hax initialization, shared by every Agent.
+
+    hax_init() sets up state that belongs to the process — configuration, the diagnostic sink,
+    libcurl — and refuses a second call. That is one initialization, not one agent: several
+    sessions may be built and run under it. So the lifecycle lives here, refcounted, and an
+    Agent is a session rather than a process.
+
+    The lock also serializes construction. Configuration is foreground state in hax, and a
+    session resolves its settings by copying them at construction (the way providers/mock.c
+    copies its script), so two Agents may only be built one at a time. Running them afterwards
+    is concurrent and needs no lock.
+    """
+
+    _lock = threading.RLock()
+    _refs = 0
+    _diagnostics: list[tuple[int, str]] = []
+
+    @classmethod
+    def record(cls, level: int, message: str) -> None:
+        cls._diagnostics.append((level, message))
+
+    @classmethod
+    def mark(cls) -> int:
+        return len(cls._diagnostics)
+
+    @classmethod
+    def since(cls, mark: int) -> list[tuple[int, str]]:
+        return cls._diagnostics[mark:]
+
+    @classmethod
+    def acquire(cls) -> None:
+        with cls._lock:
+            if cls._refs == 0:
+                # Discard the previous generation's diagnostics: nothing can read them now, and
+                # a long-lived host would otherwise accumulate every agent's warnings forever.
+                cls._diagnostics = []
+                options = ffi.new(
+                    "struct hax_embed_options *",
+                    {
+                        # The host owns its locale: setenv() races any thread reading the
+                        # environment.
+                        "own_locale": 0,
+                        "own_curl_global": 1,
+                        "own_atexit": 0,
+                        # One sink per process, so it carries no per-agent handle.
+                        "diag": lib.hax_py_diag,
+                        "diag_user": ffi.NULL,
+                    },
+                )
+                if lib.hax_init(options) != 0:
+                    errors = [m for level, m in cls._diagnostics if level == lib.HAX_DIAG_ERR]
+                    raise HaxError(errors[-1] if errors else "hax_init failed")
+            cls._refs += 1
+
+    @classmethod
+    def release(cls) -> None:
+        with cls._lock:
+            if cls._refs == 0:
+                return
+            cls._refs -= 1
+            if cls._refs == 0:
+                # The cancel flags are latched and process-wide; one left unconsumed must not
+                # greet the next agent this process builds.
+                lib.cancel_clear_requests()
+                lib.hax_shutdown()
+
+
 class Agent:
     """One conversation against one provider.
 
-    hax's configuration is process-wide, so only one Agent may exist at a time; constructing a
-    second one raises. Use it as a context manager, or call close() when finished.
-    """
+    Several Agents may exist at once and their turns may run concurrently on separate threads:
+    conversation state, tools, and the subprocess environment are per session. What they share
+    is the process — configuration, the diagnostic sink, and the cancellation flags — so
+    construction is serialized and cancel() is process-wide (see its docstring).
 
-    _live: "Agent | None" = None
-    _guard = threading.Lock()
+    Use it as a context manager, or call close() when finished.
+    """
 
     def __init__(
         self,
@@ -392,13 +470,6 @@ class Agent:
         max_turns: int = 100,
         record_session: bool = False,
     ):
-        with Agent._guard:
-            if Agent._live is not None:
-                raise HaxError(
-                    "an Agent already exists; hax keeps process-wide state, so close the first one"
-                )
-            Agent._live = self
-
         self._closed = False
         self._initialized = False
         self._provider = ffi.NULL
@@ -406,61 +477,55 @@ class Agent:
         # Snapshot taken at close() so the conversation stays readable after the context manager
         # exits, which is when callers usually want to inspect it.
         self._final_items: list[dict[str, Any]] | None = None
-        self._diagnostics: list[tuple[int, str]] = []
+        # Diagnostics are recorded per process; this Agent reports only what followed it.
+        self._diag_mark = 0
         self._pending_exc = None
         self._compactions = 0
         self._tools: dict[str, Callable[..., Any]] = {}
         self._max_turns = max_turns
+        # This agent's own cancellation, so cancel() stops one turn rather than every turn in
+        # the process. Allocated before anything can raise, since the callbacks read it.
+        self._cancel = ffi.new("struct cancel_state *")
         # Keep the handle alive for as long as C may call back through it.
         self._handle = ffi.new_handle(self)
 
+        _Runtime.acquire()
+        self._initialized = True
         try:
-            options = ffi.new(
-                "struct hax_embed_options *",
-                {
-                    # The host owns its locale: setenv() races any thread reading the environment.
-                    "own_locale": 0,
-                    "own_curl_global": 1,
-                    "own_atexit": 0,
-                    "diag": lib.hax_py_diag,
-                    "diag_user": self._handle,
-                },
-            )
-            if lib.hax_init(options) != 0:
-                raise HaxError(self._last_diagnostic("hax_init failed"))
-            self._initialized = True
+            # Overrides are process-wide and a session copies what it needs at construction, so
+            # the whole build runs under the runtime lock: a concurrent Agent would otherwise
+            # resolve against another's provider or model.
+            with _Runtime._lock:
+                self._diag_mark = _Runtime.mark()
 
-            # Overrides go in after hax_init(): config_init() builds the store they live in.
-            if not record_session:
-                lib.config_set_override(b"no_session", b"1")
-            if provider:
-                lib.config_set_override(b"provider", provider.encode())
-            if model:
-                lib.config_set_override(b"model", model.encode())
-            if system_prompt is not None:
-                lib.config_set_override(b"system_prompt", system_prompt.encode())
+                # Overrides go in after hax_init(): config_init() builds the store they live in.
+                if not record_session:
+                    lib.config_set_override(b"no_session", b"1")
+                if provider:
+                    lib.config_set_override(b"provider", provider.encode())
+                if model:
+                    lib.config_set_override(b"model", model.encode())
+                if system_prompt is not None:
+                    lib.config_set_override(b"system_prompt", system_prompt.encode())
 
-            self._provider = lib.hax_provider_new(
-                provider.encode() if provider else ffi.NULL
-            )
-            if self._provider == ffi.NULL:
-                raise HaxError(self._last_diagnostic("could not create a provider"))
+                self._provider = lib.hax_provider_new(
+                    provider.encode() if provider else ffi.NULL
+                )
+                if self._provider == ffi.NULL:
+                    raise HaxError(self._last_diagnostic("could not create a provider"))
 
-            self._session = ffi.new("struct agent_session *")
-            opts = ffi.new("struct hax_opts *", {"raw": 0, "resume_path": ffi.NULL,
-                                                 "provider_autoselected": 0})
-            lib.agent_session_init(self._session, self._provider, opts)
+                self._session = ffi.new("struct agent_session *")
+                opts = ffi.new("struct hax_opts *", {"raw": 0, "resume_path": ffi.NULL,
+                                                     "provider_autoselected": 0})
+                lib.agent_session_init(self._session, self._provider, opts)
         except BaseException:
-            # hax_init() refuses a second call, so a half-built Agent that keeps the process
-            # initialized poisons every later one. Release whatever was acquired, in reverse.
+            # Release whatever was acquired, in reverse; the runtime stays up for any sibling.
             if self._provider != ffi.NULL:
                 lib.hax_provider_destroy(self._provider)
                 self._provider = ffi.NULL
-            if self._initialized:
-                lib.hax_shutdown()
-                self._initialized = False
-            with Agent._guard:
-                Agent._live = None
+            self._session = None
+            self._initialized = False
+            _Runtime.release()
             raise
 
     # --- lifecycle ---
@@ -476,15 +541,9 @@ class Agent:
         if self._provider != ffi.NULL:
             lib.hax_provider_destroy(self._provider)
             self._provider = ffi.NULL
-        # The cancel flags are latched and process-wide; a cancel() that was never consumed must
-        # not greet the next Agent in this process.
-        lib.cancel_clear_requests()
         if self._initialized:
-            lib.hax_shutdown()
             self._initialized = False
-        with Agent._guard:
-            if Agent._live is self:
-                Agent._live = None
+            _Runtime.release()
 
     def __enter__(self) -> "Agent":
         return self
@@ -583,7 +642,16 @@ class Agent:
             raise HaxError(f"hax refused to advertise the tool {name!r}")
 
     def _run_builtin(self, call, image_input: int):
-        ctx = ffi.new("struct tool_run_ctx *", {"image_input": image_input})
+        # The selection is per session now, so a dispatched built-in has to be handed this
+        # agent's copy or its subprocesses inherit no HAX_PROVIDER/HAX_MODEL at all.
+        ctx = ffi.new(
+            "struct tool_run_ctx *",
+            {
+                "image_input": image_input,
+                "env_selection": ffi.addressof(self._session, "env_selection"),
+                "cancel": self._cancel,
+            },
+        )
         tc = ffi.new("struct agent_tool_call *")
         lib.agent_tool_call_init(tc, call)
         try:
@@ -596,21 +664,22 @@ class Agent:
 
     def _last_diagnostic(self, fallback: str) -> str:
         """Prefer the most recent error: a warning logged after it rarely explains the failure."""
-        for level, message in reversed(self._diagnostics):
+        recorded = _Runtime.since(self._diag_mark)
+        for level, message in reversed(recorded):
             if level == lib.HAX_DIAG_ERR:
                 return message
-        return self._diagnostics[-1][1] if self._diagnostics else fallback
+        return recorded[-1][1] if recorded else fallback
 
     # --- running ---
 
     def cancel(self) -> None:
-        """Ask a running send() to stop, raising HaxCancelled in the thread that called it.
+        """Ask this agent's running send() to stop, raising HaxCancelled in the calling thread.
 
-        Safe from another thread: the GIL is released for the duration of the loop, and the
-        cancel flags are process-wide and atomic. A cancel with no turn running is latched and
-        consumed by the next send(), which clears the flags before it starts.
+        Safe from another thread: the GIL is released for the duration of the loop and the flags
+        are atomic. A cancel with no turn running is latched and consumed by the next send(),
+        which clears this agent's flags before it starts. Other agents are unaffected.
         """
-        lib.cancel_request_abort()
+        lib.cancel_state_request_abort(self._cancel)
 
     def compact(self) -> bool:
         """Summarize the conversation in place and return whether a summary was appended.
@@ -648,9 +717,7 @@ class Agent:
             return True
         # A failed compaction is not fatal: the turn continues on the uncompacted context and
         # fails at the provider if it really is too large. Say so rather than failing silently.
-        self._diagnostics.append(
-            (lib.HAX_DIAG_WARN, error or "context compaction did not complete")
-        )
+        _Runtime.record(lib.HAX_DIAG_WARN, error or "context compaction did not complete")
         return False
 
     def send(self, prompt: str) -> str:
@@ -658,7 +725,8 @@ class Agent:
         if self._closed:
             raise HaxError("this Agent is closed")
 
-        lib.cancel_clear_requests()
+        # Only this agent's flags: a sibling's pending cancel is not ours to consume.
+        lib.cancel_state_clear(self._cancel)
         self._pending_exc = None
         before = self._session.n_items
 
@@ -669,6 +737,7 @@ class Agent:
             {
                 "session": self._session,
                 "provider": self._provider,
+                "cancel": self._cancel,
                 "tlog": ffi.NULL,
                 "slog": ffi.NULL,
                 "max_turns": self._max_turns,
@@ -738,8 +807,12 @@ class Agent:
 
     @property
     def diagnostics(self) -> list[str]:
-        """Every hax diagnostic emitted since construction."""
-        return [message for _, message in self._diagnostics]
+        """Every hax diagnostic emitted since construction.
+
+        The sink is per process, so with several Agents alive this is everything recorded after
+        this one was built, not only what it caused.
+        """
+        return [message for _, message in _Runtime.since(self._diag_mark)]
 
     @property
     def compactions(self) -> int:

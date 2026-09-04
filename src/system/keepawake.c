@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "system/keepawake.h"
 
+#include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -13,7 +14,14 @@
 #include <stdlib.h>
 #endif
 
-/* Calls occur on the main thread at the user-turn boundary. */
+/* Serializes the helper handle. Calls come from whichever thread reaches a user-turn boundary,
+ * and concurrent agents reach theirs independently. Acquire and release stay idempotent rather
+ * than refcounted, so the last release stops inhibition even while another agent still runs —
+ * this is best-effort sleep inhibition, not a resource lease. */
+static pthread_mutex_t helper_lock = PTHREAD_MUTEX_INITIALIZER;
+/* pthread.h reaches pid_t through a bits/ header first, and both that and sys/types.h are on the
+ * include-cleaner ignore list, so nothing we can include carries the attribution. */
+// NOLINTNEXTLINE(misc-include-cleaner)
 static pid_t helper_pid;
 
 static void reap_dead_helper(void)
@@ -105,21 +113,25 @@ static void spawn_helper(void)
 
 void keepawake_acquire(void)
 {
+    /* Read the setting outside the lock: config is foreground state and not ours to serialize. */
     if (!config_bool_or("keep_awake", 1))
         return;
+    pthread_mutex_lock(&helper_lock);
     reap_dead_helper();
-    if (helper_pid > 0)
-        return;
-    spawn_helper();
+    if (helper_pid <= 0)
+        spawn_helper();
+    pthread_mutex_unlock(&helper_lock);
 }
 
 void keepawake_release(void)
 {
-    if (helper_pid <= 0)
-        return;
-    kill(helper_pid, SIGTERM);
-    /* A helper that survives SIGTERM (caffeinate has been seen wedged on virtualized
-     * macOS) must not hang the turn boundary; escalate instead of waiting forever. */
-    (void)spawn_wait_child_timeout(helper_pid, 500);
-    helper_pid = 0;
+    pthread_mutex_lock(&helper_lock);
+    if (helper_pid > 0) {
+        kill(helper_pid, SIGTERM);
+        /* A helper that survives SIGTERM (caffeinate has been seen wedged on virtualized
+         * macOS) must not hang the turn boundary; escalate instead of waiting forever. */
+        (void)spawn_wait_child_timeout(helper_pid, 500);
+        helper_pid = 0;
+    }
+    pthread_mutex_unlock(&helper_lock);
 }

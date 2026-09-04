@@ -50,8 +50,11 @@ char *task_report_output(const char *id, char **marker_out);
  * With kill_on_timeout, an elapsed timeout instead stops the task (SIGTERM, the bash grace
  * window, then SIGKILL) and the wait runs on until the exit is observed; once the kill is
  * signalled, foreign completions no longer end the wait early. Never returns NULL. */
+struct cancel_state;
+
+/* `cancel` selects which cancellation the wait watches; NULL means the process state. */
 char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
-                       tool_display_fn display, void *display_data);
+                       tool_display_fn display, void *display_data, struct cancel_state *cancel);
 
 /* User-driven stop that does not consume the model-facing report: the next collected note still
  * delivers each task's final state. NULL/empty ids stops every live task. Returns the number of

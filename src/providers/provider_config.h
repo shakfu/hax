@@ -65,8 +65,9 @@ const char *provider_cache_ttl(const char *config_prefix);
  * dropped with a warning, as is a non-object value. */
 json_t *provider_extra_body(const char *config_prefix);
 
-/* Affinity id for requests outside any conversation. Borrowed static storage, generated on
- * first use; foreground-thread only. */
+/* Affinity id for requests outside any conversation — deliberately one per process, since such
+ * requests belong to no conversation to key on. Borrowed static storage, generated once on first
+ * use, and safe to call from any thread: concurrent agents reach it through their own streams. */
 const char *provider_process_session_id(void);
 
 /* Owned NULL-terminated "Name: value" strings from an extra_headers object (a def's or a config

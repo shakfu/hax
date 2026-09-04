@@ -55,10 +55,11 @@ static void exec_shell_child(const char *shell, const char *argv0, const char *c
     _exit(127);
 }
 
-static char *start_shell(const char *command, struct shell_process *process)
+static char *start_shell(const char *command, struct shell_process *process,
+                         const struct bash_env_selection *selection)
 {
     /* Resolve everything before fork so the child can avoid allocator and environment locks. */
-    char **envp = bash_build_child_env();
+    char **envp = bash_build_child_env(selection);
     char *shell = bash_resolve_shell();
     const char *argv0 = strrchr(shell, '/');
     argv0 = argv0 ? argv0 + 1 : shell;
@@ -272,12 +273,13 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
 {
     tool_display_fn display = ctx ? ctx->display : NULL;
     void *display_data = ctx ? ctx->display_data : NULL;
+    struct cancel_state *cancel = ctx ? ctx->cancel : NULL;
     int tasks_enabled = !config_bool("no_tasks");
     if (!tasks_enabled)
         background = 0;
 
     struct shell_process process = {0};
-    char *error = start_shell(command, &process);
+    char *error = start_shell(command, &process, ctx ? ctx->env_selection : NULL);
     if (error)
         return error;
 
@@ -320,7 +322,7 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
         }
 
         /* User interruption wins if it coincides with the timeout. */
-        if (stop_reason == BASH_STOP_NONE && cancel_abort_requested()) {
+        if (stop_reason == BASH_STOP_NONE && cancel_state_abort_requested(cancel)) {
             stop_reason = BASH_STOP_INTERRUPT;
             if (shell_exited) {
                 /* Background suppressed the shell-exit kill; orphans die on the way out. */

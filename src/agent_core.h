@@ -6,6 +6,7 @@
 
 #include "provider.h"
 #include "tool.h"
+#include "tools/bash_env.h"
 
 /* State and conversation-record bookkeeping shared by the interactive and one-shot frontends:
  * the canonical flat item log (struct agent_session) with its views and mutators, and the
@@ -56,6 +57,10 @@ struct agent_session {
      * means no entry is owned, so a hand-assembled session needs only `tools` and `n_tools`. */
     unsigned char *tools_owned;
     int raw_mode;
+
+    /* What this agent's subprocesses inherit. Per session rather than process-wide: concurrent
+     * agents resolve different models, and one shared copy would free another's strings. */
+    struct bash_env_selection env_selection;
 
     /* The whole conversation, including prefixes a compaction has already summarized. */
     struct item *items;

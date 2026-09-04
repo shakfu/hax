@@ -69,8 +69,13 @@ struct tool_def {
 };
 
 /* --- tool.h --- */
+/* Opaque: the binding only forwards a session's selection to the tools it dispatches. */
+struct bash_env_selection { ...; };
+
 struct tool_run_ctx {
     int image_input;
+    const struct bash_env_selection *env_selection;
+    struct cancel_state *cancel;
     ...;
 };
 
@@ -93,6 +98,7 @@ struct agent_session {
     char *system_prompt;
     struct tool_def *tools;
     size_t n_tools;
+    struct bash_env_selection env_selection;
     struct item *items;
     size_t n_items;
     ...;
@@ -142,6 +148,7 @@ struct agent_loop_result {
 struct agent_loop_params {
     struct agent_session *session;
     struct provider *provider;
+    struct cancel_state *cancel;
     struct transcript_log *tlog;
     struct session_log *slog;
     int max_turns;
@@ -183,6 +190,14 @@ void compact_run(const struct compact_params *params, struct compact_result *res
 void compact_result_destroy(struct compact_result *result);
 
 /* --- system/cancel.h --- */
+/* Opaque: the binding allocates one per Agent and only passes it back. */
+struct cancel_state { ...; };
+
+void cancel_state_request_abort(struct cancel_state *state);
+int cancel_state_pause_requested(const struct cancel_state *state);
+int cancel_state_abort_requested(const struct cancel_state *state);
+void cancel_state_clear(struct cancel_state *state);
+
 void cancel_request_abort(void);
 void cancel_request_pause(void);
 int cancel_pause_requested(void);

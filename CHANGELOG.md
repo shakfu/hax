@@ -9,6 +9,36 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `bindings/python/hermetic.py` withdraws hax's ambient context from an embedded agent.
+  `Agent(system_prompt=...)` replaces only the base prompt, so a worker still carried the
+  Environment section, the skills listing and any `AGENTS.md` above the working directory, and
+  still held `read`/`edit`/`write`/`bash` -- a worker handed one document could reach the rest of
+  the filesystem, and the same script produced different prompts in different directories.
+  `confine()` sets the five config keys that drop the appended sections; `seal()` shadows each
+  remaining built-in with an argumentless stub that refuses, replacing its advertised definition
+  rather than showing the model a working tool it cannot use. The multi-agent examples call both.
+- Four multi-agent examples for the Python binding, each against a live provider:
+  `example_fanout.py` maps one agent per document and reduces their findings with a further
+  agent; `example_supervisor.py` makes delegation a tool, so specialist agents run inside the
+  supervisor's turn and keep their conversations between delegations; `example_judge.py` puts one
+  question to several providers at once and has a further model rank the answers blind;
+  `example_shared_state.py` runs concurrent agents against one in-memory queue with claiming and
+  ownership enforced by the host rather than the prompt. See
+  [bindings/python/README.md](bindings/python/README.md).
+- `bindings/python/example_async.py` drives several agents concurrently from asyncio and cancels
+  one of them mid-turn. No async API was needed: `send()` releases the GIL, so a thread executor
+  gives real concurrency, and `Agent.cancel()` maps onto task cancellation. The binding README
+  documents the pattern.
+- Cancellation can be scoped to one agent. `agent_loop_params.cancel` and `tool_run_ctx.cancel`
+  select which `struct cancel_state` a run and its tools watch, and a NULL keeps the process-wide
+  flags the terminal watcher and signal handlers write. `hax.Agent.cancel()` now stops only the
+  agent it was called on, where it previously stopped whichever turns noticed first and could
+  swallow a sibling's pending cancel.
+- The Python binding can hold several `hax.Agent`s at once, and run their turns concurrently on
+  separate threads. `hax_init()` is refcounted behind them, so it is one initialization per
+  process rather than one agent; constructing a second `Agent` used to raise. Configuration stays
+  process-wide, so each agent copies its provider and model as it is built and `cancel()` remains
+  process-wide. See [bindings/python/README.md](bindings/python/README.md).
 - A resumed one-shot run no longer requires a prompt: `hax --resume=ID -p` (or `--json`)
   continues the conversation from where it stopped, including after an interrupt or pause.
 - `hax --json` (implies `-p`) streams the run as JSON lines on stdout for orchestrators and
@@ -22,12 +52,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   library lives in [bindings/python](bindings/python) — a cffi binding whose declarations are
   compiled against the real headers, so a drifting struct fails the build instead of misreading
   memory — including host-defined tools that the model calls alongside hax's own. Meson builds the
-  extension alongside everything else. Configuration stays process-wide, so one agent per process.
-  A turn is interruptible with `Agent.cancel()` from another thread, the context is compacted
-  automatically once it crosses the configured threshold, and history reports hax's own item
-  provenance so a call that never ran is distinguishable from one that did. `make wheel` packages
-  the same build output as an installable wheel: the extension, `libhax`, and the `hax` binary.
-  See [bindings/python/README.md](bindings/python/README.md).
+  extension alongside everything else. Configuration stays process-wide. A turn is interruptible
+  with `Agent.cancel()` from another thread, the context is compacted automatically once it
+  crosses the configured threshold, and history reports hax's own item provenance so a call that
+  never ran is distinguishable from one that did. `make wheel` packages the same build output as
+  an installable wheel: the extension, `libhax`, and the `hax` binary. See
+  [bindings/python/README.md](bindings/python/README.md).
 - `/login` for the codex provider now offers a browser flow (authorization code with PKCE through
   a `localhost` redirect) alongside device login, for organizations that block the device flow.
   Device login remains the ssh-friendly path. See [docs/providers.md](docs/providers.md#codex).
@@ -45,6 +75,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- `libhax` hosts can now build and run several `agent_session`s concurrently under one
+  `hax_init()`. Two sessions initializing at once previously double-freed the shared provider
+  selection that child processes inherit; that selection is now owned per session and reaches the
+  bash tool through the tool run context. Idle-sleep inhibition is serialized as well. See
+  [docs/embedding.md](docs/embedding.md).
 - `system/browser` no longer fails intermittently during a parallel test run. It waited a fixed
   300 polls for the detached opener to record its URL, which is 3.6 seconds -- less than the
   detached grandchild plus three execs can take while the rest of the suite is spawning. The wait

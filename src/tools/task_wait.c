@@ -48,7 +48,7 @@ static char *run_task_wait(const char *args_json, struct tool_run_ctx *ctx)
     }
 
     char *report = task_wait_stream(id, timeout_ms, kill_on_timeout, ctx ? ctx->display : NULL,
-                                    ctx ? ctx->display_data : NULL);
+                                    ctx ? ctx->display_data : NULL, ctx ? ctx->cancel : NULL);
     json_decref(arguments);
     return report;
 }

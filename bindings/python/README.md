@@ -106,6 +106,8 @@ question from what runs when a call arrives.
 
 ## Examples
 
+One agent:
+
 **`example.py`** — the smallest complete turn with one host tool, against the mock provider.
 
 **`example_database.py`** — a read-only SQL agent against a real provider. Its tools close over a
@@ -119,8 +121,83 @@ uv run python bindings/python/example_database.py --provider anthropic \
     --model claude-sonnet-5 "which customer spent the most, and on what?"
 ```
 
-Both accept `--provider mock` with `HAX_MOCK_SCRIPT` to replay a fixture instead of calling a
-model, which is how the test suite exercises them.
+Several agents:
+
+**`example_async.py`** — several agents driven concurrently from asyncio, and one of them
+cancelled while the others run on. See [Async](#async) below.
+
+**`example_fanout.py`** — map-reduce over a corpus: one agent per document, all in flight at
+once, then a further agent that merges their findings. A worker sees one document and nothing
+else: `read_document` closes over its own text, and `hermetic.py` withdraws the ambient prompt
+and refuses the filesystem built-ins.
+
+```sh
+uv run python bindings/python/example_fanout.py --provider anthropic \
+    --model claude-sonnet-5 "how does hax decide which provider to use?"
+```
+
+**`example_supervisor.py`** — delegation as a tool the model calls. `ask` and `ask_all` run
+specialist agents from inside the supervisor's turn; each specialist keeps its conversation
+across delegations, so a follow-up costs one turn rather than a restated thread. The librarian's
+`read_file` enforces its own root in Python. `--deadline` cancels the supervisor and every
+specialist still running.
+
+```sh
+uv run python bindings/python/example_supervisor.py --provider anthropic \
+    --model claude-sonnet-5 "explain how hax picks a provider, and check it against the docs"
+```
+
+**`example_judge.py`** — the same question to several providers at once, ranked blind by a
+further model. Provider and model are per agent, so an Anthropic model, an OpenAI model and a
+local server compete in one run; a candidate whose provider fails is recorded and skipped rather
+than taking the comparison down. Every candidate is made hermetic, so what differs between them
+is the model and not the directory the comparison ran in.
+
+```sh
+uv run python bindings/python/example_judge.py \
+    --candidate anthropic:claude-sonnet-5 --candidate openai:gpt-5.6 \
+    --judge anthropic:claude-opus-5 "why does a compiler need a separate linker?"
+```
+
+**`example_shared_state.py`** — concurrent agents working one in-memory queue. The host owns
+claiming, ownership and the allowed vocabulary; the caller's identity comes from the tool's
+closure rather than an argument the model supplies, so a worker cannot submit for a job it does
+not hold. Separate `hax -p` processes would need an IPC protocol to reach the same queue.
+
+```sh
+uv run python bindings/python/example_shared_state.py --provider anthropic \
+    --model claude-sonnet-5 --workers 3
+```
+
+Every example takes `--provider mock` with `HAX_MOCK_SCRIPT` pointing at a fixture in
+`scripts/mock/`, which replays a scripted turn instead of calling a model. That is how the test
+suite exercises them.
+
+## What an agent gets besides your tools
+
+`Agent(system_prompt=...)` replaces the base prompt and nothing more. Every non-raw session also
+carries hax's Environment section, the task and subagent guidance, the skills listing, and any
+`AGENTS.md` found from the working directory upward plus `~/.config/hax/AGENTS.md` — and it
+advertises `read`, `edit`, `write`, `bash` and `task_wait` alongside whatever you registered.
+
+That is right for a coding assistant and wrong for a worker meant to see one document. It also
+makes a script's prompts depend on the directory it was started from. `hermetic.py` covers both
+halves:
+
+```python
+from hermetic import confine, seal
+
+confine()                       # once, before the first Agent
+with hax.Agent(provider="anthropic", system_prompt=WORKER_PROMPT) as worker:
+    seal(worker)                # refuse read, edit, write, bash
+```
+
+`confine()` sets `no_env`, `no_agents_md`, `no_skills`, `no_subagents` and `no_tasks`, which are
+ordinary config keys read from the environment; they are process-wide, so there is no per-agent
+form. `no_tasks` withdraws `task_wait` outright. The other four cannot be unregistered, so
+`seal()` shadows each with an argumentless stub that says it is unavailable and refuses when
+called — which replaces the built-in's definition, rather than advertising a working `bash` the
+model will keep trying.
 
 ## API
 
@@ -130,8 +207,12 @@ One conversation against one provider. `provider` and `model` fall back to hax's
 when omitted. `record_session=True` writes a resumable session log, off by default so an embedded
 agent leaves nothing behind unless asked.
 
-Use it as a context manager, or call `close()`. Both release the provider and hax's process-wide
-state.
+Use it as a context manager, or call `close()`. Either releases this agent's session and provider;
+hax's process-wide state is torn down when the last live `Agent` closes.
+
+Several agents may exist at once, and their turns may run concurrently on separate threads —
+conversation state, tools, and the subprocess environment are per session. Construction is
+serialized internally, because hax resolves configuration into a session as it is built.
 
 ### `@agent.tool`
 
@@ -188,6 +269,41 @@ legitimately return the same text.
 Every hax diagnostic since construction. hax normally writes these to stderr; the binding captures
 them instead and attaches the most recent one to errors it raises.
 
+## Async
+
+There is no separate async API and none is needed. `send()` blocks, but it releases the GIL for
+the whole turn, so a thread executor gives you real concurrency:
+
+```python
+replies = await asyncio.gather(
+    asyncio.to_thread(first.send, "one"),
+    asyncio.to_thread(second.send, "two"),
+)
+```
+
+Three turns that each take two seconds finish in about two, not six.
+
+Cancellation needs one more step, because a thread cannot be interrupted from outside. Shield the
+executor future, ask hax to stop, and let the turn unwind:
+
+```python
+async def send(agent, prompt):
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(None, agent.send, prompt)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        agent.cancel()
+        try:
+            await future
+        except hax.HaxCancelled:
+            pass
+        raise
+```
+
+Without the shield the future is abandoned and its thread keeps running the turn.
+`example_async.py` is this pattern end to end, and the test suite runs it.
+
 ## Errors
 
 `HaxError` is the base. `HaxProviderError` covers a failed or rejected provider stream, and
@@ -200,11 +316,15 @@ clean seam.
 
 ## Limits
 
-- **One agent per process.** hax keeps configuration, provider selection, and diagnostics in
-  process-wide state. Constructing a second `Agent` while one is live raises rather than letting
-  two silently share one configuration.
-- **No streaming API yet.** `send()` blocks until the turn completes, though `cancel()` can stop
-  it. The underlying loop does expose a per-event hook; a callback API over it would be a small
+- **One configuration per process.** Several agents can run at once, but hax keeps configuration,
+  provider selection, and diagnostics in process-wide state. Each agent copies what it needs as it
+  is constructed, so agents built with different providers or models keep those settings — but
+  anything hax re-reads from configuration later is shared, and `diagnostics` reports everything
+  recorded since that agent was built rather than only its own.
+- **No per-agent pause.** `cancel()` aborts one agent and leaves its siblings running, but hax's
+  softer pause-at-a-seam is not exposed; a cancelled turn always ends as `HaxCancelled`.
+- **No streaming API yet.** `send()` returns the finished turn, though `cancel()` can stop it.
+  The underlying loop does expose a per-event hook; a callback API over it would be a small
   addition, a generator API a larger one.
 - **The GIL is released** around the loop and reacquired for each callback, so other Python
   threads run during a provider round-trip. That is what makes `cancel()` from another thread
@@ -213,10 +333,16 @@ clean seam.
 ## Layout
 
 ```
-hax_build.py   cffi declarations; emits the glue C that meson compiles
-hax/           the Agent API
-example.py     minimal example
-example_database.py
+hax_build.py            cffi declarations; emits the glue C that meson compiles
+hax/                    the Agent API
+example.py              minimal example
+example_database.py     one agent, host-owned tools
+example_async.py        several agents from asyncio
+example_fanout.py       map-reduce over a corpus
+example_supervisor.py   delegation as a tool
+example_judge.py        several models compared and ranked
+example_shared_state.py several agents, one queue
+hermetic.py             withdraw hax's ambient prompt and built-in tools
 ```
 
 `hax_build.py`'s declarations are hand-written but **checked**: cffi compiles them against the real
