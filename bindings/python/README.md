@@ -86,6 +86,8 @@ question from what runs when a call arrives.
 
 ## Examples
 
+One agent:
+
 **`example.py`** — the smallest complete turn with one host tool, against the mock provider.
 
 **`example_database.py`** — a read-only SQL agent against a real provider. Its tools close over a
@@ -99,11 +101,83 @@ uv run python bindings/python/example_database.py --provider anthropic \
     --model claude-sonnet-5 "which customer spent the most, and on what?"
 ```
 
+Several agents:
+
 **`example_async.py`** — several agents driven concurrently from asyncio, and one of them
 cancelled while the others run on. See [Async](#async) below.
 
-The first two accept `--provider mock` with `HAX_MOCK_SCRIPT` to replay a fixture instead of
-calling a model, which is how the test suite exercises them.
+**`example_fanout.py`** — map-reduce over a corpus: one agent per document, all in flight at
+once, then a further agent that merges their findings. A worker sees one document and nothing
+else: `read_document` closes over its own text, and `hermetic.py` withdraws the ambient prompt
+and refuses the filesystem built-ins.
+
+```sh
+uv run python bindings/python/example_fanout.py --provider anthropic \
+    --model claude-sonnet-5 "how does hax decide which provider to use?"
+```
+
+**`example_supervisor.py`** — delegation as a tool the model calls. `ask` and `ask_all` run
+specialist agents from inside the supervisor's turn; each specialist keeps its conversation
+across delegations, so a follow-up costs one turn rather than a restated thread. The librarian's
+`read_file` enforces its own root in Python. `--deadline` cancels the supervisor and every
+specialist still running.
+
+```sh
+uv run python bindings/python/example_supervisor.py --provider anthropic \
+    --model claude-sonnet-5 "explain how hax picks a provider, and check it against the docs"
+```
+
+**`example_judge.py`** — the same question to several providers at once, ranked blind by a
+further model. Provider and model are per agent, so an Anthropic model, an OpenAI model and a
+local server compete in one run; a candidate whose provider fails is recorded and skipped rather
+than taking the comparison down. Every candidate is made hermetic, so what differs between them
+is the model and not the directory the comparison ran in.
+
+```sh
+uv run python bindings/python/example_judge.py \
+    --candidate anthropic:claude-sonnet-5 --candidate openai:gpt-5.6 \
+    --judge anthropic:claude-opus-5 "why does a compiler need a separate linker?"
+```
+
+**`example_shared_state.py`** — concurrent agents working one in-memory queue. The host owns
+claiming, ownership and the allowed vocabulary; the caller's identity comes from the tool's
+closure rather than an argument the model supplies, so a worker cannot submit for a job it does
+not hold. Separate `hax -p` processes would need an IPC protocol to reach the same queue.
+
+```sh
+uv run python bindings/python/example_shared_state.py --provider anthropic \
+    --model claude-sonnet-5 --workers 3
+```
+
+Every example takes `--provider mock` with `HAX_MOCK_SCRIPT` pointing at a fixture in
+`scripts/mock/`, which replays a scripted turn instead of calling a model. That is how the test
+suite exercises them.
+
+## What an agent gets besides your tools
+
+`Agent(system_prompt=...)` replaces the base prompt and nothing more. Every non-raw session also
+carries hax's Environment section, the task and subagent guidance, the skills listing, and any
+`AGENTS.md` found from the working directory upward plus `~/.config/hax/AGENTS.md` — and it
+advertises `read`, `edit`, `write`, `bash` and `task_wait` alongside whatever you registered.
+
+That is right for a coding assistant and wrong for a worker meant to see one document. It also
+makes a script's prompts depend on the directory it was started from. `hermetic.py` covers both
+halves:
+
+```python
+from hermetic import confine, seal
+
+confine()                       # once, before the first Agent
+with hax.Agent(provider="anthropic", system_prompt=WORKER_PROMPT) as worker:
+    seal(worker)                # refuse read, edit, write, bash
+```
+
+`confine()` sets `no_env`, `no_agents_md`, `no_skills`, `no_subagents` and `no_tasks`, which are
+ordinary config keys read from the environment; they are process-wide, so there is no per-agent
+form. `no_tasks` withdraws `task_wait` outright. The other four cannot be unregistered, so
+`seal()` shadows each with an argumentless stub that says it is unavailable and refuses when
+called — which replaces the built-in's definition, rather than advertising a working `bash` the
+model will keep trying.
 
 ## API
 
@@ -239,10 +313,16 @@ clean seam.
 ## Layout
 
 ```
-hax_build.py   cffi declarations; emits the glue C that meson compiles
-hax/           the Agent API
-example.py     minimal example
-example_database.py
+hax_build.py            cffi declarations; emits the glue C that meson compiles
+hax/                    the Agent API
+example.py              minimal example
+example_database.py     one agent, host-owned tools
+example_async.py        several agents from asyncio
+example_fanout.py       map-reduce over a corpus
+example_supervisor.py   delegation as a tool
+example_judge.py        several models compared and ranked
+example_shared_state.py several agents, one queue
+hermetic.py             withdraw hax's ambient prompt and built-in tools
 ```
 
 `hax_build.py`'s declarations are hand-written but **checked**: cffi compiles them against the real

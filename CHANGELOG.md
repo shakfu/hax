@@ -9,6 +9,22 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `bindings/python/hermetic.py` withdraws hax's ambient context from an embedded agent.
+  `Agent(system_prompt=...)` replaces only the base prompt, so a worker still carried the
+  Environment section, the skills listing and any `AGENTS.md` above the working directory, and
+  still held `read`/`edit`/`write`/`bash` -- a worker handed one document could reach the rest of
+  the filesystem, and the same script produced different prompts in different directories.
+  `confine()` sets the five config keys that drop the appended sections; `seal()` shadows each
+  remaining built-in with an argumentless stub that refuses, replacing its advertised definition
+  rather than showing the model a working tool it cannot use. The multi-agent examples call both.
+- Four multi-agent examples for the Python binding, each against a live provider:
+  `example_fanout.py` maps one agent per document and reduces their findings with a further
+  agent; `example_supervisor.py` makes delegation a tool, so specialist agents run inside the
+  supervisor's turn and keep their conversations between delegations; `example_judge.py` puts one
+  question to several providers at once and has a further model rank the answers blind;
+  `example_shared_state.py` runs concurrent agents against one in-memory queue with claiming and
+  ownership enforced by the host rather than the prompt. See
+  [bindings/python/README.md](bindings/python/README.md).
 - `bindings/python/example_async.py` drives several agents concurrently from asyncio and cancels
   one of them mid-turn. No async API was needed: `send()` releases the GIL, so a thread executor
   gives real concurrency, and `Agent.cancel()` maps onto task cancellation. The binding README

@@ -581,6 +581,227 @@ def test_unknown_provider_reports_a_diagnostic() -> None:
     expect("no-such-provider" in str(raised), f"the diagnostic names the provider ({raised})")
 
 
+def test_fanout_example_gives_each_worker_its_own_document() -> None:
+    """The map phase is one agent per document, so a worker's tool must see only its own text."""
+    use_mock("read_document.txt")
+    from example_fanout import gather
+
+    corpus = scratch / "corpus"
+    corpus.mkdir(exist_ok=True)
+    (corpus / "first.md").write_text("The first document is about providers.")
+    (corpus / "second.md").write_text("The second document is about sessions.")
+    documents = sorted(corpus.glob("*.md"))
+
+    findings = gather(documents, "what is this about?", "mock", None)
+    expect([name for name, _ in findings] == ["first.md", "second.md"],
+           f"one finding per document, in corpus order (got {findings})")
+    expect(all(text for _, text in findings), f"every worker returned text (got {findings})")
+
+
+def test_supervisor_example_delegates_from_inside_a_tool_call() -> None:
+    """Delegation builds a second Agent while the first is mid-turn, on the first one's thread.
+
+    This is the shape that a one-agent-per-process binding could not express at all: the nested
+    construction happens under the runtime lock while the supervisor's loop holds nothing.
+    """
+    use_mock("delegate.txt")
+    from example_supervisor import Team, register_delegation
+
+    team = Team("mock", None, REPO_ROOT)
+    try:
+        with hax.Agent(provider="mock") as supervisor:
+            register_delegation(supervisor, team)
+            # The supervisor's provider copied delegate.txt at construction; specialists built
+            # during the turn resolve HAX_MOCK_SCRIPT again and get a plain one-turn script.
+            use_mock("hello.txt")
+            reply = supervisor.send("explain provider selection")
+
+        expect(bool(reply), f"the supervisor turn completed (got {reply!r})")
+        expect([name for name, _, _ in team.transcript] == ["librarian"],
+               f"exactly the delegated specialist ran (got {team.transcript})")
+        expect(team.transcript and team.transcript[0][2] == "Hello from mock",
+               f"the specialist's own reply came back through the tool (got {team.transcript})")
+    finally:
+        team.close()
+
+
+def test_supervisor_librarian_cannot_read_outside_its_root() -> None:
+    """The root is a host guard, not a prompt instruction, so it must hold against any path."""
+    use_mock("hello.txt")
+    from example_supervisor import Team
+
+    root = scratch / "librarian-root"
+    root.mkdir(exist_ok=True)
+    (root / "inside.txt").write_text("visible")
+    (scratch / "outside.txt").write_text("secret")
+
+    team = Team("mock", None, root)
+    try:
+        agent = team._build("librarian")
+        try:
+            read_file = agent._tools["read_file"]
+            expect(read_file(path="inside.txt") == "visible", "a file inside the root is readable")
+            escaped = read_file(path="../outside.txt")
+            expect(escaped.startswith("error:"), f"a traversal is refused (got {escaped!r})")
+            expect("secret" not in escaped, "and the refusal leaks nothing")
+        finally:
+            agent.close()
+    finally:
+        team.close()
+
+
+def test_triage_board_enforces_ownership_and_vocabulary() -> None:
+    """Concurrent agents share one queue, so the host owns claiming and validation."""
+    from example_shared_state import Board, Job
+
+    board = Board([Job("BUG-001", "first"), Job("BUG-002", "second")])
+
+    first = board.claim("worker-1")
+    expect(isinstance(first, dict) and first["job_id"] == "BUG-001",
+           f"the first claim hands out the first job (got {first})")
+    again = board.claim("worker-1")
+    expect(isinstance(again, str) and again.startswith("error:"),
+           f"a second claim while holding one is refused (got {again})")
+    second = board.claim("worker-2")
+    expect(isinstance(second, dict) and second["job_id"] == "BUG-002",
+           f"another worker gets the next job (got {second})")
+
+    stolen = board.submit("worker-2", "BUG-001", "major", "provider", "not mine")
+    expect(stolen.startswith("error:"), f"submitting another worker's job is refused ({stolen})")
+    bad = board.submit("worker-1", "BUG-001", "catastrophic", "provider", "x")
+    expect(bad.startswith("error:"), f"an unknown severity is refused ({bad})")
+    unknown = board.submit("worker-1", "BUG-001", "major", "wormhole", "x")
+    expect(unknown.startswith("error:"), f"an unknown component is refused ({unknown})")
+
+    ok = board.submit("worker-1", "BUG-001", "major", "provider", "auth fails")
+    expect(not ok.startswith("error:"), f"the holder's valid verdict is recorded ({ok})")
+    repeat = board.submit("worker-1", "BUG-001", "minor", "provider", "again")
+    expect(repeat.startswith("error:"), f"a triaged job cannot be resubmitted ({repeat})")
+    expect(board.outstanding() == 1, f"one job is still untriaged (got {board.outstanding()})")
+
+
+def test_triage_tools_reach_the_shared_board() -> None:
+    """A rejected submission must be recoverable: the model corrects it on the next round trip."""
+    use_mock("triage.txt")
+    from example_shared_state import Board, Job, register_tools
+
+    board = Board([Job("BUG-001", "auth fails after a key rotation")])
+    with hax.Agent(provider="mock") as agent:
+        register_tools(agent, board, "worker-1")
+        agent.send("work the queue")
+
+    verdict = board.jobs[0].verdict
+    expect(verdict is not None, "the job was triaged through the tools")
+    if verdict:
+        expect(verdict["severity"] == "blocker",
+               f"the corrected severity is the one recorded (got {verdict})")
+    expect(board.outstanding() == 0, "nothing is left on the queue")
+    expect(any("claimed" in line for line in board.log), f"the claim is logged (got {board.log})")
+
+
+def test_judge_example_records_a_failed_candidate() -> None:
+    """One unreachable provider must not take the comparison down with it."""
+    use_mock("hello.txt")
+    from example_judge import ask, parse_candidate
+
+    expect(parse_candidate("anthropic:claude-sonnet-5") == ("anthropic", "claude-sonnet-5"),
+           "a provider:model spec splits")
+    expect(parse_candidate("mock") == ("mock", None), "a bare provider carries no model")
+
+    good = ask("A", "mock", "hello")
+    expect(good.error is None and bool(good.text), f"a reachable candidate answers (got {good})")
+    expect(good.model == "mock-model", f"the resolved model is reported (got {good.model!r})")
+
+    bad = ask("B", "no-such-provider", "hello")
+    expect(bad.error is not None, "an unreachable candidate records an error instead of raising")
+    expect("no-such-provider" in bad.error, f"the error names the provider (got {bad.error!r})")
+
+
+def test_example_tools_are_advertised_with_their_schemas() -> None:
+    """A scripted call proves dispatch; only the advertised list proves a live model could call.
+
+    The multi-agent examples add two shapes the other scenarios do not cover: a tool with no
+    parameters at all, and one with four required ones.
+    """
+    use_mock("hello.txt")
+    from example_shared_state import Board, Job, register_tools
+
+    board = Board([Job("BUG-001", "first")])
+    with hax.Agent(provider="mock") as agent:
+        register_tools(agent, board, "worker-1")
+        advertised = {t["name"]: t for t in agent.tools}
+
+        expect("claim_job" in advertised, f"claim_job is advertised (got {sorted(advertised)})")
+        expect(advertised.get("claim_job", {}).get("parameters") == [],
+               f"a zero-argument tool advertises no parameters "
+               f"(got {advertised.get('claim_job', {}).get('parameters')})")
+
+        submit = advertised.get("submit_triage", {})
+        params = {p["name"]: p for p in submit.get("parameters", [])}
+        expect(set(params) == {"job_id", "severity", "component", "summary"},
+               f"every argument is advertised (got {sorted(params)})")
+        expect(all(p["required"] and p["type"] == "string" for p in params.values()),
+               f"all four are required strings (got {params})")
+        expect(submit.get("description") == "Record a verdict for the job you currently hold.",
+               f"only the docstring summary describes it (got {submit.get('description')!r})")
+
+        bash = advertised.get("bash", {})
+        expect(bash.get("parameters") == [],
+               f"register_tools seals hax's own tools as it registers its own (got {bash})")
+
+
+def test_hermetic_agents_get_only_their_host_tools() -> None:
+    """Agent(system_prompt=...) replaces the base prompt only; the rest has to be withdrawn.
+
+    Without confine() a worker carries hax's Environment section and whatever AGENTS.md sits
+    above the working directory, so the same script produces different prompts in different
+    directories. Without seal() it still holds bash, which reaches everything its host tool was
+    written to keep it away from.
+    """
+    use_mock("hello.txt")
+    from hermetic import BUILTINS, REFUSAL, confine, seal
+
+    workdir = scratch / "hermetic"
+    workdir.mkdir(exist_ok=True)
+    (workdir / "AGENTS.md").write_text("# Probe\n\nAmbient guidance a worker must not inherit.\n")
+    previous = Path.cwd()
+    saved = {name: os.environ.get(name) for name in
+             ("HAX_NO_ENV", "HAX_NO_AGENTS_MD", "HAX_NO_SKILLS", "HAX_NO_SUBAGENTS",
+              "HAX_NO_TASKS")}
+    os.chdir(workdir)
+    try:
+        with hax.Agent(provider="mock", system_prompt="Read one document.") as ambient:
+            prompt = hax.ffi.string(ambient._session.system_prompt).decode()
+            expect("Probe" in prompt, "an unconfined agent inherits the ambient AGENTS.md")
+            bash = {t["name"]: t for t in ambient.tools}.get("bash", {})
+            expect(bool(bash.get("parameters")), f"and a working bash (got {bash})")
+
+        confine()
+        with hax.Agent(provider="mock", system_prompt="Read one document.") as sealed:
+            seal(sealed)
+            prompt = hax.ffi.string(sealed._session.system_prompt).decode()
+            expect(prompt == "Read one document.",
+                   f"a confined agent carries only the host's prompt (got {prompt!r})")
+
+            advertised = {t["name"]: t for t in sealed.tools}
+            expect("task_wait" not in advertised,
+                   f"HAX_NO_TASKS withdraws task_wait outright (got {sorted(advertised)})")
+            for name in BUILTINS:
+                definition = advertised.get(name, {})
+                expect(definition.get("parameters") == [],
+                       f"{name} is advertised as an argumentless stub (got {definition})")
+                expect("Not available" in definition.get("description", ""),
+                       f"{name}'s description says so (got {definition.get('description')!r})")
+                expect(sealed._tools[name]() == REFUSAL, f"and dispatching {name} refuses")
+    finally:
+        os.chdir(previous)
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 test_plain_turn()
 test_host_tool_runs()
 test_host_tool_is_advertised()
@@ -602,5 +823,13 @@ test_database_example_enforces_read_only()
 test_several_agents_coexist()
 test_agents_run_concurrently()
 test_unknown_provider_reports_a_diagnostic()
+test_fanout_example_gives_each_worker_its_own_document()
+test_supervisor_example_delegates_from_inside_a_tool_call()
+test_supervisor_librarian_cannot_read_outside_its_root()
+test_triage_board_enforces_ownership_and_vocabulary()
+test_triage_tools_reach_the_shared_board()
+test_judge_example_records_a_failed_candidate()
+test_example_tools_are_advertised_with_their_schemas()
+test_hermetic_agents_get_only_their_host_tools()
 
 sys.exit(1 if failures else 0)

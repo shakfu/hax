@@ -1,0 +1,12 @@
+# A supervisor turn that delegates: one call to the host's ask tool, which builds and runs a
+# further agent inside the tool call, then a closing turn. Point the specialist at another
+# script by setting HAX_MOCK_SCRIPT again after the supervisor is constructed.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/delegate.txt build/hax -p go
+
+text Asking the librarian.
+tool ask {"specialist":"librarian","question":"which file documents provider selection?"}
+end-turn
+
+text The librarian answered.
+end-turn

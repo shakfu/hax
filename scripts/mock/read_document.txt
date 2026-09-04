@@ -1,0 +1,11 @@
+# One call to a zero-argument host tool, then a closing turn. Used by the fan-out example
+# scenario, where each worker's read_document closes over its own document.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/read_document.txt build/hax -p go
+
+text Reading the document.
+tool read_document {}
+end-turn
+
+text The document covers provider selection.
+end-turn

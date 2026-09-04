@@ -1,0 +1,20 @@
+# One worker against the shared-queue example: claim a job, submit a verdict the host rejects,
+# then submit a valid one. Deterministic only with a single worker, which is what the binding
+# scenario runs; the concurrent case is covered against the board directly.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/triage.txt build/hax -p go
+
+text Claiming a report.
+tool claim_job {}
+end-turn
+
+text Filing it.
+tool submit_triage {"job_id":"BUG-001","severity":"catastrophic","component":"provider","summary":"auth fails"}
+end-turn
+
+text Correcting the severity.
+tool submit_triage {"job_id":"BUG-001","severity":"blocker","component":"provider","summary":"auth fails after key rotation"}
+end-turn
+
+text Triaged one report.
+end-turn
