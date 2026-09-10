@@ -92,7 +92,7 @@ static void sync_parent_dir(const char *path)
 }
 
 /* mkstemp creates the temporary file with mode 0600, which is also the mode credentials need, so
- * the rename never exposes a readable window. The fsync before rename is load-bearing: a rotated
+ * the rename never exposes a readable window. The fsync before rename is structural: a rotated
  * refresh token restored from a stale page after a crash is spent and unrecoverable. */
 static int save_root(const char *path, json_t *root)
 {

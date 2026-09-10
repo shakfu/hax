@@ -128,7 +128,7 @@ Core boundaries:
 - Cancellation state lives in `system/cancel`, not in the terminal. The Esc watcher and an
   embedder are both producers; anything sampling cancellation reads the latched flags rather than
   depending on `terminal/interrupt`.
-- `hax_embed` is the seam for hosting hax inside another program: explicit lifecycle, a diagnostic
+- `hax_embed` is the layer for hosting hax inside another program: explicit lifecycle, a diagnostic
   sink in place of stderr, and FFI-shaped adapters for hooks that return structs by value. Its
   process-wide state means one embedded agent per process. See
   [`docs/embedding.md`](docs/embedding.md).

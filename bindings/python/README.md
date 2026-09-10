@@ -315,7 +315,7 @@ Without the shield the future is abandoned and its thread keeps running the turn
 An exception raised inside your tool propagates out of `send()` unchanged, with its original
 traceback. It cannot unwind through the C loop, so the binding stashes it, asks the loop to stop,
 and hands hax a well-formed error result first — history stays consistent, and the turn ends at a
-clean seam.
+clean layer.
 
 ## Limits
 
@@ -325,7 +325,7 @@ clean seam.
   anything hax re-reads from configuration later is shared, and `diagnostics` reports everything
   recorded since that agent was built rather than only its own.
 - **No per-agent pause.** `cancel()` aborts one agent and leaves its siblings running, but hax's
-  softer pause-at-a-seam is not exposed; a cancelled turn always ends as `HaxCancelled`.
+  softer pause-at-a-layer is not exposed; a cancelled turn always ends as `HaxCancelled`.
 - **No streaming API yet.** `send()` returns the finished turn, though `cancel()` can stop it.
   The underlying loop does expose a per-event hook; a callback API over it would be a small
   addition, a generator API a larger one.

@@ -277,7 +277,7 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
     EXPECT_STR_EQ(refresh_last_model, "model-b");
     free(out);
 
-    /* Provider identity is independently load-bearing: a fresh provider may
+    /* Provider identity is independently structural: a fresh provider may
      * have skipped its constructor probe or probed a default model. Even when
      * the selected model string stays identical, refresh it once after the
      * ownership swap. */
