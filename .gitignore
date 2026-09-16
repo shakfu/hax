@@ -23,3 +23,10 @@ __pycache__/
 # Wrap subprojects are fetched at build time; only the .wrap files are tracked
 /subprojects/*
 !/subprojects/*.wrap
+
+# agents
+.claude
+CLAUDE.md
+AGENTS.md
+REVIEW.md
+

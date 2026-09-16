@@ -10,7 +10,8 @@
  * process that owns its own locale, libcurl, and exit handling. hax_init() must complete before
  * any other hax call, and returns -1 when called twice.
  *
- * Everything hax_init() sets up is process-wide: one embedded agent per process. */
+ * Everything hax_init() sets up is process-wide and shared by every agent_session built under
+ * it. */
 
 struct hax_embed_options {
     /* Nonzero calls setlocale(LC_CTYPE) and publishes LC_CTYPE to the environment. Embedders

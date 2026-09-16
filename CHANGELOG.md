@@ -39,6 +39,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   process rather than one agent; constructing a second `Agent` used to raise. Configuration stays
   process-wide, so each agent copies its provider and model as it is built and `cancel()` remains
   process-wide. See [bindings/python/README.md](bindings/python/README.md).
+- A preset name right after `hax` starts with that preset: `hax review` is short for
+  `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
 
 ### Changed
 
@@ -76,8 +78,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   the docstring's first paragraph is the description — and `agent.tools` reports the advertised
   list. A `**kwargs` function still shadows a built-in's dispatch without altering its published
   arguments. See [bindings/python/README.md](bindings/python/README.md).
-- A preset name right after `hax` starts with that preset: `hax review` is short for
-  `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
+- `hax_embed.h` and `AGENTS.md` no longer claim one embedded agent per process; several
+  `agent_session`s run under one `hax_init()`, as [docs/embedding.md](docs/embedding.md) says.
 
 ### Changed
 
