@@ -338,3 +338,38 @@ fn no_key_anywhere_names_every_variable_it_looked_at() {
         assert!(stderr.contains(var), "{var} missing from: {stderr}");
     }
 }
+
+/// Everything under the config directory is owner-only. The model cache is public data, but it
+/// sits beside prompt history and, later, saved sessions; a directory with one lax file in it
+/// invites the next one.
+#[cfg(unix)]
+#[test]
+fn everything_written_to_the_config_directory_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::start("full");
+    let out = fixture.run(&[], "hi");
+    assert!(
+        out.status.success(),
+        "rxa failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let dir = fixture.dir.path().join("rxa");
+    let mode = |p: &std::path::Path| {
+        std::fs::metadata(p)
+            .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(&dir), 0o700, "config directory");
+
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("reading the config directory") {
+        let path = entry.expect("a directory entry").path();
+        assert_eq!(mode(&path), 0o600, "{}", path.display());
+        checked += 1;
+    }
+    assert!(checked > 0, "the run wrote nothing to check");
+}

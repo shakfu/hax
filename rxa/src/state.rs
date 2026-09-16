@@ -62,9 +62,10 @@ impl State {
             return;
         };
         let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-            // A model id is not a secret, but it names what the user works with.
-            let _ = crate::config::restrict_to_owner(&path);
+        if std::fs::write(&tmp, body).is_ok() {
+            // Tightened before the rename, so the file is never briefly world-readable.
+            let _ = crate::config::restrict_to_owner(&tmp);
+            let _ = std::fs::rename(&tmp, &path);
         }
     }
 

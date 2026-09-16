@@ -106,8 +106,12 @@ impl Models {
         let Ok(body) = serde_json::to_vec_pretty(self) else {
             return;
         };
+        let _ = crate::config::restrict_to_owner(parent);
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, body).is_ok() {
+            // Tightened before the rename, not after: restricting the destination would leave a
+            // window where the file is readable at the default umask.
+            let _ = crate::config::restrict_to_owner(&tmp);
             let _ = std::fs::rename(&tmp, &path);
         }
     }
