@@ -17,9 +17,10 @@
  *
  * Output is delivered per task, only through task_wait_stream (and the launch report), capped
  * like synchronous tool output with a per-task cursor tracking what the model has seen.
- * Completion is announced separately by one-line status notes; an announced task stays
- * collectable until a wait delivers its remaining output, and only then is it forgotten. The
- * spool file stays on disk as the overflow escape hatch. */
+ * Completion is announced separately by one-line status notes. A task is collected once the
+ * model holds its final status and all of its output, by a wait or by the note itself when
+ * nothing is pending; collection frees the name and delists the task, but its status remains
+ * answerable by id. The spool file stays on disk as the overflow escape hatch. */
 
 /* Reject a proposed task name with an allocated recoverable error, or return NULL when it is
  * usable: short identifier characters only, not the reserved t<digits> shape, and not held by a
@@ -46,10 +47,10 @@ char *task_report_output(const char *id, char **marker_out);
 /* Wait on one task, forwarding its output live through `display` while blocking. Returns the
  * capped undelivered output plus a bracketed status footer. Ends when the task finishes, when
  * any unannounced task finishes (so its note rides this round trip), on timeout, or on Esc; a
- * wait on an already-finished task returns its remaining output immediately and forgets it.
- * With kill_on_timeout, an elapsed timeout instead stops the task (SIGTERM, the bash grace
- * window, then SIGKILL) and the wait runs on until the exit is observed; once the kill is
- * signalled, foreign completions no longer end the wait early. Never returns NULL. */
+ * finished or collected task returns immediately. With kill_on_timeout, an elapsed timeout
+ * instead stops the task (SIGTERM, the bash grace window, then SIGKILL) and the wait runs on
+ * until the exit is observed; once the kill is signalled, foreign completions no longer end the
+ * wait early. Never returns NULL. */
 struct cancel_state;
 
 /* `cancel` selects which cancellation the wait watches; NULL means the process state. */
@@ -62,7 +63,7 @@ char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
 size_t task_stop(const char *const *ids, size_t n_ids);
 
 /* One announce-only note (a one-line status per newly finished task), or NULL when there are
- * none. Announced tasks stay collectable until a wait delivers their output. */
+ * none. */
 char *task_collect_notes(void);
 
 /* One allocated line per uncollected task: the final status (noting undelivered output as

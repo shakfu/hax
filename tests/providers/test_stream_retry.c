@@ -1,16 +1,12 @@
 /* SPDX-License-Identifier: MIT */
-#include <poll.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include "harness.h"
+#include "loopback.h"
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/stream_retry.h"
@@ -36,91 +32,6 @@
 #define SSE_TERMINAL_TRUNCATED                                                                     \
     "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nConnection: close\r\n\r\n"                          \
     "event: message\ndata: hello\n\ndata: done\n\n"
-
-/* Serves the scripted responses to sequential connections; every response must close the
- * connection so the next attempt reconnects. */
-struct test_server {
-    int listener_fd;
-    const char *const *responses;
-    size_t n_responses;
-    _Atomic size_t served;
-};
-
-static void *serve_script(void *user)
-{
-    struct test_server *server = user;
-    for (size_t i = 0; i < server->n_responses; i++) {
-        struct pollfd poll_fd = {.fd = server->listener_fd, .events = POLLIN};
-        if (poll(&poll_fd, 1, 10000) <= 0)
-            return NULL;
-        int client_fd = accept(server->listener_fd, NULL, NULL);
-        if (client_fd < 0)
-            return NULL;
-
-        char request[4096];
-        size_t request_len = 0;
-        size_t expected_len = 0;
-        while (request_len < sizeof(request) - 1) {
-            ssize_t bytes_read =
-                read(client_fd, request + request_len, sizeof(request) - request_len - 1);
-            if (bytes_read <= 0)
-                break;
-            request_len += (size_t)bytes_read;
-            request[request_len] = '\0';
-
-            char *header_end = strstr(request, "\r\n\r\n");
-            if (header_end && expected_len == 0)
-                expected_len = (size_t)(header_end + 4 - request) + sizeof(REQUEST_BODY) - 1;
-            if (expected_len > 0 && request_len >= expected_len)
-                break;
-        }
-
-        const char *response = server->responses[i];
-        size_t response_len = strlen(response);
-        size_t written = 0;
-        while (written < response_len) {
-            ssize_t result = write(client_fd, response + written, response_len - written);
-            if (result <= 0)
-                break;
-            written += (size_t)result;
-        }
-        close(client_fd);
-        atomic_fetch_add(&server->served, 1);
-    }
-    return NULL;
-}
-
-static int start_server(struct test_server *server, pthread_t *thread)
-{
-    server->listener_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server->listener_fd < 0)
-        return -1;
-
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(server->listener_fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(server->listener_fd, 1) != 0)
-        goto error;
-
-    socklen_t address_len = sizeof(address);
-    if (getsockname(server->listener_fd, (struct sockaddr *)&address, &address_len) != 0)
-        goto error;
-    if (pthread_create(thread, NULL, serve_script, server) != 0)
-        goto error;
-    return ntohs(address.sin_port);
-
-error:
-    close(server->listener_fd);
-    server->listener_fd = -1;
-    return -1;
-}
-
-static void stop_server(struct test_server *server, pthread_t thread)
-{
-    pthread_join(thread, NULL);
-    close(server->listener_fd);
-}
 
 /* Fake protocol: parser lifecycle counters plus one text event per SSE data payload. With
  * track_completion set, only a "done" payload marks the stream terminal, and captured usage
@@ -271,9 +182,11 @@ static int log_event(const struct stream_event *event, void *user)
 static int run_scripted(const char *const *responses, size_t n_responses, struct fake_stream *fake,
                         struct event_log *log)
 {
-    struct test_server server = {.responses = responses, .n_responses = n_responses};
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    EXPECT(n_responses <= LOOPBACK_MAX_REQUESTS);
+    struct loopback server = {.n_requests = (int)n_responses};
+    for (size_t i = 0; i < n_responses && i < LOOPBACK_MAX_REQUESTS; i++)
+        server.responses[i] = responses[i];
+    int port = loopback_start(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return -1;
@@ -296,8 +209,8 @@ static int run_scripted(const char *const *responses, size_t n_responses, struct
         .error_message = fake_error_message,
     };
     int result = stream_retry_run(&request, log_event, log, NULL, NULL);
-    stop_server(&server, thread);
-    EXPECT(atomic_load(&server.served) == n_responses);
+    loopback_stop(&server);
+    EXPECT(atomic_load(&server.served) == (int)n_responses);
     return result;
 }
 

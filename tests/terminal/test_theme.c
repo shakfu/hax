@@ -276,11 +276,19 @@ static void test_background_autodetection(void)
     unsetenv("COLORFGBG");
 }
 
+/* Config resolution reads the environment tier, so these keys must not leak in from the caller. */
+static void clear_theme_env(void)
+{
+    const char *vars[] = {"HAX_THEME", "HAX_TINT",  "HAX_PRESET",
+                          "NO_COLOR",  "COLORTERM", "COLORFGBG"};
+    for (size_t i = 0; i < sizeof(vars) / sizeof(vars[0]); i++)
+        unsetenv(vars[i]);
+    setenv("TERM", "xterm-256color", 1);
+}
+
 static void test_config_resolution(void)
 {
-    setenv("TERM", "xterm-256color", 1);
-    unsetenv("NO_COLOR");
-    unsetenv("COLORFGBG");
+    clear_theme_env();
 
     config_set_override("theme", "light");
     theme_init();
@@ -323,9 +331,7 @@ static void test_config_resolution(void)
 
 static void test_preset_tint_precedence(void)
 {
-    setenv("TERM", "xterm-256color", 1);
-    unsetenv("NO_COLOR");
-    unsetenv("HAX_TINT");
+    clear_theme_env();
     config_set_override("theme", "dark");
     config_set_override("tint", NULL);
     EXPECT(config_load("{\"presets\": {\"review\": {\"provider\": \"mock\", \"tint\": \"rose\"},"
@@ -365,9 +371,7 @@ static void test_preset_tint_precedence(void)
 /* Warning deduplication is process-wide, so this value must be unique within the test binary. */
 static void test_masked_invalid_tint_warning(void)
 {
-    setenv("TERM", "xterm-256color", 1);
-    unsetenv("NO_COLOR");
-    unsetenv("HAX_TINT");
+    clear_theme_env();
     config_set_override("theme", "dark");
     config_set_override("tint", NULL);
     EXPECT(config_load("{\"tint\": \"ultramarine\", \"presets\":"

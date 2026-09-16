@@ -353,9 +353,8 @@ int main(void)
 
     char *helpers = t_tempdir();
     install_fake_helpers(helpers);
-    char *path_env = xasprintf("%s:%s", helpers, getenv("PATH"));
-    setenv("PATH", path_env, 1);
-    free(path_env);
+    char *saved_path = t_path_prepend(helpers);
+    free(saved_path); /* the stubs stay on PATH for every remaining test */
     setenv("TMPDIR", t_tempdir(), 1);
     setenv("WAYLAND_DISPLAY", "fake-0", 1);
 

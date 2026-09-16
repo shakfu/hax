@@ -1,15 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #include <errno.h>
-#include <poll.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 
 #include "catalog.h"
@@ -17,6 +12,7 @@
 #include "diag.h"
 #include "effort.h"
 #include "harness.h"
+#include "loopback.h"
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
@@ -210,92 +206,6 @@ static void test_metadata_api_override(void)
     EXPECT(config_load(NULL) == 0);
 }
 
-#define MAX_REQUESTS 9
-
-/* Serves one canned response per sequential connection, capturing each request. A non-NULL
- * responses[i] overrides the shared response for that connection. */
-struct wire_server {
-    int listener_fd;
-    const char *response;
-    const char *responses[MAX_REQUESTS];
-    int n_requests;
-    char requests[MAX_REQUESTS][8192];
-    _Atomic int served;
-};
-
-static void *serve_requests(void *user)
-{
-    struct wire_server *server = user;
-    for (int i = 0; i < server->n_requests; i++) {
-        struct pollfd poll_fd = {.fd = server->listener_fd, .events = POLLIN};
-        if (poll(&poll_fd, 1, 10000) <= 0)
-            return NULL;
-        int client_fd = accept(server->listener_fd, NULL, NULL);
-        if (client_fd < 0)
-            return NULL;
-
-        char *request = server->requests[i];
-        size_t request_len = 0;
-        size_t expected_len = 0;
-        while (request_len < sizeof(server->requests[i]) - 1) {
-            ssize_t bytes_read = read(client_fd, request + request_len,
-                                      sizeof(server->requests[i]) - request_len - 1);
-            if (bytes_read <= 0)
-                break;
-            request_len += (size_t)bytes_read;
-            request[request_len] = '\0';
-
-            char *header_end = strstr(request, "\r\n\r\n");
-            if (header_end && expected_len == 0) {
-                const char *length = strstr(request, "Content-Length: ");
-                expected_len = (size_t)(header_end + 4 - request) +
-                               (length ? strtoul(length + 16, NULL, 10) : 0);
-            }
-            if (expected_len > 0 && request_len >= expected_len)
-                break;
-        }
-
-        const char *response = server->responses[i] ? server->responses[i] : server->response;
-        size_t response_len = strlen(response);
-        size_t written = 0;
-        while (written < response_len) {
-            ssize_t result = write(client_fd, response + written, response_len - written);
-            if (result <= 0)
-                break;
-            written += (size_t)result;
-        }
-        close(client_fd);
-        atomic_fetch_add(&server->served, 1);
-    }
-    return NULL;
-}
-
-static int start_server(struct wire_server *server, pthread_t *thread)
-{
-    server->listener_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server->listener_fd < 0)
-        return -1;
-
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(server->listener_fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(server->listener_fd, MAX_REQUESTS) != 0)
-        goto error;
-
-    socklen_t address_len = sizeof(address);
-    if (getsockname(server->listener_fd, (struct sockaddr *)&address, &address_len) != 0)
-        goto error;
-    if (pthread_create(thread, NULL, serve_requests, server) != 0)
-        goto error;
-    return ntohs(address.sin_port);
-
-error:
-    close(server->listener_fd);
-    server->listener_fd = -1;
-    return -1;
-}
-
 struct error_log {
     int n_errors;
     char message[256];
@@ -341,12 +251,11 @@ static void write_catalog_fixture(void)
 static void test_model_wire_routing(void)
 {
     write_catalog_fixture();
-    struct wire_server server = {
+    struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         .n_requests = 9,
     };
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    int port = loopback_start(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return;
@@ -387,8 +296,7 @@ static void test_model_wire_routing(void)
     context.effort = "high";
     provider->stream(provider, &context, "claude-budget", log_error, &log, NULL, NULL);
     context.effort = NULL;
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 9);
 
     EXPECT(strncmp(server.requests[0], "POST /messages HTTP", 19) == 0);
@@ -447,12 +355,11 @@ static void test_model_wire_routing(void)
  * output_config. A configured cache=false is the only thing that drops the markers. */
 static void test_messages_defaults_follow_def(void)
 {
-    struct wire_server server = {
+    struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         .n_requests = 4,
     };
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    int port = loopback_start(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return;
@@ -483,8 +390,7 @@ static void test_messages_defaults_follow_def(void)
     EXPECT(config_load("{\"catalog\": {\"models\": {\"fp\": {\"claude-budget\": {"
                        "\"reasoning_options\": [{\"type\": \"budget_tokens\"}]}}}}}") == 0);
     provider->stream(provider, &context, "claude-budget", log_error, &log, NULL, NULL);
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 4);
 
     EXPECT(strstr(server.requests[0], "\"adaptive\"") != NULL);
@@ -581,14 +487,13 @@ static int fake_auth_source(const struct provider_def *def, struct http_auth_sou
  * the source's message. */
 static void test_auth_source_stream(void)
 {
-    struct wire_server server = {
+    struct loopback server = {
         .response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         .n_requests = 3,
     };
     server.responses[1] =
         "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno";
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    int port = loopback_start(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return;
@@ -614,8 +519,7 @@ static void test_auth_source_stream(void)
     provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
     auth.can_recover = 0;
     provider->stream(provider, &context, "m", log_error, &log, NULL, NULL);
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 3);
 
     EXPECT(strstr(server.requests[0], "Authorization: Bearer fake-1\r\n") != NULL);
@@ -669,12 +573,11 @@ static void fake_load_defaults(char **default_model, char **default_effort)
  * companion-tool defaults land on the provider. */
 static void test_def_extra_body_and_defaults(void)
 {
-    struct wire_server server = {
+    struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         .n_requests = 2,
     };
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    int port = loopback_start(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return;
@@ -710,8 +613,7 @@ static void test_def_extra_body_and_defaults(void)
         provider->destroy(provider);
     }
 
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 2);
     EXPECT(strstr(server.requests[0], "\"verbosity\":\"low\"") != NULL);
     EXPECT(strstr(server.requests[1], "\"verbosity\":\"high\"") != NULL);
@@ -724,12 +626,11 @@ static void test_def_extra_body_and_defaults(void)
  * replace same-named defaults. */
 static void test_def_extra_headers_follow_conversation(void)
 {
-    struct wire_server server = {
+    struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         .n_requests = 3,
     };
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    int port = loopback_start(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return;
@@ -766,8 +667,7 @@ static void test_def_extra_headers_follow_conversation(void)
         provider->destroy(provider);
     }
 
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 3);
 
     EXPECT(strstr(server.requests[0], "x-def-session: conv-1\r\n") != NULL);
@@ -802,12 +702,11 @@ static void test_interleaved_reasoning_replay(void)
 {
     write_catalog_fixture();
     catalog_shutdown(); /* drop lookups memoized against an earlier fixture */
-    struct wire_server server = {
+    struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         .n_requests = 5,
     };
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    int port = loopback_start(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return;
@@ -854,8 +753,7 @@ static void test_interleaved_reasoning_replay(void)
         provider->destroy(provider);
     }
 
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 5);
 
     EXPECT(strstr(server.requests[0], "\"reasoning_content\":\"thought\"") != NULL);
@@ -874,12 +772,11 @@ static void test_interleaved_reasoning_replay(void)
 static void test_config_only_routing_without_catalog_id(void)
 {
     catalog_shutdown(); /* drop lookups memoized against an earlier fixture */
-    struct wire_server server = {
+    struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
         .n_requests = 2,
     };
-    pthread_t thread;
-    int port = start_server(&server, &thread);
+    int port = loopback_start(&server);
     EXPECT(port > 0);
     if (port <= 0)
         return;
@@ -905,8 +802,7 @@ static void test_config_only_routing_without_catalog_id(void)
     struct error_log log = {0};
     provider->stream(provider, &context, "claude-pin", log_error, &log, NULL, NULL);
     stream_one_reasoned_turn(provider, "think-pin", &log);
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
     EXPECT(atomic_load(&server.served) == 2);
 
     EXPECT(strncmp(server.requests[0], "POST /messages HTTP", 19) == 0);

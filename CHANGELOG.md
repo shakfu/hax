@@ -76,6 +76,32 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   the docstring's first paragraph is the description — and `agent.tools` reports the advertised
   list. A `**kwargs` function still shadows a built-in's dispatch without altering its published
   arguments. See [bindings/python/README.md](bindings/python/README.md).
+- A preset name right after `hax` starts with that preset: `hax review` is short for
+  `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
+
+### Changed
+
+- Custom providers no longer take their models.dev catalog identity from their own name; set
+  `catalog_id` explicitly (for example `"catalog_id": "groq"`) to keep pricing and context
+  metadata. Local servers and proxies without one never contact models.dev. See
+  [docs/providers.md](docs/providers.md#custom-providers).
+- `/model` and `/effort` wait briefly for the model catalog refresh, so pricing and context
+  columns appear even on a cold cache.
+- The collapsed preview for read-only bash commands now tolerates `echo`, `printf`, `true`, and
+  `false` between exploration commands, such as the `echo ---` separators some models place
+  between searches, and covers read-only git subcommands like `log`, `show`, `diff`, `status`,
+  and `blame`, including behind global options such as `-C`.
+
+### Fixed
+
+- `config.json` and `state.json` are now written with a trailing newline, matching `auth.json`
+  and session files.
+- The brief history shown on resume now names the task a `task_wait` call waited on, as the
+  live header does, instead of a bare `[task_wait]` line. Collapsed tool rows that need
+  truncation now keep their suffix, such as a read's line range, like the full header does.
+- Background task completion notes say whether output is pending or there is nothing to
+  collect, and `task_wait` on an already collected task reports its final status instead of
+  `no such task`.
 
 ## [0.5.0] - 2026-09-04
 

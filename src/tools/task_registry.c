@@ -63,8 +63,9 @@ struct task {
     int orphans_killed; /* descendants outlived the shell holding the pipe and were killed */
     int wait_status;
     long kill_deadline_ms; /* nonzero after SIGTERM until escalation */
-    /* Completion is announced once (notified) but the task stays collectable until a wait
-     * delivers its remaining output (collected); only then is it forgotten. */
+    /* Completion is announced once (notified). Collection (collected) delivers the last of the
+     * output, releases the name and the spool, and drops the task from listings, but the
+     * record stays so a later wait on the id still gets the final status. */
     int notified;
     int collected;
     size_t delivered_bytes;
@@ -214,7 +215,8 @@ static void task_poll(struct task *t)
 static void task_poll_all(void)
 {
     for (struct task *t = tasks; t; t = t->next)
-        task_poll(t);
+        if (!t->collected)
+            task_poll(t);
 }
 
 static void task_free(struct task *t)
@@ -233,28 +235,34 @@ static void task_free(struct task *t)
     free(t);
 }
 
-/* Forget tasks whose remaining output has been collected and whose drainer is done. The spool
- * file stays on disk: its path is in the conversation and tempfiles cleanup owns it. */
-static void task_sweep(void)
+/* Collect a finished task: keep only what a status footer needs. The spool file stays on
+ * disk: its path is in the conversation and tempfiles cleanup owns it. Idempotent, so a
+ * repeated wait on a remembered task is harmless. */
+static void task_release(struct task *t)
 {
-    struct task **link = &tasks;
-    while (*link) {
-        struct task *t = *link;
-        if (t->collected && t->done) {
-            *link = t->next;
-            task_free(t);
-        } else {
-            link = &t->next;
-        }
-    }
+    t->collected = 1;
+    if (t->spool_fd >= 0)
+        close(t->spool_fd);
+    t->spool_fd = -1;
+    free(t->command);
+    t->command = NULL;
+    free(t->spool_path);
+    t->spool_path = NULL;
 }
 
+/* A live task outranks a remembered one of the same name, since collection releases names for
+ * reuse; among remembered ones the newest wins. */
 static struct task *task_find(const char *id)
 {
-    for (struct task *t = tasks; t; t = t->next)
-        if (!t->collected && strcmp(t->id, id) == 0)
+    struct task *remembered = NULL;
+    for (struct task *t = tasks; t; t = t->next) {
+        if (strcmp(t->id, id) != 0)
+            continue;
+        if (!t->collected)
             return t;
-    return NULL;
+        remembered = t;
+    }
+    return remembered;
 }
 
 static int task_id_in_use(const char *id)
@@ -494,9 +502,9 @@ static int collect_new_output(struct task *t, struct buf *body, struct buf *mark
     return 1;
 }
 
-/* One announce-only line: "[task t2 finished (exit 0) after 3m; 2.1K output]". The size lets
- * the model skip collecting empty results; a finished task with nothing left to deliver is
- * collected outright. */
+/* One announce-only line: "[task t2 finished (exit 0) after 3m; 2.1K output pending]". A
+ * finished task with nothing left to deliver is collected by the note itself, which says so
+ * in the same words at every occurrence so the model learns one signal that no wait is owed. */
 static void append_status_note(struct buf *out, struct task *t)
 {
     struct task_shared_snapshot snap;
@@ -507,22 +515,23 @@ static void append_status_note(struct buf *out, struct task *t)
     buf_append_str(out, t->id);
     buf_append_str(out, " ");
     append_status_phrase(out, t);
-    char clause[48];
+    char clause[64];
     if (snap.total_bytes == 0) {
-        snprintf(clause, sizeof(clause), "; no output]");
+        snprintf(clause, sizeof(clause), "; no output; nothing to collect]");
     } else if (pending == 0) {
-        snprintf(clause, sizeof(clause), "; no new output]");
+        snprintf(clause, sizeof(clause), "; no new output; nothing to collect]");
     } else {
         char size[16];
         bash_format_byte_size(size, sizeof(size), pending);
-        snprintf(clause, sizeof(clause), "; %s%s output]", size, snap.binary ? " binary" : "");
+        snprintf(clause, sizeof(clause), "; %s%s output pending]", size,
+                 snap.binary ? " binary" : "");
     }
     buf_append_str(out, clause);
 
     if (t->done) {
         t->notified = 1;
         if (pending == 0)
-            t->collected = 1;
+            task_release(t);
     }
 }
 
@@ -739,7 +748,8 @@ char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
     if (kill_on_timeout && stop == WAIT_OTHER_DONE)
         buf_append_str(&footer, "; not killed");
     if (!has_body)
-        buf_append_str(&footer, "; no new output");
+        buf_append_str(&footer,
+                       t->done && final_snap.total_bytes == 0 ? "; no output" : "; no new output");
     if (stop == WAIT_TIMED_OUT)
         buf_append_str(&footer, kill_sent ? " — did not exit after SIGKILL" : " — wait timed out");
     else if (stop == WAIT_INTERRUPTED)
@@ -760,9 +770,8 @@ char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
 
     if (t->done) {
         t->notified = 1;
-        t->collected = 1;
+        task_release(t);
     }
-    task_sweep();
     return buf_steal(&out);
 }
 
@@ -818,7 +827,6 @@ char *task_collect_notes(void)
             buf_append_str(&out, "\n");
         append_status_note(&out, t);
     }
-    task_sweep();
     if (out.len == 0)
         return NULL;
     return buf_steal(&out);

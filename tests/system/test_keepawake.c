@@ -65,11 +65,7 @@ static void test_sleep_not_resolved_via_path(void)
     fclose(file);
     chmod(fake_sleep, 0755);
 
-    const char *current_path = getenv("PATH");
-    char *saved_path = current_path ? xstrdup(current_path) : NULL;
-    char *test_path = xasprintf("%s:%s", dir, saved_path ? saved_path : "");
-    setenv("PATH", test_path, 1);
-    free(test_path);
+    char *saved_path = t_path_prepend(dir);
 
     keepawake_acquire();
     int fake_ran = 0;
@@ -83,13 +79,7 @@ static void test_sleep_not_resolved_via_path(void)
     keepawake_release();
 
     EXPECT(!fake_ran);
-
-    if (saved_path) {
-        setenv("PATH", saved_path, 1);
-        free(saved_path);
-    } else {
-        unsetenv("PATH");
-    }
+    t_path_restore(saved_path);
 
 out:
     free(marker);

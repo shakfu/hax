@@ -155,17 +155,13 @@ static void test_pick_reads_and_rejoins_nul_record(void)
     char *fzf_path = xasprintf("%s/fzf", dir);
     char *picked_file = xasprintf("%s/picked\nfile.txt", dir);
     char *query = xasprintf("%s/", dir);
-    const char *path_env = getenv("PATH");
-    char *saved_path = path_env ? xstrdup(path_env) : NULL;
 
     write_file(fzf_path, FZF_SCRIPT, 0755);
     write_file(picked_file, "contents", 0644);
     /* Prepended rather than replacing PATH: the stub still shadows any real fzf, but the system
      * directories stay reachable for the utilities it runs. printf is a builtin in dash and
      * FreeBSD's sh, but not in the ksh that OpenBSD installs as /bin/sh. */
-    char *stub_path = xasprintf("%s:%s", dir, saved_path ? saved_path : "");
-    setenv("PATH", stub_path, 1);
-    free(stub_path);
+    char *saved_path = t_path_prepend(dir);
     setenv("HAX_TEST_FZF_SELECTION", "./picked\nfile.txt", 1);
 
     EXPECT(file_mention_available() == 1);
@@ -176,12 +172,7 @@ static void test_pick_reads_and_rejoins_nul_record(void)
 
     free(picked);
     unsetenv("HAX_TEST_FZF_SELECTION");
-    if (saved_path) {
-        setenv("PATH", saved_path, 1);
-        free(saved_path);
-    } else {
-        unsetenv("PATH");
-    }
+    t_path_restore(saved_path);
     free(query);
     free(picked_file);
     free(fzf_path);

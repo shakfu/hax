@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -21,26 +22,6 @@ static void touch_file(const char *path, mode_t mode)
     EXPECT(fd >= 0);
     if (fd >= 0)
         close(fd);
-}
-
-static char *replace_path_env(const char *value)
-{
-    const char *current = getenv("PATH");
-    char *saved = current ? xstrdup(current) : NULL;
-    if (value)
-        setenv("PATH", value, 1);
-    else
-        unsetenv("PATH");
-    return saved;
-}
-
-static void restore_path_env(char *saved)
-{
-    if (saved)
-        setenv("PATH", saved, 1);
-    else
-        unsetenv("PATH");
-    free(saved);
 }
 
 static void test_which_finds_sh(void)
@@ -80,18 +61,18 @@ static void test_which_empty_null_and_unset_path(void)
     EXPECT(fs_which("") == NULL);
     EXPECT(fs_which(NULL) == NULL);
 
-    char *saved_path = replace_path_env(NULL);
+    char *saved_path = t_path_replace(NULL);
     EXPECT(fs_which("sh") == NULL);
-    restore_path_env(saved_path);
+    t_path_restore(saved_path);
 }
 
 static void test_which_skips_relative_path_entries(void)
 {
-    char *saved_path = replace_path_env(".:relative/dir:");
+    char *saved_path = t_path_replace(".:relative/dir:");
     char *path = fs_which("sh");
     EXPECT(path == NULL);
     free(path);
-    restore_path_env(saved_path);
+    t_path_restore(saved_path);
 }
 
 static void test_which_resolves_in_later_entry(void)
@@ -100,13 +81,13 @@ static void test_which_resolves_in_later_entry(void)
     char *executable_path = path_join(dir, "hax-test-tool");
     touch_file(executable_path, 0755);
     char *path_env = xasprintf("/nonexistent-hax-dir:%s", dir);
-    char *saved_path = replace_path_env(path_env);
+    char *saved_path = t_path_replace(path_env);
 
     char *resolved_path = fs_which("hax-test-tool");
     EXPECT(resolved_path != NULL);
     EXPECT(resolved_path && strcmp(resolved_path, executable_path) == 0);
 
-    restore_path_env(saved_path);
+    t_path_restore(saved_path);
     free(resolved_path);
     free(path_env);
     free(executable_path);
@@ -122,13 +103,13 @@ static void test_which_skips_directory_match(void)
     char *executable_path = path_join(second_dir, "hax-test-tool");
     touch_file(executable_path, 0755);
     char *path_env = xasprintf("%s:%s", first_dir, second_dir);
-    char *saved_path = replace_path_env(path_env);
+    char *saved_path = t_path_replace(path_env);
 
     char *resolved_path = fs_which("hax-test-tool");
     EXPECT(resolved_path != NULL);
     EXPECT(resolved_path && strcmp(resolved_path, executable_path) == 0);
 
-    restore_path_env(saved_path);
+    t_path_restore(saved_path);
     free(resolved_path);
     free(path_env);
     free(executable_path);
@@ -147,13 +128,13 @@ static void test_which_skips_non_executable(void)
     const char *dir = t_tempdir();
     char *file_path = path_join(dir, "hax-test-tool");
     touch_file(file_path, 0644);
-    char *saved_path = replace_path_env(dir);
+    char *saved_path = t_path_replace(dir);
 
     char *resolved_path = fs_which("hax-test-tool");
     EXPECT(resolved_path == NULL);
     free(resolved_path);
 
-    restore_path_env(saved_path);
+    t_path_restore(saved_path);
     free(file_path);
 }
 
@@ -552,8 +533,65 @@ static void test_read_file_capped_exact(void)
     free(path);
 }
 
+static void test_write_atomic_bytes_mode_and_symlink(void)
+{
+    const char *dir = t_tempdir();
+    char *path = path_join(dir, "nested/file");
+    char *link = path_join(dir, "link");
+    const char content[] = {'a', '\0', 'b'};
+    EXPECT(symlink("nested/file", link) == 0);
+
+    for (int durable = 0; durable <= 1; durable++) {
+        EXPECT(fs_write_atomic(link, content, sizeof(content), durable) == 0);
+        size_t length = 0;
+        char *body = fs_read_file(path, &length);
+        EXPECT(body != NULL);
+        if (body)
+            EXPECT_MEM_EQ(body, length, content, sizeof(content));
+        free(body);
+        struct stat st;
+        EXPECT(lstat(link, &st) == 0 && S_ISLNK(st.st_mode));
+
+        /* The parent exists before the restrictive umask, so only file creation is tested. */
+        mode_t mask = umask(0777);
+        int result = fs_write_atomic(link, "", 0, durable);
+        umask(mask);
+        EXPECT(result == 0);
+        EXPECT(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600 && st.st_size == 0);
+    }
+    free(link);
+    free(path);
+}
+
+static void test_write_atomic_failure_cleanup(void)
+{
+    const char *dir = t_tempdir();
+    char *path = path_join(dir, "destination");
+    EXPECT(mkdir(path, 0755) == 0);
+    for (int durable = 0; durable <= 1; durable++) {
+        errno = 0;
+        EXPECT(fs_write_atomic(path, "new", 3, durable) == -1);
+        EXPECT(errno == EISDIR);
+        struct stat st;
+        EXPECT(stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+        DIR *entries = opendir(dir);
+        EXPECT(entries != NULL);
+        if (entries) {
+            struct dirent *entry;
+            while ((entry = readdir(entries)))
+                EXPECT(strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
+                       strcmp(entry->d_name, "destination") == 0);
+            closedir(entries);
+        }
+    }
+    free(path);
+}
+
 int main(void)
 {
+    test_write_atomic_bytes_mode_and_symlink();
+    test_write_atomic_failure_cleanup();
+
     test_which_finds_sh();
     test_which_missing_is_null();
     test_which_slash_passes_through();

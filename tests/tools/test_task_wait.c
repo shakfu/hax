@@ -114,7 +114,7 @@ static void test_wait_returns_early_when_other_task_finishes(void)
         /* Announce-only: status and pending size, never the output body or command. */
         EXPECT(strstr(note, "quick-done") == NULL);
         EXPECT(strstr(note, "sleep") == NULL);
-        EXPECT(strstr(note, " output]") != NULL);
+        EXPECT(strstr(note, " output pending]") != NULL);
     }
     free(note);
 
@@ -129,7 +129,7 @@ static void test_wait_returns_early_when_other_task_finishes(void)
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
-static void test_note_with_no_output_is_collected_outright(void)
+static void test_wait_after_empty_note_reports_status(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
@@ -151,12 +151,19 @@ static void test_note_with_no_output_is_collected_outright(void)
     }
     EXPECT(note != NULL);
     if (note)
-        EXPECT(strstr(note, "; no output]") != NULL);
+        EXPECT(strstr(note, "; no output; nothing to collect]") != NULL);
     free(note);
 
-    /* Nothing left to collect, so the task was swept with the note. */
+    /* The note collected the task: it leaves the listing but still answers by id. */
+    struct task_info *rows = NULL;
+    size_t n = task_list(&rows);
+    for (size_t i = 0; i < n; i++)
+        EXPECT(!id || strcmp(rows[i].id, id) != 0);
+    free(rows);
     out = wait_for_id(id, 1);
-    EXPECT(strstr(out, "no such task") != NULL);
+    EXPECT(strstr(out, "no such task") == NULL);
+    EXPECT(strstr(out, "finished (exit 0)") != NULL);
+    EXPECT(strstr(out, "; no output]") != NULL);
     free(out);
     free(id);
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
@@ -199,9 +206,11 @@ static void test_kill_delivers_pending_output(void)
     EXPECT(strstr(out, "killed (signal ") != NULL);
     free(out);
 
-    /* Kill-and-collect forgets the task. */
+    /* Kill-and-collect delivered everything; a repeat wait gets only the final status. */
     out = wait_for_id(id, 1);
-    EXPECT(strstr(out, "no such task") != NULL);
+    EXPECT(strstr(out, "pending-output") == NULL);
+    EXPECT(strstr(out, "killed (signal ") != NULL);
+    EXPECT(strstr(out, "; no new output]") != NULL);
     free(out);
     free(id);
     free(last_gate);
@@ -586,7 +595,7 @@ int main(void)
     test_wait_streams_output_live();
     test_wait_times_out_on_running_task();
     test_wait_returns_early_when_other_task_finishes();
-    test_note_with_no_output_is_collected_outright();
+    test_wait_after_empty_note_reports_status();
     test_kill_delivers_pending_output();
     test_kill_fires_at_wait_deadline();
     test_kill_spares_task_finishing_within_timeout();

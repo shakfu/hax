@@ -1,74 +1,16 @@
 /* SPDX-License-Identifier: MIT */
 #include <jansson.h>
-#include <poll.h>
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include "config.h"
 #include "harness.h"
+#include "loopback.h"
 #include "provider.h"
 #include "providers/http_provider.h"
 #include "providers/registry.h"
-
-struct test_server {
-    int listener_fd;
-    const char *response;
-    char request[2048];
-    _Atomic int responses_sent;
-};
-
-static void *serve_response(void *user)
-{
-    struct test_server *server = user;
-    struct pollfd poll_fd = {.fd = server->listener_fd, .events = POLLIN};
-    if (poll(&poll_fd, 1, 10000) <= 0)
-        return NULL;
-
-    int client_fd = accept(server->listener_fd, NULL, NULL);
-    if (client_fd < 0)
-        return NULL;
-
-    ssize_t bytes_read = read(client_fd, server->request, sizeof(server->request) - 1);
-    if (bytes_read > 0)
-        server->request[bytes_read] = '\0';
-
-    dprintf(client_fd, "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
-            strlen(server->response), server->response);
-    close(client_fd);
-    atomic_fetch_add(&server->responses_sent, 1);
-    return NULL;
-}
-
-static int start_server(struct test_server *server)
-{
-    server->listener_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server->listener_fd < 0)
-        return -1;
-
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(server->listener_fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(server->listener_fd, 1) != 0) {
-        close(server->listener_fd);
-        server->listener_fd = -1;
-        return -1;
-    }
-
-    socklen_t length = sizeof(address);
-    if (getsockname(server->listener_fd, (struct sockaddr *)&address, &length) != 0) {
-        close(server->listener_fd);
-        server->listener_fd = -1;
-        return -1;
-    }
-    return ntohs(address.sin_port);
-}
 
 static void parse_context_length(const json_t *entry, struct model_info *out)
 {
@@ -81,14 +23,11 @@ static void parse_context_length(const json_t *entry, struct model_info *out)
 static int list_from_server(const char *response, struct model_info **models, size_t *n_models,
                             char **error)
 {
-    struct test_server server = {.response = response};
-    int port = start_server(&server);
-    if (port < 0)
-        return -2;
-
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, serve_response, &server) != 0) {
-        close(server.listener_fd);
+    struct loopback server = {0};
+    loopback_reply_ok(&server, 0, response);
+    int port = loopback_start(&server);
+    if (port < 0) {
+        loopback_stop(&server);
         return -2;
     }
 
@@ -109,12 +48,11 @@ static int list_from_server(const char *response, struct model_info **models, si
         result = provider->list_models(provider, models, n_models, error, NULL, NULL);
         provider->destroy(provider);
     }
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
+    loopback_stop(&server);
 
     /* The listing authenticates with the OpenAI-side Bearer scheme. */
-    if (atomic_load(&server.responses_sent) == 1)
-        EXPECT(strstr(server.request, "Authorization: Bearer sk-flat\r\n") != NULL);
+    if (atomic_load(&server.served) == 1)
+        EXPECT(strstr(server.requests[0], "Authorization: Bearer sk-flat\r\n") != NULL);
     return result;
 }
 

@@ -34,6 +34,7 @@ test_sources = [
     'test_model_sort.c',
     'test_multi_agent.c',
     'test_harness.c',
+    'test_loopback.c',
     'test_oneshot.c',
     'test_paste_image.c',
     'test_provider.c',

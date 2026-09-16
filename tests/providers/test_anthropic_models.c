@@ -1,106 +1,30 @@
 /* SPDX-License-Identifier: MIT */
-#include <poll.h>
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include "config.h"
 #include "harness.h"
+#include "loopback.h"
 #include "model_meta.h"
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
 #include "providers/registry.h"
 
-#define MAX_PAGES 4
-
-struct test_server {
-    int listener_fd;
-    const char *responses[MAX_PAGES];
-    int n_responses;
-    char request_lines[MAX_PAGES][512];
-    _Atomic int responses_sent;
-};
-
-static void *serve_responses(void *user)
-{
-    struct test_server *server = user;
-    for (int i = 0; i < server->n_responses; i++) {
-        struct pollfd poll_fd = {.fd = server->listener_fd, .events = POLLIN};
-        if (poll(&poll_fd, 1, 10000) <= 0)
-            return NULL;
-
-        int client_fd = accept(server->listener_fd, NULL, NULL);
-        if (client_fd < 0)
-            return NULL;
-
-        char request[2048] = {0};
-        ssize_t bytes_read = read(client_fd, request, sizeof(request) - 1);
-        if (bytes_read > 0) {
-            char *line_end = strstr(request, "\r\n");
-            size_t line_length = line_end ? (size_t)(line_end - request) : strlen(request);
-            if (line_length >= sizeof(server->request_lines[i]))
-                line_length = sizeof(server->request_lines[i]) - 1;
-            memcpy(server->request_lines[i], request, line_length);
-            server->request_lines[i][line_length] = '\0';
-        }
-
-        dprintf(client_fd, "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
-                strlen(server->responses[i]), server->responses[i]);
-        close(client_fd);
-        atomic_fetch_add(&server->responses_sent, 1);
-    }
-    return NULL;
-}
-
-static int start_server(struct test_server *server)
-{
-    server->listener_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server->listener_fd < 0)
-        return -1;
-
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(server->listener_fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        listen(server->listener_fd, MAX_PAGES) != 0) {
-        goto fail;
-    }
-
-    socklen_t length = sizeof(address);
-    if (getsockname(server->listener_fd, (struct sockaddr *)&address, &length) != 0)
-        goto fail;
-    return ntohs(address.sin_port);
-
-fail:
-    close(server->listener_fd);
-    server->listener_fd = -1;
-    return -1;
-}
-
-static int list_models_from_server(struct test_server *server, int n_responses, char **model_ids,
+static int list_models_from_server(struct loopback *server, int n_responses, char **model_ids,
                                    size_t max_model_ids, size_t *n_model_ids)
 {
     *n_model_ids = 0;
-    server->n_responses = n_responses;
-    int port = start_server(server);
+    server->n_requests = n_responses;
+    int port = loopback_start(server);
     if (port < 0)
         return -1;
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
     setenv("HAX_ANTHROPIC_BASE_URL", base_url, 1);
-
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, serve_responses, server) != 0) {
-        close(server->listener_fd);
-        return -1;
-    }
 
     const struct provider_def *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
@@ -120,18 +44,19 @@ static int list_models_from_server(struct test_server *server, int n_responses, 
     }
     if (provider)
         provider->destroy(provider);
-    pthread_join(thread, NULL);
-    close(server->listener_fd);
+    loopback_stop(server);
     *n_model_ids = n_models;
     return 0;
 }
 
 static void test_follows_cursor(void)
 {
-    struct test_server server = {0};
-    server.responses[0] = "{\"data\":[{\"id\":\"m1\"},{\"id\":\"m2\"}],"
-                          "\"has_more\":true,\"last_id\":\"m2\"}";
-    server.responses[1] = "{\"data\":[{\"id\":\"m3\"}],\"has_more\":false,\"last_id\":\"m3\"}";
+    struct loopback server = {0};
+    loopback_reply_ok(&server, 0,
+                      "{\"data\":[{\"id\":\"m1\"},{\"id\":\"m2\"}],"
+                      "\"has_more\":true,\"last_id\":\"m2\"}");
+    loopback_reply_ok(&server, 1,
+                      "{\"data\":[{\"id\":\"m3\"}],\"has_more\":false,\"last_id\":\"m3\"}");
 
     char *model_ids[8] = {0};
     size_t n_models;
@@ -144,20 +69,22 @@ static void test_follows_cursor(void)
         EXPECT_STR_EQ(model_ids[2], "m3");
     }
 
-    EXPECT(strstr(server.request_lines[0], "limit=") != NULL);
-    EXPECT(strstr(server.request_lines[0], "after_id=") == NULL);
-    EXPECT(strstr(server.request_lines[1], "after_id=m2") != NULL);
+    EXPECT(strstr(server.requests[0], "limit=") != NULL);
+    EXPECT(strstr(server.requests[0], "after_id=") == NULL);
+    EXPECT(strstr(server.requests[1], "after_id=m2") != NULL);
     for (size_t i = 0; i < n_models; i++)
         free(model_ids[i]);
 }
 
 static void test_repeated_cursor_page_is_discarded(void)
 {
-    struct test_server server = {0};
-    server.responses[0] = "{\"data\":[{\"id\":\"m1\"},{\"id\":\"m2\"}],"
-                          "\"has_more\":true,\"last_id\":\"m2\"}";
-    server.responses[1] = "{\"data\":[{\"id\":\"m1\"},{\"id\":\"m2\"}],"
-                          "\"has_more\":true,\"last_id\":\"m2\"}";
+    struct loopback server = {0};
+    loopback_reply_ok(&server, 0,
+                      "{\"data\":[{\"id\":\"m1\"},{\"id\":\"m2\"}],"
+                      "\"has_more\":true,\"last_id\":\"m2\"}");
+    loopback_reply_ok(&server, 1,
+                      "{\"data\":[{\"id\":\"m1\"},{\"id\":\"m2\"}],"
+                      "\"has_more\":true,\"last_id\":\"m2\"}");
 
     char *model_ids[8] = {0};
     size_t n_models;
@@ -174,8 +101,8 @@ static void test_repeated_cursor_page_is_discarded(void)
 
 static void test_missing_cursor_stops(void)
 {
-    struct test_server server = {0};
-    server.responses[0] = "{\"data\":[{\"id\":\"m1\"}],\"has_more\":true}";
+    struct loopback server = {0};
+    loopback_reply_ok(&server, 0, "{\"data\":[{\"id\":\"m1\"}],\"has_more\":true}");
 
     char *model_ids[8] = {0};
     size_t n_models;
@@ -200,10 +127,11 @@ static void store_output_cap(struct provider *provider, const char *model, long 
 
 static void test_background_probe_publishes_metadata(void)
 {
-    struct test_server server = {.n_responses = 1};
-    server.responses[0] = "{\"data\":[{\"id\":\"probe-model\",\"max_input_tokens\":12345,"
-                          "\"max_tokens\":6789}]}";
-    int port = start_server(&server);
+    struct loopback server = {0};
+    loopback_reply_ok(&server, 0,
+                      "{\"data\":[{\"id\":\"probe-model\",\"max_input_tokens\":12345,"
+                      "\"max_tokens\":6789}]}");
+    int port = loopback_start(&server);
     if (port < 0)
         T_SKIP("cannot run a loopback server here");
 
@@ -211,13 +139,6 @@ static void test_background_probe_publishes_metadata(void)
     snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
     setenv("HAX_ANTHROPIC_BASE_URL", url, 1);
     setenv("HAX_MODEL", "probe-model", 1);
-
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, serve_responses, &server) != 0) {
-        close(server.listener_fd);
-        unsetenv("HAX_MODEL");
-        T_SKIP("cannot start a loopback server thread");
-    }
 
     const struct provider_def *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
@@ -236,9 +157,8 @@ static void test_background_probe_publishes_metadata(void)
         provider->destroy(provider);
     }
 
-    pthread_join(thread, NULL);
-    close(server.listener_fd);
-    EXPECT(atomic_load(&server.responses_sent) == 1);
+    loopback_stop(&server);
+    EXPECT(atomic_load(&server.served) == 1);
     unsetenv("HAX_MODEL");
 }
 

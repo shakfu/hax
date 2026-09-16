@@ -83,9 +83,13 @@ static void test_background_detaches_and_wait_collects(void)
     free(out);
     free(gate);
 
-    /* Collected tasks are forgotten: the id no longer resolves. */
+    /* A collected task still answers by id with its status, without repeating the body. */
     out = wait_for_id(id, 1);
-    EXPECT(strstr(out, "no such task") != NULL);
+    EXPECT(strstr(out, "done") == NULL);
+    footer = xasprintf("[%s finished (exit 0)", id);
+    EXPECT(strstr(out, footer) != NULL);
+    free(footer);
+    EXPECT(strstr(out, "; no new output]") != NULL);
     free(out);
     free(id);
     unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
@@ -145,9 +149,9 @@ static void test_kill_stops_process_tree(void)
     EXPECT(pid > 0);
 
     out = kill_id(id);
-    /* One status footer; a task that never wrote anything reads "no new output". */
+    /* One status footer; a task that never wrote anything reads "no output". */
     EXPECT(strstr(out, "killed (signal ") != NULL);
-    EXPECT(strstr(out, "; no new output]") != NULL);
+    EXPECT(strstr(out, "; no output]") != NULL);
     free(out);
     free(id);
 
@@ -581,7 +585,7 @@ static void test_named_task_round_trip(void)
     free(out);
 
     /* Collection releases the name for reuse; the fifo is reusable the same way. */
-    args = xasprintf("{\"command\":\"read -r _ <%s; echo again\","
+    args = xasprintf("{\"command\":\"read -r _ <%s; echo again; exit 3\","
                      "\"background\":true,\"name\":\"demo-job\"}",
                      gate);
     out = TOOL_BASH.run(args, NULL);
@@ -591,6 +595,13 @@ static void test_named_task_round_trip(void)
     gate_release(gate);
     out = wait_for_id("demo-job", 30);
     EXPECT(strstr(out, "again") != NULL);
+    EXPECT(strstr(out, "[demo-job finished (exit 3)") != NULL);
+    free(out);
+
+    /* Two collected tasks share the name; the newer one answers. */
+    out = wait_for_id("demo-job", 1);
+    EXPECT(strstr(out, "[demo-job finished (exit 3)") != NULL);
+    EXPECT(strstr(out, "; no new output]") != NULL);
     free(out);
     free(gate);
     unsetenv("HAX_BASH_BACKGROUND_YIELD");

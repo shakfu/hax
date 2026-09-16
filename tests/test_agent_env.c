@@ -141,27 +141,6 @@ static int sandbox_chdir(struct sandbox *sandbox, const char *relative_path)
         }                                                                                          \
     } while (0)
 
-/* Replace $PATH with a single directory, returning the previous value (NULL if
- * it was unset) for env_path_restore. Command probing must see the sandbox
- * only, or real /usr/bin tools would drift into the expected line. */
-static char *env_path_set(const char *dir)
-{
-    const char *prev = getenv("PATH");
-    char *saved = prev ? xstrdup(prev) : NULL;
-    setenv("PATH", dir, 1);
-    return saved;
-}
-
-static void env_path_restore(char *saved)
-{
-    if (saved) {
-        setenv("PATH", saved, 1);
-        free(saved);
-    } else {
-        unsetenv("PATH");
-    }
-}
-
 /* ---------- Environment section ---------- */
 
 static void test_environment_present_by_default(void)
@@ -307,7 +286,8 @@ static void test_commands_line_lists_present(void)
     sandbox_stage_command(&s, "bin", "rg");
     sandbox_stage_command(&s, "bin", "jq");
     char *bin = sandbox_path(&s, "bin");
-    char *saved = env_path_set(bin);
+    /* The sandbox alone: real /usr/bin tools on PATH would drift into the expected line. */
+    char *saved = t_path_replace(bin);
     free(bin);
 
     char *suffix = agent_env_build_suffix("m");
@@ -318,7 +298,7 @@ static void test_commands_line_lists_present(void)
         free(suffix);
     }
 
-    env_path_restore(saved);
+    t_path_restore(saved);
     sandbox_free(&s);
 }
 
@@ -330,7 +310,7 @@ static void test_commands_line_omitted_when_none(void)
     /* Empty (but valid) PATH dir → none of the probed commands present. */
     sandbox_mkdir(&s, "empty-bin");
     char *empty_bin = sandbox_path(&s, "empty-bin");
-    char *saved = env_path_set(empty_bin);
+    char *saved = t_path_replace(empty_bin);
     free(empty_bin);
 
     char *suffix = agent_env_build_suffix("m");
@@ -341,7 +321,7 @@ static void test_commands_line_omitted_when_none(void)
         free(suffix);
     }
 
-    env_path_restore(saved);
+    t_path_restore(saved);
     sandbox_free(&s);
 }
 
@@ -357,7 +337,7 @@ static void test_commands_line_skips_relative_path_entries(void)
     SANDBOX_CHDIR(&s, ".");
     /* Drop the fake straight into cwd, no subdir — `.` resolves here. */
     sandbox_stage_command(&s, ".", "rg");
-    char *saved = env_path_set(".");
+    char *saved = t_path_replace(".");
 
     char *suffix = agent_env_build_suffix("m");
     EXPECT(suffix != NULL);
@@ -368,7 +348,7 @@ static void test_commands_line_skips_relative_path_entries(void)
         free(suffix);
     }
 
-    env_path_restore(saved);
+    t_path_restore(saved);
     sandbox_free(&s);
 }
 
@@ -385,7 +365,7 @@ static void test_commands_line_ignores_directories(void)
     sandbox_mkdir(&s, "bin/rg");
     sandbox_stage_command(&s, "bin", "jq");
     char *bin = sandbox_path(&s, "bin");
-    char *saved = env_path_set(bin);
+    char *saved = t_path_replace(bin);
     free(bin);
 
     char *suffix = agent_env_build_suffix("m");
@@ -397,7 +377,7 @@ static void test_commands_line_ignores_directories(void)
         free(suffix);
     }
 
-    env_path_restore(saved);
+    t_path_restore(saved);
     sandbox_free(&s);
 }
 
@@ -414,7 +394,7 @@ static void test_commands_line_preserves_canonical_order(void)
     sandbox_stage_command(&s, "bin", "rg");
     sandbox_stage_command(&s, "bin", "gh");
     char *bin = sandbox_path(&s, "bin");
-    char *saved = env_path_set(bin);
+    char *saved = t_path_replace(bin);
     free(bin);
 
     char *suffix = agent_env_build_suffix("m");
@@ -427,7 +407,7 @@ static void test_commands_line_preserves_canonical_order(void)
         free(suffix);
     }
 
-    env_path_restore(saved);
+    t_path_restore(saved);
     sandbox_free(&s);
 }
 

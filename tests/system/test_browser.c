@@ -35,11 +35,9 @@ static void test_hands_url_to_opener(void)
     write_fake_opener(dir, "open", out_path);
     write_fake_opener(dir, "xdg-open", out_path);
 
-    char *saved_path = xstrdup(getenv("PATH"));
-    setenv("PATH", dir, 1);
+    char *saved_path = t_path_replace(dir);
     browser_open_url("https://example.test/authorize?x=1&y=2");
-    setenv("PATH", saved_path ? saved_path : "", 1);
-    free(saved_path);
+    t_path_restore(saved_path);
 
     /* The opener runs detached: spawn_detached() returns when the intermediate child exits, before
      * the grandchild reaches execvp, and the recording costs three more execs after that. So the
