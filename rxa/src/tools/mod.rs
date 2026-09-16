@@ -11,10 +11,25 @@ mod write;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::cancel::Cancel;
 use crate::config::TOOL_OUTPUT_CAP;
+use crate::provider::{Dialect, anthropic, chat, responses};
+
+/// What a tool produced. `note` is set when the tool ran but the work it did reported a problem,
+/// such as a command exiting non-zero. That is not a tool failure -- the model needs the output
+/// either way -- but the user should still see why a turn took two attempts.
+#[derive(Debug, Default)]
+pub struct Outcome {
+    pub body: String,
+    pub note: Option<String>,
+}
+
+impl From<String> for Outcome {
+    fn from(body: String) -> Self {
+        Self { body, note: None }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -58,37 +73,40 @@ impl Tool {
         }
     }
 
-    /// One entry of the request's `tools` array.
-    pub fn spec(self) -> serde_json::Value {
-        json!({
-            "type": "function",
-            "function": {
-                "name": self.name(),
-                "description": self.description(),
-                "parameters": self.parameters(),
-            }
-        })
+    /// One entry of the request's `tools` array. The three dialects nest this differently:
+    /// Chat wraps it under `function`, Responses keeps it flat, Anthropic renames `parameters`
+    /// to `input_schema`.
+    pub fn spec(self, dialect: Dialect) -> serde_json::Value {
+        let (name, description, parameters) = (self.name(), self.description(), self.parameters());
+        match dialect {
+            Dialect::Chat => chat::tool_spec(name, description, parameters),
+            Dialect::Responses => responses::tool_spec(name, description, parameters),
+            Dialect::Messages => anthropic::tool_spec(name, description, parameters),
+        }
     }
 
     /// `arguments` is the raw JSON string the model streamed, parsed here and nowhere else.
-    pub async fn call(self, arguments: &str, cancel: &Cancel) -> Result<String> {
+    pub async fn call(self, arguments: &str, cancel: &Cancel) -> Result<Outcome> {
         let raw = if arguments.trim().is_empty() {
             "{}"
         } else {
             arguments
         };
-        let out = match self {
-            Tool::Read => read::call(parse(raw)?).await?,
-            Tool::Write => write::call(parse(raw)?).await?,
-            Tool::Edit => edit::call(parse(raw)?).await?,
+        let out: Outcome = match self {
+            Tool::Read => read::call(parse(raw)?).await?.into(),
+            Tool::Write => write::call(parse(raw)?).await?.into(),
+            Tool::Edit => edit::call(parse(raw)?).await?.into(),
             Tool::Bash => bash::call(parse(raw)?, cancel).await?,
         };
-        Ok(cap(out))
+        Ok(Outcome {
+            body: cap(out.body),
+            note: out.note,
+        })
     }
 }
 
-pub fn specs() -> Vec<serde_json::Value> {
-    Tool::ALL.into_iter().map(Tool::spec).collect()
+pub fn specs(dialect: Dialect) -> Vec<serde_json::Value> {
+    Tool::ALL.into_iter().map(|t| t.spec(dialect)).collect()
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(raw: &str) -> Result<T> {
@@ -140,13 +158,43 @@ fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// A tool the model is never told about cannot be called, and a mock cannot catch that.
+    /// Each dialect reads the name and schema from a different place.
     #[test]
-    fn every_tool_advertises_an_object_schema() {
+    fn every_tool_advertises_an_object_schema_in_every_dialect() {
         for tool in Tool::ALL {
-            let spec = tool.spec();
-            assert_eq!(spec["function"]["name"], tool.name());
-            assert_eq!(spec["function"]["parameters"]["type"], "object");
-            assert!(spec["function"]["parameters"].get("$schema").is_none());
+            let chat = tool.spec(Dialect::Chat);
+            assert_eq!(chat["function"]["name"], tool.name());
+            assert_eq!(chat["function"]["parameters"]["type"], "object");
+
+            let responses = tool.spec(Dialect::Responses);
+            assert_eq!(responses["name"], tool.name());
+            assert_eq!(responses["parameters"]["type"], "object");
+
+            let messages = tool.spec(Dialect::Messages);
+            assert_eq!(messages["name"], tool.name());
+            assert_eq!(messages["input_schema"]["type"], "object");
+            assert!(messages.get("parameters").is_none());
+
+            // OpenAI rejects $schema, and it only costs tokens elsewhere.
+            for spec in [
+                &chat["function"]["parameters"],
+                &responses["parameters"],
+                &messages["input_schema"],
+            ] {
+                assert!(
+                    spec.get("$schema").is_none(),
+                    "{} leaked $schema",
+                    tool.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_four_tools_are_advertised() {
+        for dialect in [Dialect::Chat, Dialect::Responses, Dialect::Messages] {
+            assert_eq!(specs(dialect).len(), 4);
         }
     }
 

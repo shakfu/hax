@@ -17,6 +17,18 @@ use serde::Deserialize;
 
 use super::{Error, Event, EventStream, Usage};
 
+/// The script's own shape. The internal `Usage` stays free of serde so no dialect's wire
+/// spelling can creep into it.
+#[derive(Debug, Deserialize)]
+struct ScriptUsage {
+    #[serde(default)]
+    prompt_tokens: u32,
+    #[serde(default)]
+    completion_tokens: u32,
+    #[serde(default)]
+    total_tokens: u32,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Step {
@@ -27,7 +39,7 @@ enum Step {
         name: String,
         arguments: String,
     },
-    Usage(Usage),
+    Usage(ScriptUsage),
 }
 
 pub struct Mock {
@@ -60,14 +72,22 @@ impl Mock {
             .map(|step| {
                 Ok(match step {
                     Step::Text(t) => Event::Text(t),
-                    Step::Usage(u) => Event::Usage(u),
+                    Step::Usage(u) => Event::Usage(Usage {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        total_tokens: if u.total_tokens > 0 {
+                            u.total_tokens
+                        } else {
+                            u.prompt_tokens + u.completion_tokens
+                        },
+                    }),
                     Step::ToolCall {
                         index,
                         id,
                         name,
                         arguments,
                     } => Event::ToolCallDelta {
-                        index,
+                        key: index.to_string(),
                         id: Some(id),
                         name: Some(name),
                         arguments: Some(arguments),

@@ -1,22 +1,24 @@
-//! One wire format: OpenAI-compatible Chat Completions.
+//! Three wire formats behind one set of provider-independent types.
 //!
-//! Because the format is frozen at one, the wire shape *is* the internal shape and there is no
-//! translation layer. Adding a second format means introducing one; that is the cost the scope
-//! freeze is buying.
+//! The types below are the internal model. No dialect's wire shape leaks into them, which is the
+//! change that made a second and third format possible: `Message` used to *be* the Chat request
+//! body, so there was nothing to translate from.
 
+pub mod anthropic;
+pub mod chat;
 pub mod http;
 pub mod mock;
+pub mod registry;
+pub mod responses;
 
 use std::pin::Pin;
 use std::time::Duration;
 
 use futures_util::Stream;
-use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     System,
     User,
@@ -24,40 +26,23 @@ pub enum Role {
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionCall {
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    /// What the result must be addressed to. Chat and Anthropic use their own id; Responses
+    /// distinguishes the streaming item id from the `call_id` a result quotes, and this is the
+    /// latter.
+    pub id: String,
     pub name: String,
-    /// A JSON object, as a string. The API streams it in fragments, so it is only parsed once
-    /// the turn has assembled it.
+    /// A JSON object as a string. Every dialect streams it in fragments, so it is parsed only
+    /// once the turn has assembled it.
     pub arguments: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub function: FunctionCall,
-}
-
-impl ToolCall {
-    pub fn function(id: String, name: String, arguments: String) -> Self {
-        Self {
-            id,
-            kind: "function".into(),
-            function: FunctionCall { name, arguments },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
 
@@ -70,10 +55,10 @@ impl Message {
         Self::text(Role::User, text)
     }
 
-    pub fn assistant(text: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+    pub fn assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
-            content: text,
+            content,
             tool_calls,
             tool_call_id: None,
         }
@@ -98,24 +83,32 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
-    #[serde(default)]
     pub prompt_tokens: u32,
-    #[serde(default)]
     pub completion_tokens: u32,
-    #[serde(default)]
     pub total_tokens: u32,
 }
 
-/// Provider-independent by construction, so `turn.rs` never sees wire JSON.
-#[derive(Debug, Clone)]
+impl Usage {
+    /// Anthropic and Responses report input and output separately and no total.
+    pub fn from_parts(prompt: u32, completion: u32) -> Self {
+        Self {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Text(String),
-    /// Tool calls arrive interleaved and keyed by index; `id` and `name` land on the first
-    /// fragment only.
+    /// Tool calls arrive interleaved, so fragments carry the key their dialect groups by: the
+    /// call index for Chat, the output item id for Responses, the content block index for
+    /// Anthropic. `id` and `name` land on the opening fragment only.
     ToolCallDelta {
-        index: usize,
+        key: String,
         id: Option<String>,
         name: Option<String>,
         arguments: Option<String>,
@@ -139,7 +132,6 @@ pub enum Error {
 }
 
 impl Error {
-    /// Retrying a 4xx other than 429 just burns the budget.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::RateLimited { .. } | Error::Server { .. })
     }
@@ -148,6 +140,49 @@ impl Error {
         match self {
             Error::RateLimited { retry_after } => *retry_after,
             _ => None,
+        }
+    }
+}
+
+/// Which wire format a provider speaks. Fixed per registry entry; `--base-url` moves the endpoint
+/// but never the dialect, because a different shape is a different provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    Chat,
+    Responses,
+    Messages,
+}
+
+impl Dialect {
+    pub fn path(self) -> &'static str {
+        match self {
+            Dialect::Chat => "chat/completions",
+            Dialect::Responses => "responses",
+            Dialect::Messages => "messages",
+        }
+    }
+
+    pub fn build_body(
+        self,
+        cfg: &Config,
+        messages: &[Message],
+        tools: &[serde_json::Value],
+        cache_key: &str,
+    ) -> serde_json::Value {
+        match self {
+            Dialect::Chat => chat::build_body(cfg, messages, tools, cache_key),
+            Dialect::Responses => responses::build_body(cfg, messages, tools, cache_key),
+            Dialect::Messages => anthropic::build_body(cfg, messages, tools),
+        }
+    }
+
+    /// One SSE frame in, zero or more provider-independent events out. Only Anthropic needs the
+    /// event name; the OpenAI dialects carry their discriminator inside the data.
+    pub fn parse_frame(self, event: &str, data: &str) -> Vec<Result<Event, Error>> {
+        match self {
+            Dialect::Chat => chat::parse_frame(data),
+            Dialect::Responses => responses::parse_frame(data),
+            Dialect::Messages => anthropic::parse_frame(event, data),
         }
     }
 }

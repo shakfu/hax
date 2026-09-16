@@ -12,14 +12,28 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Text only: the tests that use this are about the request rxa sends, not about tools.
     fn start(mode: &str) -> Self {
+        Self::spawn(mode, "chat", true)
+    }
+
+    fn start_with(mode: &str, dialect: &str) -> Self {
+        Self::spawn(mode, dialect, false)
+    }
+
+    fn spawn(mode: &str, dialect: &str, reply_only: bool) -> Self {
         let dir = tempdir::Dir::new();
         let mut child = Command::new("python3")
             .arg(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/fixtures/fake_provider.py"
             ))
-            .args(["--mode", mode])
+            .args(["--mode", mode, "--dialect", dialect])
+            .args(if reply_only {
+                &["--reply-only"][..]
+            } else {
+                &[][..]
+            })
             .arg("--capture")
             .arg(dir.path().join("request.json"))
             .arg("--gets")
@@ -47,12 +61,31 @@ impl Fixture {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rxa"));
         cmd.env("RXA_BASE_URL", format!("http://127.0.0.1:{}/v1", self.port))
             .env("RXA_API_KEY", "test")
+            .env_remove("RXA_PROVIDER")
             .env_remove("RXA_MODEL")
             .env_remove("RXA_CONTEXT")
             .args(["-p", prompt]);
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
+        cmd.output().expect("running rxa")
+    }
+
+    fn run_as(&self, provider: &str, prompt: &str) -> std::process::Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rxa"));
+        cmd.env("RXA_BASE_URL", format!("http://127.0.0.1:{}/v1", self.port))
+            .env("RXA_API_KEY", "test")
+            .env_remove("RXA_CONTEXT")
+            .args([
+                "--provider",
+                provider,
+                "--model",
+                "m",
+                "--max-turns",
+                "1",
+                "-p",
+                prompt,
+            ]);
         cmd.output().expect("running rxa")
     }
 
@@ -164,5 +197,79 @@ mod tempdir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+}
+
+/// Each dialect puts the same conversation on the wire in a different shape, and each fragments
+/// tool arguments differently. Only the built binary against a real socket covers both at once.
+#[test]
+fn every_dialect_sends_its_own_shape_and_reassembles_fragments() {
+    struct Case {
+        dialect: &'static str,
+        provider: &'static str,
+        present: &'static [&'static str],
+        absent: &'static [&'static str],
+        tool_schema_key: &'static str,
+    }
+
+    const CASES: &[Case] = &[
+        Case {
+            dialect: "chat",
+            provider: "openrouter",
+            present: &["messages", "tools"],
+            absent: &["input", "instructions", "system", "max_tokens"],
+            tool_schema_key: "/function/parameters",
+        },
+        Case {
+            dialect: "responses",
+            provider: "openai",
+            present: &["input", "instructions", "store"],
+            absent: &["messages", "system", "max_tokens"],
+            tool_schema_key: "/parameters",
+        },
+        Case {
+            dialect: "messages",
+            provider: "anthropic",
+            present: &["messages", "system", "max_tokens"],
+            absent: &["input", "instructions", "store"],
+            tool_schema_key: "/input_schema",
+        },
+    ];
+
+    for case in CASES {
+        let fixture = Fixture::start_with("full", case.dialect);
+        let out = fixture.run_as(case.provider, "hi");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("live path works"),
+            "{}: no reply, stderr {}",
+            case.dialect,
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // The fixture splits the arguments across two frames; a whole object means the
+        // dialect's grouping key survived reassembly.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(r#"{"path":"notes.txt"}"#),
+            "{}: fragments did not reassemble, stderr {stderr}",
+            case.dialect
+        );
+
+        let body = fixture.captured_request();
+        for key in case.present {
+            assert!(body.get(key).is_some(), "{} lacks {key}", case.dialect);
+        }
+        for key in case.absent {
+            assert!(body.get(key).is_none(), "{} leaked {key}", case.dialect);
+        }
+        let schema = body["tools"][0].pointer(case.tool_schema_key);
+        assert_eq!(
+            schema.and_then(|s| s["type"].as_str()),
+            Some("object"),
+            "{}: tool schema missing at {}",
+            case.dialect,
+            case.tool_schema_key
+        );
     }
 }

@@ -1,63 +1,40 @@
 # Candidate amendments
 
-Options, not a roadmap. Each one costs lines against the 3,000 in README.md, and nothing here is
+Options, not a roadmap. Each one costs lines against the 4,000 in README.md, and nothing here is
 committed to. Record the decision when one is taken or dropped.
 
-## Second wire format: anthropic-messages
+## Taken
 
-Status: deferred, not started, 2026-09-16.
+- 2026-09-16: `anthropic-messages` and `openai-responses`, alongside `openai-chat`. The
+  translation layer this needed is `src/provider/mod.rs`; each dialect owns its own module.
+- 2026-09-16: `--provider` over a fixed registry, with `--base-url` as an endpoint-only override.
+- 2026-09-16: colour by default, off for a pipe, `--no-color` and `NO_COLOR` honoured.
+- 2026-09-16: budget raised 3,000 to 4,000 to pay for the three dialects.
 
-Reaches Anthropic direct and anthropic-compatible endpoints, which Chat Completions cannot reach
-at all. Prefer it over `openai-responses`, which buys only a vendor rxa already reaches.
+## Known gaps
 
-Estimated 250-350 lines, plus 120-180 for the translation layer rxa does not currently have:
-`Message` in `src/provider/mod.rs:54` is the Chat wire shape, serialized straight into the request
-body. A second dialect has to decouple those.
+Defects and half-measures, not scope choices. Small enough to fix when they bite.
 
-### Verified against hax
-
-Read from the fork's C implementation, not from memory.
-
-- Body: `model`, `max_tokens` (required), `stream`, `messages` --
-  `src/providers/anthropic_body.c:264`
-- System prompt: top-level `system` as a `[{type:"text",...}]` array, not a message --
-  `anthropic_body.c:270-277`
-- Tools: flat `{name, description, input_schema}`, not nested under `function` --
-  `anthropic_body.c:199-201`
-- Tool call: a `tool_use` block inside assistant content -- `anthropic_body.c:60-69`
-- Tool result: a `tool_result` block carrying `tool_use_id`, on a user message --
-  `anthropic_body.c:116-137`
-- SSE events: `message_start`, `content_block_start`, `content_block_delta`,
-  `content_block_stop`, `message_delta`, `message_stop`, `error` --
-  `anthropic_events.c:360-372`
-- Deltas: `text_delta.text`, `input_json_delta.partial_json`, `thinking_delta`,
-  `signature_delta` -- `anthropic_events.c:141-167`
-- Usage: `input_tokens` and `output_tokens`. Cached input is reported in addition to
-  `input_tokens`, not as a subset -- `anthropic_events.c:230-241`
-
-Unlike Chat and Responses, the parser needs the SSE `event:` name: `wire.c:125` passes it through,
-while `wire.c:41` and `wire.c:86` discard it. `eventsource-stream` already supplies it.
-
-Model listing is paged with `after_id` cursors (`anthropic_models.c:117-190`). `src/cache.rs`
-assumes the flat OpenAI list.
-
-### Open decisions
-
-- How the dialect is selected: an `--api` flag, or inferred from the base URL, or both.
-- `max_tokens` is required by the wire and has no Chat equivalent. It needs a default and probably
-  a flag.
-- Thinking blocks and signatures must be replayed on the next request
-  (`anthropic_events.c:177`). Carrying them means the internal message type grows a variant;
-  skipping them means rxa cannot use extended thinking. Decide before writing the converter.
+- **Anthropic model listing.** `src/cache.rs` sends bearer auth and parses a flat `data` array.
+  The Messages dialect authenticates with `x-api-key` plus `anthropic-version`, and Anthropic's
+  `/v1/models` is paged with `after_id` cursors (`anthropic_models.c:117-190` in hax). A keyless
+  probe cannot tell whether a valid bearer is accepted there, so the auth half is unconfirmed;
+  the paging half is certain and means only the first page is ever seen. It degrades rather than
+  breaks: `--model` given, the fetch is skipped; `--model` omitted against Anthropic, it fails
+  with the endpoint's own message. Fix is to pass the dialect into `Models::refresh` and follow
+  cursors, roughly 40 lines.
+- **`message_delta` usage is a correction, not a total.** Handled in `turn.rs::merge_usage`, but
+  the rule is a convention rather than something the wire states. A provider reporting only a
+  total and no halves falls back to the reported figure.
 
 ## Session resume
 
 Status: deferred, not started, 2026-09-16.
 
-The strongest pull on the freeze, and the cheapest to add, because `src/cache.rs` already carries
-the parts that are fiddly: an XDG path, a schema version, an endpoint-keyed filename, and a
-tmp-plus-rename atomic write. Persistence is already open; this widens what is stored, not
-whether anything is.
+The strongest pull on the freeze, and cheap, because the fiddly parts already exist:
+`src/cache.rs` has an XDG path, a schema version, an endpoint-keyed filename and a
+tmp-plus-rename atomic write, and `config::restrict_to_owner` already sets 0700/0600 for the
+history file. Persistence is open; this widens what is stored, not whether anything is.
 
 Estimated 120-180 lines.
 
@@ -69,15 +46,54 @@ Estimated 120-180 lines.
 - What gets written. The full `Vec<Message>` is the whole context, tool results included, so a
   session file is roughly the size of the conversation. Decide whether tool results are stored
   verbatim or re-truncated on load.
-- Secrets. Tool output lands on disk verbatim: `bash` output can contain keys, tokens, and `env`
-  dumps. At minimum the session directory is created 0700 and files 0600. Decide this before
-  writing, not after.
+- Secrets. Tool output lands on disk verbatim: `bash` output can contain keys, tokens and `env`
+  dumps. Reuse `config::restrict_to_owner` for both the directory and the files.
 - Pruning. Without a cap the directory grows without bound. A count or age limit is a few lines;
   an interactive pruner is not, and is absent by default.
 - Schema drift. Reuse `cache.rs`'s version field and drop unreadable sessions rather than
   migrating them.
+- The session id is also the natural `prompt_cache_key`, which `provider/http.rs` currently
+  derives from the pid and the clock.
 
 ### What it displaces
 
-The README scope table's `Persistence` row changes from "model list cache only". Update it in the
-same commit, per the amendment rules.
+The README scope table's `Persistence` row changes again. Update it in the same commit.
+
+## Extended thinking
+
+Status: not started.
+
+`provider/anthropic.rs` parses `thinking_delta` and `signature_delta` and drops both, and rxa
+never sends a `thinking` block to ask for them. Responses has the parallel feature: hax requests
+`reasoning.encrypted_content` and replays it, because with `store:false` that is the only way a
+chain of thought survives the tool calls of one turn (`responses_body.c:118-140`).
+
+Both need the same thing rxa does not have: a message variant that carries opaque provider state
+back unchanged. Anthropic requires thinking blocks and their signatures to be replayed
+(`anthropic_events.c:177`); OpenAI binds encrypted reasoning to the model that produced it, so
+replaying it after a model switch is rejected (`responses_body.c:47-54`).
+
+Estimated 150-250 lines for both, most of it the provenance rule rather than the parsing.
+
+## Prompt cache markers
+
+Status: not started.
+
+`prompt_cache_key` is sent on both OpenAI dialects and confirmed accepted. Anthropic is different:
+caching is explicit `cache_control` markers on the last system block, the last tool and the last
+message, not a heuristic (`anthropic_body.c:193-225`). rxa sends none, so every Anthropic turn
+reprocesses the whole transcript.
+
+Roughly 40 lines, and the one item here that pays for itself in latency and cost rather than
+capability.
+
+## Streaming markdown
+
+Status: not started, and deliberately absent from the README.
+
+Every live run shows it: models emit `**3 .txt files**` and rxa prints the asterisks. hax spends
+1,764 lines on `render/markdown.c` and `markdown_table.c`. No crate does incremental streaming
+render -- `termimad` renders finished documents.
+
+The cheap subset is fenced code blocks and inline code only, roughly 300 lines, which is most of
+what is actually lost. Bold, headings and tables are worth less than they cost.

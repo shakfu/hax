@@ -1,6 +1,6 @@
-# Shared by scripts/test_<provider>.sh. Those set PROVIDER, BASE_URL, KEY_ENV and DEFAULT_MODEL,
-# then source this file. Nothing here is rxa-provider-specific: every endpoint below speaks
-# OpenAI-compatible Chat Completions, which is the one wire format rxa implements.
+# Shared by scripts/test_<provider>.sh. Those set PROVIDER, KEY_ENV and DEFAULT_MODEL, then
+# source this file. The endpoint and the wire format come from rxa's own provider registry, so
+# a script names a provider and nothing else.
 #
 # Runs from a throwaway sandbox, never the repo. rxa's file tools have no path jail because its
 # bash tool is unrestricted, and a live model decides for itself what to run.
@@ -10,6 +10,8 @@ set -u
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN=${BIN:-$ROOT/target/debug/rxa}
 MODEL=${MODEL:-$DEFAULT_MODEL}
+# Only for pointing a provider at a local server or a fixture; it never changes the dialect.
+BASE_URL=${BASE_URL:-}
 KEY_FILE=${KEY_FILE:-$HOME/.config/rxa/$PROVIDER.key}
 
 PASS=0
@@ -72,11 +74,12 @@ run_suite() {
     resolve_key
     setup_sandbox
 
-    export RXA_BASE_URL="$BASE_URL"
+    export RXA_PROVIDER="$PROVIDER"
     export RXA_MODEL="$MODEL"
+    [ -n "$BASE_URL" ] && export RXA_BASE_URL="$BASE_URL"
 
     echo "provider : $PROVIDER"
-    echo "endpoint : $BASE_URL"
+    echo "endpoint : ${BASE_URL:-(from the registry)}"
     echo "model    : $MODEL"
     echo "key from : $KEY_SOURCE"
     echo "sandbox  : $SANDBOX"

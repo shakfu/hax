@@ -7,6 +7,7 @@ mod config;
 mod frontend;
 mod provider;
 mod term;
+mod theme;
 mod tools;
 mod turn;
 
@@ -40,6 +41,7 @@ fn main() -> ExitCode {
 
 fn start() -> Result<()> {
     let cli = Cli::parse();
+    theme::init(cli.no_color);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

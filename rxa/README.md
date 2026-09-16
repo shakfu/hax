@@ -13,17 +13,26 @@ Frozen. Each row is a ceiling, not a starting point.
 
 | Dimension | Frozen at |
 | --- | --- |
-| Wire formats | 1: OpenAI-compatible Chat Completions |
-| Providers | any endpoint speaking that format, selected by config |
+| Wire formats | 3: openai-chat, openai-responses, anthropic-messages |
+| Providers | a fixed registry, selected by `--provider`; `--base-url` overrides |
 | Tools | 4: `read`, `write`, `edit`, `bash` |
 | Entry modes | 2: interactive REPL, headless `-p` |
 | Config | flags, environment, and one cache file |
+| Colour | on for a terminal, off for a pipe; `--no-color` and `NO_COLOR` |
 | Persistence | model list cache, prompt history |
 | Test provider | 1: `mock`, replaying a JSON script |
 
-One wire format still reaches many providers. OpenAI-compatible Chat Completions covers OpenAI,
-OpenRouter, Groq, DeepSeek, llama.cpp, and Ollama. Provider selection is a base URL, an API key,
-and a model id.
+Each registry entry fixes a base URL, a dialect and a key variable, so `--provider` and `--model`
+are the whole selection. `--base-url` stays as an escape hatch for a local server, a corporate
+gateway or a test fixture; it overrides the URL, never the dialect.
+
+| `--provider` | Dialect | Key |
+| --- | --- | --- |
+| `openai` | openai-responses | `OPENAI_API_KEY` |
+| `anthropic` | anthropic-messages | `ANTHROPIC_API_KEY` |
+| `openrouter` | openai-chat | `OPENROUTER_API_KEY` |
+| `ollama` | openai-chat | none |
+| `llamacpp` | openai-chat | none |
 
 ## Absent
 
@@ -53,11 +62,11 @@ to it.
 
 ## The budget
 
-3,000 lines in `src/`, excluding tests. `make budget` enforces it and `make check` includes it;
+4,000 lines in `src/`, excluding tests. `make budget` enforces it and `make check` includes it;
 the `BUDGET` variable in the Makefile is the authoritative number.
 
 A feature list ratchets, because adding one item to a list costs nothing. A line budget makes
-every new feature compete with an existing one for the same 3,000 lines.
+every new feature compete with an existing one for the same 4,000 lines.
 
 ## Amending this file
 
@@ -83,12 +92,13 @@ Candidates that have been costed but not taken live in [TODO.md](TODO.md).
 | --- | --- |
 | `agent.rs` | the continuation loop, retry policy, context check |
 | `turn.rs` | stream events to one assistant message; no I/O, unit tested |
-| `provider/` | the wire format, the network client, the scripted mock |
+| `provider/` | three dialects, the registry, the network client, the scripted mock |
 | `tools/` | the four tools, dispatched by enum rather than `dyn Tool` |
 | `frontend/` | the `Frontend` trait and its two implementations |
 | `cancel.rs` | the latched flag Esc and Ctrl-C both set |
 | `term.rs` | raw mode, restored from `Drop` and from a panic hook |
 | `config.rs`, `cache.rs` | flag and environment resolution, the model cache |
+| `theme.rs` | colour, decided once from the flag, `NO_COLOR` and whether stdout is a tty |
 | `tests/` | unit tests sit in `src/`; `tests/` is only the network path |
 
 ## Build
@@ -135,9 +145,11 @@ because prompts are written verbatim.
 
 | Variable | Meaning |
 | --- | --- |
-| `RXA_BASE_URL` | API base, e.g. `https://api.openai.com/v1` |
-| `RXA_API_KEY` | bearer token |
+| `RXA_PROVIDER` | registry id; defaults to `openrouter` |
 | `RXA_MODEL` | model id |
+| `RXA_BASE_URL` | override the endpoint, never the dialect |
+| `RXA_API_KEY` | overrides the provider's own key variable |
+| `NO_COLOR` | any value turns colour off |
 | `RUST_LOG` | `tracing` filter; `rxa=debug` logs requests with auth redacted |
 
 ## Name

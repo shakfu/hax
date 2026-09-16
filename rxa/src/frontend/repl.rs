@@ -18,10 +18,8 @@ use crate::agent::Agent;
 use crate::cancel::Cancel;
 use crate::provider::Usage;
 use crate::term::RawGuard;
+use crate::theme::{self, Style};
 
-const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[31m";
-const RESET: &str = "\x1b[0m";
 const POLL: Duration = Duration::from_millis(80);
 const HISTORY_CAPACITY: usize = 1000;
 
@@ -64,29 +62,37 @@ impl Frontend for Repl {
     }
 
     fn tool_start(&mut self, name: &str, arguments: &str) {
-        self.line(&format!("{DIM}{name}({}){RESET}", one_line(arguments, 72)));
+        let text = format!("{name}({})", one_line(arguments, 72));
+        self.line(&theme::paint(Style::Muted, &text));
     }
 
-    fn tool_end(&mut self, _name: &str, body: &str, ok: bool) {
-        let colour = if ok { DIM } else { RED };
-        self.line(&format!("{colour}  {}{RESET}", one_line(body, 72)));
+    fn tool_end(&mut self, _name: &str, body: &str, note: Option<&str>, ok: bool) {
+        // One line per tool call. A note displaces the result preview because it says more:
+        // it is the reason the model is about to try something else.
+        let line = match (ok, note) {
+            (false, _) => theme::paint(Style::Error, &format!("  {}", one_line(body, 72))),
+            (true, Some(note)) => theme::paint(Style::Warn, &format!("  {note}")),
+            (true, None) => theme::paint(Style::Muted, &format!("  {}", one_line(body, 72))),
+        };
+        self.line(&line);
     }
 
     fn retry(&mut self, attempt: u32, delay: Duration) {
-        self.line(&format!(
-            "{DIM}retrying ({attempt}) in {:.1}s{RESET}",
-            delay.as_secs_f32()
-        ));
+        let text = format!("retrying ({attempt}) in {:.1}s", delay.as_secs_f32());
+        self.line(&theme::paint(Style::Warn, &text));
     }
 
     fn turn_end(&mut self, usage: Usage) {
         if usage.total_tokens > 0 {
-            self.line(&format!("{DIM}{} tokens{RESET}", usage.total_tokens));
+            self.line(&theme::paint(
+                Style::Muted,
+                &format!("{} tokens", usage.total_tokens),
+            ));
         }
     }
 
     fn cancelled(&mut self) {
-        self.line(&format!("{DIM}cancelled{RESET}"));
+        self.line(&theme::paint(Style::Warn, "cancelled"));
     }
 }
 
@@ -152,7 +158,7 @@ pub fn run(runtime: &tokio::runtime::Runtime, agent: &mut Agent) -> Result<()> {
         drop(guard);
 
         if let Err(e) = result {
-            eprintln!("{RED}error: {e:#}{RESET}");
+            eprintln!("{}", theme::paint(Style::Error, &format!("error: {e:#}")));
         }
     }
     Ok(())

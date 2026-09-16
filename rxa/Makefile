@@ -1,7 +1,7 @@
 # rxa: build, test, and the line budget the frozen scope rests on.
 # `make check` is the whole gate. See README.md before adding a target.
 
-BUDGET   := 3000
+BUDGET   := 4000
 PROVIDER ?= openrouter
 BIN      := target/debug/rxa
 

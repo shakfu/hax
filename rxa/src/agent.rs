@@ -19,6 +19,29 @@ const MAX_ATTEMPTS: u32 = 4;
 const SYSTEM: &str = "You are rxa, a coding agent. Use the tools to inspect and change files. \
 Be terse. State what you did; do not narrate what you are about to do.";
 
+/// Facts about the machine, so the model does not have to guess at it. Without this it reaches
+/// for GNU flags on a BSD userland and burns a turn discovering the mistake.
+///
+/// Three fields, not hax's six: the working directory, the platform, and the shell. Home
+/// directory and model name are not worth their tokens, and a git root needs a walk up the tree.
+fn system_prompt() -> String {
+    let mut prompt = String::from(SYSTEM);
+    prompt.push_str("\n\n# Environment\n\n");
+
+    if let Ok(cwd) = std::env::current_dir() {
+        prompt.push_str(&format!("- Working directory: {}\n", cwd.display()));
+    }
+    prompt.push_str(&format!(
+        "- Operating system: {} ({})\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    if let Ok(shell) = std::env::var("SHELL") {
+        prompt.push_str(&format!("- Command shell: {shell}\n"));
+    }
+    prompt
+}
+
 pub struct Agent {
     provider: Provider,
     config: Config,
@@ -30,9 +53,9 @@ impl Agent {
     pub fn new(provider: Provider, config: Config) -> Self {
         Self {
             provider,
+            tools: tools::specs(config.dialect),
             config,
-            messages: vec![Message::system(SYSTEM)],
-            tools: tools::specs(),
+            messages: vec![Message::system(system_prompt())],
         }
     }
 
@@ -68,19 +91,19 @@ impl Agent {
                     frontend.cancelled();
                     return Ok(());
                 }
-                let name = call.function.name.as_str();
-                frontend.tool_start(name, &call.function.arguments);
+                let name = call.name.as_str();
+                frontend.tool_start(name, &call.arguments);
 
                 let outcome = match Tool::from_name(name) {
-                    Some(tool) => tool.call(&call.function.arguments, cancel).await,
+                    Some(tool) => tool.call(&call.arguments, cancel).await,
                     None => Err(anyhow::anyhow!("no such tool: {name}")),
                 };
-                let (ok, body) = match outcome {
-                    Ok(body) => (true, body),
-                    Err(e) => (false, format!("error: {e:#}")),
+                let (ok, body, note) = match outcome {
+                    Ok(out) => (true, out.body, out.note),
+                    Err(e) => (false, format!("error: {e:#}"), None),
                 };
 
-                frontend.tool_end(name, &body, ok);
+                frontend.tool_end(name, &body, note.as_deref(), ok);
                 self.messages
                     .push(Message::tool_result(call.id.clone(), body));
             }
@@ -172,5 +195,29 @@ impl Agent {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_system_prompt_states_the_platform_and_place() {
+        let prompt = system_prompt();
+        assert!(prompt.starts_with("You are rxa"));
+        assert!(prompt.contains("# Environment"));
+        assert!(prompt.contains(std::env::consts::OS));
+        assert!(prompt.contains(std::env::consts::ARCH));
+
+        let cwd = std::env::current_dir().expect("a working directory");
+        assert!(prompt.contains(&cwd.display().to_string()));
+    }
+
+    /// An unset SHELL must drop the line rather than print an empty one.
+    #[test]
+    fn an_unknown_shell_is_omitted_not_blank() {
+        let prompt = system_prompt();
+        assert!(!prompt.contains("- Command shell: \n"));
     }
 }
