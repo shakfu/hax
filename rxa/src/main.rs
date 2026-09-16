@@ -6,6 +6,7 @@ mod cancel;
 mod config;
 mod frontend;
 mod provider;
+mod state;
 mod term;
 mod theme;
 mod tools;
@@ -47,6 +48,11 @@ fn start() -> Result<()> {
         .build()?;
 
     let config = runtime.block_on(cli.resolve())?;
+    // Remembered here rather than inside resolve(), so config resolution has no disk side effect
+    // and its tests write nothing.
+    if cli.mock.is_none() {
+        state::State::load().remember(&config.provider, &config.model);
+    }
     let provider = match &cli.mock {
         Some(path) => Provider::Mock(Mock::load(path)?),
         None => Provider::Http(Http::new()?),

@@ -24,15 +24,12 @@ pub struct Cli {
     #[arg(short = 'p', long, value_name = "TEXT")]
     pub prompt: Option<String>,
 
-    /// Which provider to talk to. Fixes the endpoint, the wire format and the key variable.
-    #[arg(
-        long,
-        env = "RXA_PROVIDER",
-        default_value = "openrouter",
-        value_name = "ID"
-    )]
-    pub provider: String,
+    /// Which provider to talk to: fixes the endpoint, the wire format and the key variable.
+    /// Left out, rxa takes the first provider whose key variable is set.
+    #[arg(long, env = "RXA_PROVIDER", value_name = "ID")]
+    pub provider: Option<String>,
 
+    /// Left out, rxa reuses the model last used with this provider.
     #[arg(long, env = "RXA_MODEL", value_name = "ID")]
     pub model: Option<String>,
 
@@ -69,6 +66,9 @@ pub struct Cli {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The registry id that was named or autoselected. Carried so the caller can record the
+    /// pairing; resolution itself stays free of disk side effects.
+    pub provider: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -81,6 +81,7 @@ impl Config {
     #[cfg(test)]
     pub fn for_test(model: &str) -> Self {
         Self {
+            provider: "openrouter".into(),
             base_url: "http://x/v1".into(),
             api_key: "k".into(),
             model: model.into(),
@@ -96,6 +97,7 @@ impl Cli {
     pub async fn resolve(&self) -> Result<Config> {
         if self.mock.is_some() {
             return Ok(Config {
+                provider: "mock".into(),
                 base_url: self.base_url.clone().unwrap_or_default(),
                 api_key: String::new(),
                 model: self.model.clone().unwrap_or_else(|| "mock".into()),
@@ -105,12 +107,27 @@ impl Cli {
             });
         }
 
-        let Some(entry) = registry::find(&self.provider) else {
-            bail!(
-                "unknown provider {:?}; known: {}",
-                self.provider,
-                registry::ids().join(", ")
-            );
+        let entry = match &self.provider {
+            Some(named) => match registry::find(named) {
+                Some(entry) => entry,
+                None => bail!(
+                    "unknown provider {named:?}; known: {}",
+                    registry::ids().join(", ")
+                ),
+            },
+            // No provider named: take the first whose key variable is set. Local servers carry
+            // no key and so are never autoselected.
+            None => match registry::autoselect(|var| std::env::var(var).ok()) {
+                Some(entry) => entry,
+                None => bail!(
+                    "no provider key found; set one of {}, or pass --provider",
+                    registry::key_vars()
+                        .iter()
+                        .map(|v| format!("${v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
         };
 
         let base_url = self
@@ -145,12 +162,19 @@ impl Cli {
             tracing::warn!("model list unavailable, continuing: {e:#}");
         }
 
-        let model = match self.model.clone().or_else(|| cache.default_model()) {
+        // Explicit beats remembered beats a single-model endpoint. The pairing is written by
+        // the caller, not here: resolving config should not touch the disk.
+        let model = match self
+            .model
+            .clone()
+            .or_else(|| crate::state::State::load().last_model(entry.id))
+            .or_else(|| cache.default_model())
+        {
             Some(m) => m,
             None => bail!(
-                "no model: pass --model or set RXA_MODEL ({} cached for {})",
-                cache.count(),
-                entry.id
+                "no model for {}: pass --model or set RXA_MODEL ({} cached)",
+                entry.id,
+                cache.count()
             ),
         };
 
@@ -159,6 +183,7 @@ impl Cli {
                 .context
                 .or_else(|| cache.context_for(&model))
                 .unwrap_or(128_000),
+            provider: entry.id.to_string(),
             base_url,
             api_key,
             model,
@@ -209,7 +234,7 @@ mod tests {
     fn cli(model: Option<&str>, context: Option<u32>, refresh: bool) -> Cli {
         Cli {
             prompt: None,
-            provider: "openrouter".into(),
+            provider: Some("openrouter".into()),
             model: model.map(String::from),
             base_url: None,
             api_key: Some("k".into()),
@@ -261,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_provider_lists_the_known_ones() {
         let mut c = cli(Some("m"), Some(64), false);
-        c.provider = "notaprovider".into();
+        c.provider = Some("notaprovider".into());
         let err = c.resolve().await.expect_err("should refuse").to_string();
         assert!(err.contains("notaprovider"), "{err}");
         assert!(err.contains("openrouter"), "{err}");
@@ -270,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn the_provider_fixes_the_dialect_and_base_url() {
         let mut c = cli(Some("claude-haiku-4-5"), Some(64), false);
-        c.provider = "anthropic".into();
+        c.provider = Some("anthropic".into());
         let resolved = c.resolve().await.expect("resolves");
         assert_eq!(resolved.dialect, Dialect::Messages);
         assert_eq!(resolved.base_url, "https://api.anthropic.com/v1");
@@ -280,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn base_url_overrides_the_endpoint_but_not_the_dialect() {
         let mut c = cli(Some("m"), Some(64), false);
-        c.provider = "anthropic".into();
+        c.provider = Some("anthropic".into());
         c.base_url = Some("http://127.0.0.1:9999/v1/".into());
         let resolved = c.resolve().await.expect("resolves");
         assert_eq!(resolved.base_url, "http://127.0.0.1:9999/v1");

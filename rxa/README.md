@@ -14,23 +14,32 @@ Frozen. Each row is a ceiling, not a starting point.
 | Dimension | Frozen at |
 | --- | --- |
 | Wire formats | 3: openai-chat, openai-responses, anthropic-messages |
-| Providers | a fixed registry, selected by `--provider`; `--base-url` overrides |
+| Providers | a fixed registry; `--provider` names one, or the environment picks |
 | Tools | 4: `read`, `write`, `edit`, `bash` |
 | Entry modes | 2: interactive REPL, headless `-p` |
 | Config | flags, environment, and one cache file |
 | Colour | on for a terminal, off for a pipe; `--no-color` and `NO_COLOR` |
-| Persistence | model list cache, prompt history |
+| Persistence | model list cache, prompt history, last model per provider |
 | Test provider | 1: `mock`, replaying a JSON script |
 
 Each registry entry fixes a base URL, a dialect and a key variable, so `--provider` and `--model`
-are the whole selection. `--base-url` stays as an escape hatch for a local server, a corporate
-gateway or a test fixture; it overrides the URL, never the dialect.
+are the whole selection, and both have a fallback:
+
+- No `--provider`: the first entry below whose key variable is set. Local servers carry no key
+  and are never autoselected, so an endpoint that is simply unreachable is never chosen silently.
+- No `--model`: the model last used with that provider, then a single-model endpoint's only
+  entry, then an error naming the provider.
+
+`--base-url` stays as an escape hatch for a local server, a corporate gateway or a test fixture;
+it overrides the URL, never the dialect.
+
+Listed in autoselect order.
 
 | `--provider` | Dialect | Key |
 | --- | --- | --- |
-| `openai` | openai-responses | `OPENAI_API_KEY` |
-| `anthropic` | anthropic-messages | `ANTHROPIC_API_KEY` |
 | `openrouter` | openai-chat | `OPENROUTER_API_KEY` |
+| `anthropic` | anthropic-messages | `ANTHROPIC_API_KEY` |
+| `openai` | openai-responses | `OPENAI_API_KEY` |
 | `ollama` | openai-chat | none |
 | `llamacpp` | openai-chat | none |
 
@@ -97,7 +106,7 @@ Candidates that have been costed but not taken live in [TODO.md](TODO.md).
 | `frontend/` | the `Frontend` trait and its two implementations |
 | `cancel.rs` | the latched flag Esc and Ctrl-C both set |
 | `term.rs` | raw mode, restored from `Drop` and from a panic hook |
-| `config.rs`, `cache.rs` | flag and environment resolution, the model cache |
+| `config.rs`, `cache.rs`, `state.rs` | resolution, the model cache, what is remembered |
 | `theme.rs` | colour, decided once from the flag, `NO_COLOR` and whether stdout is a tty |
 | `tests/` | unit tests sit in `src/`; `tests/` is only the network path |
 
@@ -140,13 +149,13 @@ A mock script is a JSON array of turns, each an array of steps: `{"text": ...}`,
 `{"tool_call": {...}}`, `{"usage": {...}}`. One turn is consumed per provider round-trip.
 
 Configuration, in precedence order: flags, then environment, then `$XDG_CONFIG_HOME/rxa/`,
-which also holds the model cache and `history.txt`. rxa creates both owner-only, 0700 and 0600,
-because prompts are written verbatim.
+which also holds the model cache, `history.txt` and `state.json`. rxa creates the directory 0700
+and the files it owns 0600, because prompts are written verbatim.
 
 | Variable | Meaning |
 | --- | --- |
-| `RXA_PROVIDER` | registry id; defaults to `openrouter` |
-| `RXA_MODEL` | model id |
+| `RXA_PROVIDER` | registry id; unset, the first key variable set decides |
+| `RXA_MODEL` | model id; unset, the one last used with it |
 | `RXA_BASE_URL` | override the endpoint, never the dialect |
 | `RXA_API_KEY` | overrides the provider's own key variable |
 | `NO_COLOR` | any value turns colour off |

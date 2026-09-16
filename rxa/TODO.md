@@ -10,6 +10,9 @@ committed to. Record the decision when one is taken or dropped.
 - 2026-09-16: `--provider` over a fixed registry, with `--base-url` as an endpoint-only override.
 - 2026-09-16: colour by default, off for a pipe, `--no-color` and `NO_COLOR` honoured.
 - 2026-09-16: budget raised 3,000 to 4,000 to pay for the three dialects.
+- 2026-09-16: provider autoselect from the environment, and the model last used with a provider
+  remembered in `state.json`. The registry's order is the autoselect order and is tested as a
+  contract.
 
 ## Known gaps
 
@@ -23,6 +26,10 @@ Defects and half-measures, not scope choices. Small enough to fix when they bite
   breaks: `--model` given, the fetch is skipped; `--model` omitted against Anthropic, it fails
   with the endpoint's own message. Fix is to pass the dialect into `Models::refresh` and follow
   cursors, roughly 40 lines.
+- **Config resolution had a disk side effect.** `resolve()` used to write `state.json`, which
+  made its own unit tests write to the developer's real `~/.config/rxa`. The write moved to
+  `main.rs`; `tests/live_path.rs` now sets `XDG_CONFIG_HOME` per fixture. Worth remembering as a
+  shape: a resolver that persists is a resolver whose tests persist.
 - **`message_delta` usage is a correction, not a total.** Handled in `turn.rs::merge_usage`, but
   the rule is a convention rather than something the wire states. A provider reporting only a
   total and no halves falls back to the reported figure.

@@ -59,12 +59,13 @@ impl Fixture {
 
     fn run(&self, extra_env: &[(&str, &str)], prompt: &str) -> std::process::Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rxa"));
-        cmd.env("RXA_BASE_URL", format!("http://127.0.0.1:{}/v1", self.port))
+        cmd.env("XDG_CONFIG_HOME", self.dir.path())
+            .env("RXA_BASE_URL", format!("http://127.0.0.1:{}/v1", self.port))
             .env("RXA_API_KEY", "test")
-            .env_remove("RXA_PROVIDER")
             .env_remove("RXA_MODEL")
             .env_remove("RXA_CONTEXT")
-            .args(["-p", prompt]);
+            // A bare key does not say which provider it belongs to, so these name one.
+            .args(["--provider", "openrouter", "-p", prompt]);
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
@@ -73,8 +74,10 @@ impl Fixture {
 
     fn run_as(&self, provider: &str, prompt: &str) -> std::process::Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rxa"));
-        cmd.env("RXA_BASE_URL", format!("http://127.0.0.1:{}/v1", self.port))
+        cmd.env("XDG_CONFIG_HOME", self.dir.path())
+            .env("RXA_BASE_URL", format!("http://127.0.0.1:{}/v1", self.port))
             .env("RXA_API_KEY", "test")
+            .env_remove("RXA_PROVIDER")
             .env_remove("RXA_CONTEXT")
             .args([
                 "--provider",
@@ -271,5 +274,67 @@ fn every_dialect_sends_its_own_shape_and_reassembles_fragments() {
             case.dialect,
             case.tool_schema_key
         );
+    }
+}
+
+/// With no --provider, the first key variable that is set decides. Only the built binary shows
+/// that the registry order and the environment actually meet.
+#[test]
+fn an_unset_provider_is_chosen_from_the_environment() {
+    let fixture = Fixture::start("full");
+    let endpoint = format!("http://127.0.0.1:{}/v1", fixture.port);
+
+    let run_with = |var: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rxa"))
+            .env("XDG_CONFIG_HOME", fixture.dir.path())
+            .env("RXA_BASE_URL", &endpoint)
+            .env_remove("RXA_PROVIDER")
+            .env_remove("RXA_API_KEY")
+            .env_remove("RXA_MODEL")
+            .env_remove("RXA_CONTEXT")
+            .env_remove("OPENROUTER_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .env(var, "test-key")
+            .args(["--model", "m", "--max-turns", "1", "-p", "hi"])
+            .output()
+            .expect("running rxa")
+    };
+
+    // The fixture speaks chat, so only the openrouter entry can succeed against it. The other
+    // two prove a different provider was selected: they fail on shape, not on credentials.
+    let chosen = run_with("OPENROUTER_API_KEY");
+    assert!(
+        chosen.status.success(),
+        "openrouter should have been selected: {}",
+        String::from_utf8_lossy(&chosen.stderr)
+    );
+
+    let other = run_with("ANTHROPIC_API_KEY");
+    let stderr = String::from_utf8_lossy(&other.stderr);
+    assert!(
+        !stderr.contains("no provider key found"),
+        "a set key should still select a provider: {stderr}"
+    );
+}
+
+#[test]
+fn no_key_anywhere_names_every_variable_it_looked_at() {
+    let dir = tempdir::Dir::new();
+    let out = Command::new(env!("CARGO_BIN_EXE_rxa"))
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env_remove("RXA_PROVIDER")
+        .env_remove("RXA_API_KEY")
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .args(["--model", "m", "-p", "hi"])
+        .output()
+        .expect("running rxa");
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for var in ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+        assert!(stderr.contains(var), "{var} missing from: {stderr}");
     }
 }
