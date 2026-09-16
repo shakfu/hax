@@ -53,11 +53,8 @@ to it.
 
 ## The budget
 
-3,000 lines in `src/`, excluding tests, enforced in CI:
-
-```sh
-test "$(find src -name '*.rs' | xargs cat | wc -l)" -le 3000
-```
+3,000 lines in `src/`, excluding tests. `make budget` enforces it and `make check` includes it;
+the `BUDGET` variable in the Makefile is the authoritative number.
 
 A feature list ratchets, because adding one item to a list costs nothing. A line budget makes
 every new feature compete with an existing one for the same 3,000 lines.
@@ -97,10 +94,22 @@ Candidates that have been costed but not taken live in [TODO.md](TODO.md).
 ## Build
 
 ```sh
-cargo build --release      # target/release/rxa
-cargo test
-cargo clippy --all-targets -- -D warnings
+make            # build
+make check      # lint + test + budget; the full gate
+make run        # one-shot against the mock provider
+make repl       # interactive against the mock provider
+make help       # every target
 ```
+
+Plain `cargo build`, `cargo test` and `cargo clippy --all-targets -- -D warnings` work too; the
+Makefile only adds the budget gate and the smoke targets.
+
+`scripts/test_openrouter.sh`, `test_openai.sh` and `test_anthropic.sh` run four scenarios against
+a real endpoint -- text, `read`, `bash`, then `write` with a read-back -- and exit non-zero if any
+of them misses. They take the key from the provider's usual environment variable or from
+`~/.config/rxa/<provider>.key`, and work from a throwaway sandbox rather than the repo, because
+rxa's tools have no path jail. The Anthropic one uses that vendor's OpenAI-compatibility
+endpoint; native `anthropic-messages` is the deferred amendment in [TODO.md](TODO.md).
 
 Rust 1.88 or newer, for let-chains under edition 2024. `cargo test` also needs `python3`.
 
