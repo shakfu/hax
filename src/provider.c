@@ -54,6 +54,24 @@ size_t items_context_floor(const struct item *items, size_t n_items)
     return 0;
 }
 
+int item_is_typed_prompt(const struct item *item)
+{
+    return item->kind == ITEM_USER_MESSAGE && item->origin == ITEM_ORIGIN_NONE;
+}
+
+size_t items_user_turn_cut(const struct item *items, size_t n_items, size_t keep_user_turns)
+{
+    size_t prompts_seen = 0;
+    for (size_t i = 0; i < n_items; i++) {
+        if (!item_is_typed_prompt(&items[i]))
+            continue;
+        if (prompts_seen == keep_user_turns)
+            return i > 0 && items[i - 1].kind == ITEM_TURN_BOUNDARY ? i - 1 : i;
+        prompts_seen++;
+    }
+    return n_items;
+}
+
 void item_free(struct item *item)
 {
     if (!item)

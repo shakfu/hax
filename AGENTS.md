@@ -51,7 +51,10 @@ BUILD_DIR=build-release make
 most:
 
 - `HAX_PROVIDER=mock` runs the scripted/mock provider. Pair with `HAX_MOCK_SCRIPT=path` or
-  `scripts/stream_demo.py` for visual checks without a live LLM.
+  `scripts/stream_demo.py` for visual checks without a live LLM. Mock runs record no session by
+  default: add `HAX_NO_SESSION=0` to check resume, `/session`, or anything else that reads a
+  session file, and point `XDG_STATE_HOME` at a scratch directory to keep those files out of the
+  user's own session list.
 - `HAX_TRACE=path` logs HTTP/SSE traffic with auth redacted.
 - `HAX_TRANSCRIPT=path` logs the model-facing transcript, including tools and results.
 
@@ -109,8 +112,8 @@ Core boundaries:
   cooperative jobs, and join every worker before destroying state it may access or tearing down
   global libcurl state.
 - `model_meta` is the resolved view for live provider/model capability decisions; `catalog` is its
-  lower-level metadata and pricing source. Cost estimation belongs in `agent_usage`, not provider
-  adapters.
+  lower-level metadata and pricing source. Cost estimation belongs in `agent_usage` (one response)
+  and `agent_stats` (a whole conversation, derived from its items), not provider adapters.
 - `transcript` renders the model-facing conversation, `history` reconstructs the user-facing
   display, and `session` is structured resumable persistence. Do not substitute one representation
   for another.

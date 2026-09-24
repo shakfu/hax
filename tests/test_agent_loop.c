@@ -183,7 +183,6 @@ static void test_loop_turn_collects_success(void)
     EXPECT(loop_turn.assembly.state == TURN_DONE);
     EXPECT(loop_turn.usage.input_tokens == 100);
     EXPECT(loop_turn.usage.output_tokens == 20);
-    EXPECT(loop_turn.elapsed_ms >= 0);
     EXPECT(observer_events == 2);
 
     struct agent_absorb_result absorbed = agent_session_absorb(&session, &loop_turn.assembly);
@@ -393,14 +392,15 @@ static void test_retry_usage_accumulates(void)
     script = SCRIPT_RETRY_THEN_COMPLETE;
 
     agent_loop_turn_run(&loop_turn, &session, &provider, NULL, NULL, NULL, NULL, NULL);
-    /* The retried attempt's tokens are billed but must not skew the context
-     * measurement, which reflects only the terminal attempt. */
+    /* The retried attempt is its own served request, recorded ahead of the terminal one; the
+     * context measurement reflects only the terminal attempt. */
     EXPECT(loop_turn.assembly.state == TURN_DONE);
     EXPECT(loop_turn.usage.input_tokens == 100);
     EXPECT(loop_turn.usage.output_tokens == 20);
-    struct stream_usage total = agent_loop_turn_usage_total(&loop_turn);
-    EXPECT(total.input_tokens == 140);
-    EXPECT(total.output_tokens == 20);
+    EXPECT(loop_turn.attempts.count == 2);
+    EXPECT(loop_turn.attempts.attempts[0].usage.input_tokens == 40);
+    EXPECT(loop_turn.attempts.attempts[1].usage.input_tokens == 100);
+    EXPECT(agent_loop_turn_has_usage(&loop_turn));
 
     struct agent_absorb_result absorbed = agent_session_absorb(&session, &loop_turn.assembly);
     EXPECT(absorbed.items_from == 0);
@@ -508,7 +508,6 @@ struct loop_test_ctx {
     int tools_skipped;
     int tools_refused;
     int turn_begins;
-    int turns;
     int compactions;
     int checkpoints;
     int cancel_at;
@@ -520,13 +519,6 @@ static void count_turn_begin(void *user)
 {
     struct loop_test_ctx *ctx = user;
     ctx->turn_begins++;
-}
-
-static void count_turn(const struct agent_loop_turn *loop_turn, void *user)
-{
-    struct loop_test_ctx *ctx = user;
-    EXPECT(loop_turn->elapsed_ms >= 0);
-    ctx->turns++;
 }
 
 static void count_tool(const struct item *call, void *user)
@@ -598,6 +590,30 @@ static struct agent_loop_result run_chain_hookless(struct agent_session *session
     return result;
 }
 
+/* A served retry is its own request: the loop appends one footer per attempt, the terminal
+ * response's last, so the newest footer still measures the context window. */
+static void test_loop_records_footer_per_served_attempt(void)
+{
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = scripted_stream};
+    struct loop_test_ctx ctx = {0};
+    script = SCRIPT_RETRY_THEN_COMPLETE;
+
+    struct agent_loop_result result = run_chain_hookless(&session, &provider, &ctx, 4);
+    EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
+    EXPECT(session.n_items >= 2);
+    const struct item *terminal = &session.items[session.n_items - 1];
+    const struct item *retried = &session.items[session.n_items - 2];
+    EXPECT(terminal->kind == ITEM_TURN_USAGE && terminal->usage->usage.input_tokens == 100);
+    EXPECT(retried->kind == ITEM_TURN_USAGE && retried->usage->usage.input_tokens == 40);
+    EXPECT(agent_session_last_context_tokens(&session) == 120);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
 static struct agent_loop_result run_chain(struct agent_session *session, struct provider *provider,
                                           struct loop_test_ctx *ctx, int max_turns)
 {
@@ -610,7 +626,6 @@ static struct agent_loop_result run_chain(struct agent_session *session, struct 
             {
                 .user = ctx,
                 .turn_begin = count_turn_begin,
-                .turn_end = count_turn,
                 .checkpoint = (ctx->cancel_at || ctx->pause_at) ? cancel_checkpoint : NULL,
                 .tool_seen = count_tool,
                 .tool_call = run_test_tool,
@@ -633,12 +648,13 @@ static void test_loop_runs_tool_chain(void)
     chain_turn = 0;
     chain_two_tools = 0;
 
-    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 4);
+    /* max_turns 0 is unlimited, not a zero-turn cap. */
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 0);
     /* One tool turn must continue into one text-only turn, with frontend
      * begin and accounting hooks firing once per turn; context reflects the
      * latest turn rather than a sum. */
     EXPECT(result.outcome == AGENT_LOOP_COMPLETE);
-    EXPECT(result.turns == 2 && ctx.turn_begins == 2 && ctx.turns == 2);
+    EXPECT(result.turns == 2 && ctx.turn_begins == 2);
     EXPECT(result.last_context_tokens == 22);
     EXPECT(ctx.tools_seen == 1 && ctx.tools_run == 1);
     /* The returned range is presentation-safe: final streamed text only, not
@@ -1389,6 +1405,7 @@ int main(void)
     test_cancel_keeps_text_but_drops_reasoning();
     test_cancel_keeps_sealed_reasoning_with_tool_call();
     test_retry_usage_accumulates();
+    test_loop_records_footer_per_served_attempt();
     test_empty_cancel_leaves_no_trace();
     test_loop_runs_tool_chain();
     test_loop_enforces_max_turns();

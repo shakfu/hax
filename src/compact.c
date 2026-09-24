@@ -13,7 +13,6 @@
 #include "transcript.h"
 #include "turn.h"
 #include "xalloc.h"
-#include "system/clock.h"
 
 /* Fixed sections and exact identifiers make the seed useful across model changes. The leading
  * output-only instruction prevents weaker models from continuing the task instead. */
@@ -102,26 +101,9 @@ static char *build_summary_seed(const char *summary)
 
 #define COMPACT_MAX_ATTEMPTS 4
 
-struct compact_attempt {
-    struct stream_usage usage;
-    long elapsed_ms;
-    /* Owned; the terminal event's stream_response only borrows its strings. */
-    char *response_id;
-    char *served_model;
-    char *route;
-};
-
-struct compact_attempt_log {
-    struct compact_attempt attempts[COMPACT_MAX_ATTEMPTS];
-    size_t count;
-    long attempt_started_ms;
-    /* Usage banked by mid-stream retries, folded into the next terminal entry. */
-    struct stream_usage pending_retry;
-};
-
 struct compact_sink {
     struct turn turn;
-    struct compact_attempt_log attempt_log;
+    struct attempt_log attempt_log;
     const struct compact_hooks *hooks;
     char *error_message;
 };
@@ -133,51 +115,6 @@ struct summary_request {
     size_t capacity;
     size_t borrowed_count;
 };
-
-static void attempt_log_init(struct compact_attempt_log *log)
-{
-    log->count = 0;
-    log->attempt_started_ms = monotonic_ms();
-    log->pending_retry = (struct stream_usage){-1, -1, -1, -1, -1, -1};
-}
-
-static void attempt_log_record(struct compact_attempt_log *log, const struct stream_usage *usage,
-                               const struct stream_response *response)
-{
-    long now_ms = monotonic_ms();
-    if (log->count < COMPACT_MAX_ATTEMPTS) {
-        struct compact_attempt *attempt = &log->attempts[log->count++];
-        attempt->usage = *usage;
-        agent_usage_add(&attempt->usage, &log->pending_retry);
-        attempt->elapsed_ms = now_ms - log->attempt_started_ms;
-        attempt->response_id = response && response->id ? xstrdup(response->id) : NULL;
-        attempt->served_model = response && response->model ? xstrdup(response->model) : NULL;
-        attempt->route = response && response->route ? xstrdup(response->route) : NULL;
-    }
-    log->pending_retry = (struct stream_usage){-1, -1, -1, -1, -1, -1};
-    log->attempt_started_ms = now_ms;
-}
-
-/* A stream cancelled mid-retry banks usage but never reaches a terminal event; record it as
- * its own entry so persisted usage matches what the live accounting hooks already billed. */
-static void attempt_log_flush(struct compact_attempt_log *log)
-{
-    if (!agent_usage_is_reported(&log->pending_retry))
-        return;
-    struct stream_usage usage = log->pending_retry;
-    log->pending_retry = (struct stream_usage){-1, -1, -1, -1, -1, -1};
-    attempt_log_record(log, &usage, NULL);
-}
-
-static void attempt_log_free(struct compact_attempt_log *log)
-{
-    for (size_t i = 0; i < log->count; i++) {
-        free(log->attempts[i].response_id);
-        free(log->attempts[i].served_model);
-        free(log->attempts[i].route);
-    }
-    log->count = 0;
-}
 
 static int compact_sink_on_event(const struct stream_event *event, void *user)
 {
@@ -194,8 +131,8 @@ static int compact_sink_on_event(const struct stream_event *event, void *user)
                 xstrdup(event->u.error.message ? event->u.error.message : "stream failed");
         usage = event->u.error.usage;
         response = event->u.error.response;
-    } else if (event->kind == EV_RETRY && event->u.retry.usage) {
-        agent_usage_add(&sink->attempt_log.pending_retry, event->u.retry.usage);
+    } else if (event->kind == EV_RETRY) {
+        attempt_log_retry(&sink->attempt_log, event->u.retry.usage, event->u.retry.delay_ms);
     }
     if (usage)
         attempt_log_record(&sink->attempt_log, usage, response);
@@ -352,8 +289,8 @@ static void flush_compaction_logs(const struct compact_params *params)
     session_log_append(params->session_log, params->session->items, params->session->n_items);
 }
 
-static void append_attempt_usage(const struct compact_params *params,
-                                 const struct compact_attempt_log *log, size_t first, size_t end)
+static void append_attempt_usage(const struct compact_params *params, const struct attempt_log *log,
+                                 size_t first, size_t end)
 {
     for (size_t i = first; i < end; i++) {
         struct stream_response response = {
@@ -362,7 +299,8 @@ static void append_attempt_usage(const struct compact_params *params,
             .route = log->attempts[i].route,
         };
         agent_session_add_turn_usage(params->session, params->provider, &log->attempts[i].usage,
-                                     log->attempts[i].elapsed_ms, &response);
+                                     log->attempts[i].elapsed_ms, &response,
+                                     ITEM_ORIGIN_COMPACTION);
     }
 }
 
@@ -399,7 +337,6 @@ void compact_run(const struct compact_params *params, struct compact_result *res
     }
     turn_reset(&sink.turn);
     result->error_message = sink.error_message;
-    attempt_log_flush(&sink.attempt_log);
 
     if (!summary || !*summary) {
         append_attempt_usage(params, &sink.attempt_log, 0, sink.attempt_log.count);

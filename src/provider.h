@@ -34,6 +34,7 @@ enum item_origin {
     ITEM_ORIGIN_REFUSED,      /* TOOL_RESULT for a call disabled by the frontend */
     ITEM_ORIGIN_SUMMARIZED,   /* TOOL_RESULT standing in for separately displayed output */
     ITEM_ORIGIN_TASK_NOTE,    /* synthetic USER_MESSAGE reporting finished background tasks */
+    ITEM_ORIGIN_COMPACTION,   /* TURN_USAGE of a summarization request, not an agent turn */
 };
 
 /* One inline image carried by an item: base64 payload plus the metadata
@@ -74,6 +75,9 @@ struct item {
     enum item_origin origin;
     /* TURN_USAGE: owned accounting payload; NULL for other kinds. */
     struct turn_usage *usage;
+    /* Copied from the source session by /fork: context this conversation reads but did not
+     * pay for. */
+    int inherited;
 };
 
 /* Release all fields owned by `item`. The item must not be used afterward. NULL-safe. */
@@ -93,6 +97,15 @@ size_t items_image_count(const struct item *items, size_t n_items);
 /* Index of the newest compaction seed, or 0 when there is none. Compaction summarizes a prefix
  * instead of discarding it, so a request built from `items` starts here, not at 0. */
 size_t items_context_floor(const struct item *items, size_t n_items);
+
+/* True for a prompt the user typed: synthetic compaction, continuation, and task-note messages
+ * are excluded. This is the unit /undo and /fork count in, in memory and in the session file. */
+int item_is_typed_prompt(const struct item *item);
+
+/* Index where a cut keeping the first `keep_user_turns` typed prompts lands: before the next
+ * prompt's turn boundary, so the kept tail ends with its own response. Returns n_items when
+ * nothing is cut. */
+size_t items_user_turn_cut(const struct item *items, size_t n_items, size_t keep_user_turns);
 
 /* One JSON Schema property advertised for a tool. Zeroed optional fields are omitted from the
  * generated schema, so `minimum` cannot express a bound of 0. */
@@ -169,7 +182,7 @@ struct turn_provenance {
  * with `cost_estimated` indicating when it is an estimate instead. */
 struct turn_usage {
     struct stream_usage usage;
-    long elapsed_ms;            /* stream wall time, including retries; -1 = unknown */
+    long elapsed_ms;            /* wall time of this attempt; -1 = unknown */
     long uncached_input_tokens; /* count priced by cost_input; -1 = unknown */
     double cost_input;
     double cost_cache_read;

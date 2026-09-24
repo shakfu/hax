@@ -732,16 +732,6 @@ static void resolve_wire_rules(struct http_provider *provider, const char *prefi
     free(key);
 }
 
-static char *resolve_catalog_id(const struct provider_def *def, const char *prefix)
-{
-    char *key = xasprintf("%s.catalog_id", prefix);
-    const char *configured = config_str(key);
-    free(key);
-    /* An explicit value wins, including an empty opt-out; only silence takes the def's. */
-    const char *catalog_id = configured ? (*configured ? configured : NULL) : def->catalog_id;
-    return catalog_id ? xstrdup(catalog_id) : NULL;
-}
-
 /* "openai" or "anthropic" to the enum; -1 for anything else (unset, "auto", a typo). */
 static int metadata_api_parse(const char *value)
 {
@@ -905,7 +895,8 @@ struct provider *http_provider_new(const struct provider_def *def)
         provider->api_key = api_key ? xstrdup(api_key) : NULL;
     }
     provider->name = xstrdup(resolve_display_name(def, prefix));
-    provider->catalog_id = resolve_catalog_id(def, prefix);
+    const char *catalog_id = provider_catalog_id(def);
+    provider->catalog_id = catalog_id ? xstrdup(catalog_id) : NULL;
     provider->wire = wire;
     provider->endpoint = xasprintf("%s%s", provider->base_url, provider->wire->path);
     /* On the OpenAI side any OpenAI-family wire carries the same Bearer scheme; only a Messages

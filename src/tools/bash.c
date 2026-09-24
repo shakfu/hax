@@ -147,20 +147,24 @@ static enum tool_preview_mode select_preview(const char *args_json)
     return mode;
 }
 
-static const char BASH_DESCRIPTION[] =
-    "Run a shell command via bash -c (POSIX sh -c where bash is unavailable). Returns combined "
-    "stdout+stderr plus exit code.\n"
-    "\n"
-    "Rules:\n"
-    "- Each call starts in the working directory listed under `# Environment`; `cd` does not "
-    "persist across calls.\n"
+#define BASH_DESCRIPTION_COMMON                                                                    \
+    "Run a shell command via bash -c (POSIX sh -c where bash is unavailable). Returns combined "   \
+    "stdout+stderr plus exit code. Prefer the native read/edit/write tools for ordinary file "     \
+    "reads and edits.\n"                                                                           \
+    "\n"                                                                                           \
+    "Rules:\n"                                                                                     \
+    "- Each call starts in the working directory listed under `# Environment`; `cd` does not "     \
+    "persist across calls.\n"                                                                      \
     "- Follow the command preferences under `# Environment` when present.\n"
-    "- Usually omit `timeout_seconds`: a command that outlives the default timeout (120s) is "
-    "not killed — it detaches into a background task and you will be notified when it "
-    "finishes.\n"
-    "- Set `background` for commands meant to run alongside other work (servers, watchers, "
-    "long builds, subagents): the call returns after a brief initial-output window and the "
-    "command continues as a task. No trailing `&`: the task tracks the shell, and processes "
+
+static const char BASH_DESCRIPTION[] = BASH_DESCRIPTION_COMMON
+    "- Usually omit `timeout_seconds`: a command that outlives the default timeout (120s) is not "
+    "killed — it detaches into a background task and you will be notified when it finishes.\n"
+    "- Prefer synchronous calls when you need the result before doing anything else, including "
+    "builds and tests. Use `background` for work you can overlap with other work or persistent "
+    "processes such as servers and watchers: the call returns after a brief initial-output window "
+    "and the command continues as a task. If you would immediately wait for it, leaving "
+    "`background` unset is simpler. No trailing `&`: the task tracks the shell, and processes "
     "orphaned by an exited shell are killed.";
 
 static const struct tool_param BASH_PARAMS[] = {
@@ -173,23 +177,17 @@ static const struct tool_param BASH_PARAMS[] = {
                     "clamps to a configured maximum."},
     {.name = "background",
      .type = "boolean",
-     .description = "Run as a background task: return after a brief initial-output window while "
-                    "the command keeps running; `timeout_seconds` is ignored. A command that "
-                    "finishes within the window returns synchronously and creates no task."},
+     .description = "Run as a background task; usually leave unset if you would wait immediately. "
+                    "Returns after a brief initial-output window while the command keeps running; "
+                    "`timeout_seconds` is ignored. A command that finishes within the window "
+                    "returns synchronously and creates no task."},
     {.name = "name",
      .type = "string",
      .description = "Optional short task name used instead of the automatic id if the command "
                     "detaches (letters/digits/-/_, max 32 chars, e.g. \"tests\")."},
 };
 
-static const char BASH_DESCRIPTION_NO_TASKS[] =
-    "Run a shell command via bash -c (POSIX sh -c where bash is unavailable). Returns combined "
-    "stdout+stderr plus exit code.\n"
-    "\n"
-    "Rules:\n"
-    "- Each call starts in the working directory listed under `# Environment`; `cd` does not "
-    "persist across calls.\n"
-    "- Follow the command preferences under `# Environment` when present.\n"
+static const char BASH_DESCRIPTION_NO_TASKS[] = BASH_DESCRIPTION_COMMON
     "- Default timeout is 120s; pass `timeout_seconds` for slow commands (test suites, builds). "
     "The harness enforces a hard ceiling.";
 

@@ -15,15 +15,18 @@ Sessions live under `$XDG_STATE_HOME/hax/sessions/<encoded-cwd>/` (by default
 `~/.local/state/hax/sessions/...`), where `<encoded-cwd>` is a readable slug of the working
 directory plus a disambiguating hash. Filenames are `<timestamp>_<uuid>.jsonl`; the UUID is the
 session id printed by the one-shot banner and accepted by `--resume`. Files are owner-only and
-are pruned after `session_retention_days` of inactivity.
+are pruned after `session_retention_days` of inactivity. The same directory holds the working
+directory's prompt history, the `history` file behind Up and Ctrl-R; it is not a session and
+pruning leaves it alone.
 
 Files are append-only and flushed at each newline, so an in-progress run can be followed with
-`tail -f`. A crash can leave one partial final line; readers should skip lines that do not parse.
+`tail -f`; nothing already written is ever rewritten, and `/undo` appends a record rather than
+truncating. A crash can leave one partial final line; readers should skip lines that do not parse.
 
 ## Record types
 
-A line is one of three record shapes. Header and selection records carry a `type` key;
-conversation items carry `kind` instead.
+A line is either a control record, which carries a `type` key, or a conversation item, which
+carries `kind` instead. Readers should ignore record types they do not recognize.
 
 ### Header (`"type": "session"`)
 
@@ -39,12 +42,25 @@ The first line of a file identifies the session:
 | `provider`, `model`, `effort`, `preset` | The selection the session started with. |
 | `model_label` | Display name; present only when it differs from `model`. |
 | `git_branch`, `git_commit`, `git_subject` | HEAD at session start, when in a repository. |
-| `forked_from` | Source session id, on sessions created by `/fork`. |
+| `forked_from` | Source session id on a `/fork`; the copied items carry `inherited`. |
 
 ### Selection (`"type": "selection"`)
 
 A complete provider/model/effort/preset snapshot, written when the selection changes mid-session
 (for example a `/model` switch). Absent fields mean "unset", not "unchanged".
+
+### Undo (`"type": "undo"`)
+
+Written by `/undo`: `keep_user_turns` is the number of typed user prompts that remain live. The
+items after that many prompts, and the `turn_boundary` before the next one, are no longer part of
+the conversation but stay in the file. A reader reconstructing the conversation applies undo
+records in order against the items read so far; the count refers to prompts, not lines, so
+skipped lines do not shift it.
+
+### User turn (`"type": "user_turn"`)
+
+Written when a user turn finishes: `elapsed_ms` is its wall-clock duration, tool execution
+included.
 
 ### Items (`"kind": ...`)
 
@@ -61,13 +77,17 @@ Conversation records, in order. `kind` is one of:
 | `turn_usage` | Usage footer for one round-trip; see below. |
 
 `origin` marks synthetic records: `compact_seed` (a compaction summary), `continuation`,
-`interrupted`, `skipped`, `refused`, `summarized`, and `task_note` (a background-task report).
-Items without `origin` are ordinary typed or streamed content.
+`interrupted`, `skipped`, `refused`, `summarized`, `task_note` (a background-task report), and
+`compaction` (a `turn_usage` footer for a summarization request rather than an agent turn).
+Items without `origin` are ordinary typed or streamed content. `inherited: true` marks items
+`/fork` copied from the source session: context this conversation reads but did not pay for.
 
 A `turn_usage` item carries `provider`, `model`, and a `usage` object: token counts (`input`,
 `output`, `cached`, `cache_write`, and `in_tokens` for uncached input), `elapsed_ms`, a cost
 breakdown ending in `cost_total` (`cost_estimated: true` when derived from catalog prices), and
-provenance such as `served_model`, `route`, and `response_id`. Unknown values are omitted.
+provenance such as `served_model`, `route`, and `response_id`. Unknown values are omitted. One
+footer is written per request the provider served: an attempt that died mid-stream and was
+retried gets its own footer ahead of the terminal response's.
 
 ## The one-shot `--json` stream
 
@@ -79,7 +99,7 @@ records:
 1. A `"type": "session"` record identifying the run — the header fields above, minus
    `timestamp`. `id` is omitted when recording is disabled; on a resumed run the fields describe
    this run rather than the original header.
-2. The conversation items this run appends. A resumed run's prior history is not replayed.
+2. The conversation items this run appends. A resumed run's prior items are not replayed.
 3. A closing `"type": "result"` record:
 
 | Field | Meaning |

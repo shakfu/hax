@@ -245,6 +245,16 @@ const char *provider_display_name(const struct provider_def *def)
     return def->display_name ? def->display_name : def->id;
 }
 
+const char *provider_catalog_id(const struct provider_def *def)
+{
+    char *key = xasprintf("providers.%s.catalog_id", def->id);
+    const char *configured = config_str(key);
+    free(key);
+    if (configured)
+        return *configured ? configured : NULL;
+    return def->catalog_id;
+}
+
 void provider_list_names(FILE *out)
 {
     size_t count;

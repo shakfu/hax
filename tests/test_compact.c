@@ -251,12 +251,15 @@ static void test_retried_attempt_usage_is_billed(void)
     reset_mock(MOCK_STREAM_RETRY);
 
     struct compact_result result = run_compaction(&session, &provider, NULL);
-    /* The dead attempt's banked usage folds into the accepted attempt's footer, so the
-     * persisted record matches what the live accounting hooks billed. */
+    /* The dead attempt was a served request of its own: its footer belongs to the summarized
+     * prefix, and only the accepted attempt's footer follows the seed. */
     EXPECT(result.outcome == COMPACT_COMPLETE);
-    EXPECT(session.n_items == 4);
-    EXPECT(session.items[3].kind == ITEM_TURN_USAGE);
-    EXPECT(session.items[3].usage->usage.input_tokens == 150);
+    EXPECT(session.n_items == 5);
+    EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[1].usage->usage.input_tokens == 50);
+    EXPECT(session.items[3].origin == ITEM_ORIGIN_COMPACT_SEED);
+    EXPECT(session.items[4].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[4].usage->usage.input_tokens == 100);
 
     compact_result_destroy(&result);
     agent_session_free(&session);
@@ -274,6 +277,7 @@ static void test_cancelled_retry_usage_is_billed(void)
     EXPECT(result.outcome == COMPACT_NO_SUMMARY);
     EXPECT(session.n_items == 2);
     EXPECT(session.items[1].kind == ITEM_TURN_USAGE);
+    EXPECT(session.items[1].origin == ITEM_ORIGIN_COMPACTION);
     EXPECT(session.items[1].usage->usage.input_tokens == 50);
 
     compact_result_destroy(&result);

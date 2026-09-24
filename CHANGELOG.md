@@ -39,8 +39,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   process rather than one agent; constructing a second `Agent` used to raise. Configuration stays
   process-wide, so each agent copies its provider and model as it is built and `cancel()` remains
   process-wide. See [bindings/python/README.md](bindings/python/README.md).
+- Shell-like Tab completion of `/` commands, with a dim placeholder for a command's arguments.
 - A preset name right after `hax` starts with that preset: `hax review` is short for
   `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
+- `/session` shows a token row per model when the conversation switched models, how many user
+  turns `/undo` removed, and what a fork inherited from its source.
 
 ### Changed
 
@@ -83,6 +86,20 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- Prompt history (Up, Ctrl-R) is scoped to the working directory like sessions: each directory
+  keeps its own `history` file beside its session files, so a prompt typed in one project no
+  longer comes back in another. The old global `~/.local/state/hax/history` is no longer read and
+  can be deleted.
+- One-shot runs no longer stop after 100 model round-trips: `max_turns` defaults to `0`
+  (unlimited) in both modes, and `auto` is no longer accepted. Set a number to keep a limit;
+  signals and `--json` remain the way to observe and stop a long run.
+- Resuming a session restores its `/session` totals and shows the last user turn's stats line,
+  so a conversation looks the same wherever it is picked up. Totals now cover everything the
+  session spent on, including undone user turns and retried requests.
+- Session files are append-only: `/undo` records the cut instead of truncating the file. Scripts
+  reading session files should see [docs/sessions.md](docs/sessions.md) for the new records.
+- Prompt and tool guidance favor native tools for ordinary file operations, and backgrounding when
+  there is useful work to overlap rather than an immediate wait.
 - Custom providers no longer take their models.dev catalog identity from their own name; set
   `catalog_id` explicitly (for example `"catalog_id": "groq"`) to keep pricing and context
   metadata. Local servers and proxies without one never contact models.dev. See
@@ -96,6 +113,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Theme colors are more readable and consistent, including quiet roles in the `light` theme and
+  the `rose` tint in the `dark` theme.
 - `config.json` and `state.json` are now written with a trailing newline, matching `auth.json`
   and session files.
 - The brief history shown on resume now names the task a `task_wait` call waited on, as the
@@ -104,6 +123,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - Background task completion notes say whether output is pending or there is nothing to
   collect, and `task_wait` on an already collected task reports its final status instead of
   `no such task`.
+- Skill descriptions written as YAML block scalars (`>`, `|`) or wrapped across lines are now
+  read in full, instead of being dropped or cut off at the first line.
 
 ## [0.5.0] - 2026-09-04
 

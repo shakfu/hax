@@ -15,7 +15,6 @@
 #include "transcript.h"
 #include "turn.h"
 #include "xalloc.h"
-#include "system/clock.h"
 #include "system/keepawake.h"
 #include "tools/task_registry.h"
 #include "transport/http.h"
@@ -26,29 +25,6 @@ struct loop_turn_sink {
     void *observer_user;
 };
 
-static void capture_response(struct agent_loop_turn *loop_turn,
-                             const struct stream_response *response)
-{
-    if (!response)
-        return;
-    if (!loop_turn->response_id && response->id)
-        loop_turn->response_id = xstrdup(response->id);
-    if (!loop_turn->served_model && response->model)
-        loop_turn->served_model = xstrdup(response->model);
-    if (!loop_turn->route && response->route)
-        loop_turn->route = xstrdup(response->route);
-}
-
-/* Borrowed view of the identity captured above, for the turn's usage footer. */
-static struct stream_response turn_response(const struct agent_loop_turn *loop_turn)
-{
-    return (struct stream_response){
-        .id = loop_turn->response_id,
-        .model = loop_turn->served_model,
-        .route = loop_turn->route,
-    };
-}
-
 static int loop_turn_on_event(const struct stream_event *ev, void *user)
 {
     struct loop_turn_sink *sink = user;
@@ -56,15 +32,16 @@ static int loop_turn_on_event(const struct stream_event *ev, void *user)
 
     if (ev->kind == EV_DONE) {
         loop_turn->usage = ev->u.done.usage;
-        capture_response(loop_turn, &ev->u.done.response);
+        attempt_log_record(&loop_turn->attempts, &ev->u.done.usage, &ev->u.done.response);
     } else if (ev->kind == EV_ERROR) {
         if (!loop_turn->error_message && ev->u.error.message)
             loop_turn->error_message = xstrdup(ev->u.error.message);
-        if (ev->u.error.usage)
+        if (ev->u.error.usage) {
             loop_turn->usage = *ev->u.error.usage;
-        capture_response(loop_turn, ev->u.error.response);
-    } else if (ev->kind == EV_RETRY && ev->u.retry.usage) {
-        agent_usage_add(&loop_turn->retry_usage, ev->u.retry.usage);
+            attempt_log_record(&loop_turn->attempts, ev->u.error.usage, ev->u.error.response);
+        }
+    } else if (ev->kind == EV_RETRY) {
+        attempt_log_retry(&loop_turn->attempts, ev->u.retry.usage, ev->u.retry.delay_ms);
     }
 
     if (sink->observer)
@@ -80,7 +57,7 @@ void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session
     memset(loop_turn, 0, sizeof(*loop_turn));
     turn_init(&loop_turn->assembly);
     loop_turn->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
-    loop_turn->retry_usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
+    attempt_log_init(&loop_turn->attempts);
 
     struct loop_turn_sink sink = {
         .loop_turn = loop_turn,
@@ -90,16 +67,12 @@ void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session
     struct context ctx = agent_session_context(session);
     ctx.image_input = model_meta_image_input(provider, session->model);
     ctx.session_id = session_id;
-    long started_ms = monotonic_ms();
     provider->stream(provider, &ctx, session->model, loop_turn_on_event, &sink, tick, tick_user);
-    loop_turn->elapsed_ms = monotonic_ms() - started_ms;
 }
 
-struct stream_usage agent_loop_turn_usage_total(const struct agent_loop_turn *loop_turn)
+int agent_loop_turn_has_usage(const struct agent_loop_turn *loop_turn)
 {
-    struct stream_usage total = loop_turn->usage;
-    agent_usage_add(&total, &loop_turn->retry_usage);
-    return total;
+    return attempt_log_has_usage(&loop_turn->attempts);
 }
 
 void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
@@ -107,12 +80,7 @@ void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
     turn_reset(&loop_turn->assembly);
     free(loop_turn->error_message);
     loop_turn->error_message = NULL;
-    free(loop_turn->response_id);
-    loop_turn->response_id = NULL;
-    free(loop_turn->served_model);
-    loop_turn->served_model = NULL;
-    free(loop_turn->route);
-    loop_turn->route = NULL;
+    attempt_log_free(&loop_turn->attempts);
 }
 
 /* True when the assembly holds assistant text — flushed items or the open buffer. */
@@ -276,14 +244,23 @@ static void loop_observe_tools(const struct agent_loop_params *params, size_t fr
             params->hooks.tool_seen(&params->session->items[i], params->hooks.user);
 }
 
+/* One footer per served attempt. An aborted turn keeps only attempts that reported usage; a
+ * completed one also records a terminal response the provider left unmeasured. */
 static void loop_add_usage(const struct agent_loop_params *params,
                            const struct agent_loop_turn *loop_turn, int aborted)
 {
-    struct stream_usage usage = agent_loop_turn_usage_total(loop_turn);
-    if (!aborted || agent_usage_is_reported(&usage)) {
-        struct stream_response response = turn_response(loop_turn);
-        agent_session_add_turn_usage(params->session, params->provider, &usage,
-                                     loop_turn->elapsed_ms, &response);
+    const struct attempt_log *log = &loop_turn->attempts;
+    for (size_t i = 0; i < log->count; i++) {
+        const struct attempt *attempt = &log->attempts[i];
+        if (aborted && !agent_usage_is_reported(&attempt->usage))
+            continue;
+        struct stream_response response = {
+            .id = attempt->response_id,
+            .model = attempt->served_model,
+            .route = attempt->route,
+        };
+        agent_session_add_turn_usage(params->session, params->provider, &attempt->usage,
+                                     attempt->elapsed_ms, &response, ITEM_ORIGIN_NONE);
     }
 }
 
@@ -303,7 +280,7 @@ static void loop_run_active(const struct agent_loop_params *params,
     result->outcome = AGENT_LOOP_MAX_TURNS;
     result->last_context_tokens = -1;
 
-    for (int turn_n = 0; params->max_turns < 0 || turn_n < params->max_turns; turn_n++) {
+    for (int turn_n = 0; params->max_turns <= 0 || turn_n < params->max_turns; turn_n++) {
         /* The first boundary arrived with the user message — except on a continued run, whose
          * first turn extends the previous seam. Follow-up turns owe their own. Either way it is
          * appended lazily — just before this turn's items land in history — so a turn that
@@ -337,10 +314,6 @@ static void loop_run_active(const struct agent_loop_params *params,
         agent_loop_turn_run(&loop_turn, session, params->provider, session_log_id(params->slog),
                             hooks->observe, hooks->user, hooks->tick, hooks->user);
         result->turns++;
-        /* Account the request before branching: errored and interrupted turns still reached the
-         * provider and may carry billable usage. */
-        if (hooks->turn_end)
-            hooks->turn_end(&loop_turn, hooks->user);
 
         long turn_context = -1;
         if (loop_turn.usage.input_tokens >= 0 && loop_turn.usage.output_tokens >= 0) {
@@ -353,9 +326,8 @@ static void loop_run_active(const struct agent_loop_params *params,
              * diagnostic. The boundary is owed exactly when something lands after it — the
              * partial text repair keeps and/or a billable-usage footer — so it neither dangles
              * empty nor lets the footer read as part of the preceding turn. */
-            struct stream_usage failed_usage = agent_loop_turn_usage_total(&loop_turn);
             if (owes_boundary &&
-                (assembly_has_text(&loop_turn.assembly) || agent_usage_is_reported(&failed_usage)))
+                (assembly_has_text(&loop_turn.assembly) || agent_loop_turn_has_usage(&loop_turn)))
                 agent_session_add_boundary(session);
             struct agent_abort_outcome abort =
                 agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
@@ -381,9 +353,8 @@ static void loop_run_active(const struct agent_loop_params *params,
             /* The boundary is owed exactly when the cancel leaves something after it — repaired
              * items with their marker, or a billable-usage footer. An evaporating turn (nothing
              * but truncated thinking) leaves no trace at all. */
-            struct stream_usage cancelled_usage = agent_loop_turn_usage_total(&loop_turn);
             if (owes_boundary && (assembly_survives_cancel(&loop_turn.assembly) ||
-                                  agent_usage_is_reported(&cancelled_usage)))
+                                  agent_loop_turn_has_usage(&loop_turn)))
                 agent_session_add_boundary(session);
             struct agent_abort_outcome abort =
                 agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_USER_CANCEL);
@@ -406,8 +377,7 @@ static void loop_run_active(const struct agent_loop_params *params,
          * from a pause landing mid-retry) owes the boundary. */
         int paused_empty = pause_pending && loop_turn.assembly.state == TURN_STREAMING &&
                            loop_turn.assembly.n_items == 0;
-        struct stream_usage banked_usage = agent_loop_turn_usage_total(&loop_turn);
-        if (owes_boundary && (!paused_empty || agent_usage_is_reported(&banked_usage)))
+        if (owes_boundary && (!paused_empty || agent_loop_turn_has_usage(&loop_turn)))
             agent_session_add_boundary(session);
         struct agent_absorb_result absorbed = agent_session_absorb(session, &loop_turn.assembly);
         /* Freeze the streamed slice before appending results: tool results must never be

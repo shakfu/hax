@@ -7,6 +7,7 @@
 #include "agent_env.h"
 #include "agent_usage.h"
 #include "buf.h"
+#include "compact.h"
 #include "config.h"
 #include "diag.h"
 #include "effort.h"
@@ -25,36 +26,36 @@
 static const char DEFAULT_SYSTEM_PROMPT[] =
     "You are hax, a minimalist coding assistant running in the user's terminal.\n"
     "\n"
-    "Prefer action over explanation: when a question can be answered by running a "
-    "command or reading a file, do so. Be concise: no filler, no trailing "
-    "summaries. Reference code as path:line. Before substantial work, say in one "
-    "sentence what you're about to do; while working, mention only meaningful "
-    "developments (a root cause, a change of direction, a blocker worth a "
-    "decision), not routine steps.\n"
+    "Prefer action over explanation: when a question can be answered by running a command or "
+    "reading a file, do so. Be concise: no filler, no trailing summaries. Reference code as "
+    "path:line. Before substantial work, say in one sentence what you're about to do; while "
+    "working, mention only meaningful developments (a root cause, a change of direction, a blocker "
+    "worth a decision), not routine steps.\n"
     "\n"
-    "When something is ambiguous, infer from the code and pick a sensible default "
-    "rather than stopping. Ask only when genuinely blocked: the choice materially "
-    "changes the result, an action is destructive or affects shared state, or you "
-    "need a value you can't obtain. To ask, end your turn with one targeted "
-    "question and a recommended default.\n"
+    "When something is ambiguous, infer from the code and pick a sensible default rather than "
+    "stopping. Ask only when genuinely blocked: the choice materially changes the result, an "
+    "action is destructive or affects shared state, or you need a value you can't obtain. To ask, "
+    "end your turn with one targeted question and a recommended default.\n"
+    "\n"
+    "Prefer read/edit/write for ordinary file operations. Bash remains useful for searches, "
+    "pipelines, formatters, and bulk transformations.\n"
     "\n"
     "When changing code:\n"
     "- Make the smallest correct change that fits the existing style.\n"
     "- Fix root causes, not symptoms. Don't fix unrelated bugs unless asked.\n"
-    "- Don't introduce new abstractions, helpers, or compatibility shims unless "
-    "the task genuinely needs them.\n"
+    "- Don't introduce new abstractions, helpers, or compatibility shims unless the task genuinely "
+    "needs them.\n"
     "- Add a comment only when the *why* is non-obvious.\n"
     "- If the project has a build, tests, or linter, run them before reporting done.\n"
     "\n"
-    "Git: never commit, push, amend, branch, or run destructive commands "
-    "(`reset --hard`, `checkout --`, `branch -D`) unless the user explicitly asks. "
-    "Never revert changes you didn't make. If a hook or check fails, fix the cause; "
-    "don't bypass with `--no-verify`.\n"
+    "Git: never commit, push, amend, branch, or run destructive commands (`reset --hard`, "
+    "`checkout --`, `branch -D`) unless the user explicitly asks. Never revert changes you didn't "
+    "make. If a hook or check fails, fix the cause; don't bypass with `--no-verify`.\n"
     "\n"
-    "If asked for a \"review\": lead with bugs, risks, and missing tests for the "
-    "*proposed change*, not a summary. A finding should be one the author would "
-    "fix if they knew. Skip pre-existing issues and trivial style. Calibrate "
-    "severity honestly; no flattery. Empty findings is a valid result.";
+    "If asked for a \"review\": lead with bugs, risks, and missing tests for the *proposed "
+    "change*, not a summary. A finding should be one the author would fix if they knew. Skip "
+    "pre-existing issues and trivial style. Calibrate severity honestly; no flattery. Empty "
+    "findings is a valid result.";
 
 static const struct tool *const TOOLS[] = {
     &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_BASH, &TOOL_TASK_WAIT,
@@ -206,6 +207,7 @@ void agent_session_init(struct agent_session *session, struct provider *provider
                         const struct hax_opts *opts)
 {
     memset(session, 0, sizeof(*session));
+    session->last_user_turn_ms = -1;
 
     const char *model = config_str("model");
     if ((!model || !*model) && provider)
@@ -384,6 +386,9 @@ void agent_session_free(struct agent_session *session)
             tool_def_free(&session->tools[i]);
     }
     free(session->tools_owned);
+    for (size_t i = 0; i < session->n_retired; i++)
+        item_free(&session->retired[i]);
+    free(session->retired);
     free(session->tools);
     free(session->system_prompt);
     free(session->model);
@@ -398,6 +403,56 @@ void agent_session_reset(struct agent_session *session)
     for (size_t i = 0; i < session->n_items; i++)
         item_free(&session->items[i]);
     session->n_items = 0;
+    for (size_t i = 0; i < session->n_retired; i++)
+        item_free(&session->retired[i]);
+    session->n_retired = 0;
+    session->worked_ms = 0;
+    session->last_user_turn_ms = -1;
+}
+
+void agent_session_retire(struct agent_session *session, size_t from)
+{
+    if (from >= session->n_items)
+        return;
+    size_t count = session->n_items - from;
+    if (session->n_retired + count > session->cap_retired) {
+        session->cap_retired = session->n_retired + count;
+        session->retired =
+            xrealloc(session->retired, session->cap_retired * sizeof(*session->retired));
+    }
+    memcpy(session->retired + session->n_retired, session->items + from,
+           count * sizeof(*session->items));
+    session->n_retired += count;
+    session->n_items = from;
+    /* The newest completed turn is gone; its duration must not describe the kept tail. */
+    session->last_user_turn_ms = -1;
+}
+
+void agent_session_adopt(struct agent_session *session, struct session_loaded *loaded)
+{
+    agent_session_reset(session);
+    free(session->items);
+    free(session->retired);
+    session->items = loaded->items;
+    session->n_items = loaded->n_items;
+    session->cap_items = loaded->n_items;
+    session->retired = loaded->retired;
+    session->n_retired = loaded->n_retired;
+    session->cap_retired = loaded->n_retired;
+    session->worked_ms = loaded->worked_ms;
+    session->last_user_turn_ms = loaded->last_user_turn_ms;
+    loaded->items = NULL;
+    loaded->n_items = 0;
+    loaded->retired = NULL;
+    loaded->n_retired = 0;
+}
+
+void agent_session_add_worked(struct agent_session *session, long elapsed_ms)
+{
+    if (elapsed_ms < 0)
+        return;
+    session->worked_ms += elapsed_ms;
+    session->last_user_turn_ms = elapsed_ms;
 }
 
 struct context agent_session_context(const struct agent_session *session)
@@ -484,9 +539,10 @@ enum agent_resume_tail agent_session_resume_tail(const struct agent_session *ses
 long agent_session_last_context_tokens(const struct agent_session *session)
 {
     struct context window = agent_session_context(session);
-    /* Compaction appends its accepted attempt's footer right after the seed. It reports the
-     * summarized request, not the fresh window — reading it would immediately recompact the
-     * seed — so the scan stops before that run of footers. */
+    /* A summarization request reports the window it summarized, not the conversation's: reading
+     * it after a successful compaction would immediately recompact the seed, and after a failed
+     * one it would stand in for the last agent turn. Footers recorded before origins were
+     * stamped are recognized by position, right after the seed. */
     size_t floor = 0;
     if (window.n_items > 0 && window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
         floor = 1;
@@ -495,13 +551,66 @@ long agent_session_last_context_tokens(const struct agent_session *session)
     }
     for (size_t i = window.n_items; i-- > floor;) {
         const struct item *item = &window.items[i];
-        if (item->kind != ITEM_TURN_USAGE || !item->usage)
+        if (item->kind != ITEM_TURN_USAGE || !item->usage || item->origin == ITEM_ORIGIN_COMPACTION)
             continue;
         const struct stream_usage *usage = &item->usage->usage;
         if (usage->input_tokens >= 0 && usage->output_tokens >= 0)
             return usage->input_tokens + usage->output_tokens;
     }
     return -1;
+}
+
+static int footer_reports_tokens(const struct item *item)
+{
+    if (item->kind != ITEM_TURN_USAGE || !item->usage)
+        return 0;
+    const struct stream_usage *usage = &item->usage->usage;
+    return usage->input_tokens >= 0 || usage->output_tokens >= 0;
+}
+
+int agent_session_has_reported_usage(const struct agent_session *session)
+{
+    for (size_t i = 0; i < session->n_items; i++) {
+        if (footer_reports_tokens(&session->items[i]))
+            return 1;
+    }
+    /* A retired inherited footer is neither this session's context nor its bill. */
+    for (size_t i = 0; i < session->n_retired; i++) {
+        if (!session->retired[i].inherited && footer_reports_tokens(&session->retired[i]))
+            return 1;
+    }
+    return 0;
+}
+
+/* The live path reads the context limit and rates only after the pre-request wait has let the
+ * model probe land; a resumed record reads them before any request. Without reported tokens
+ * nothing consults metadata, so there is nothing to wait for. */
+static void settle_resumed_metadata(struct provider *provider, const struct agent_session *session)
+{
+    if (provider && agent_session_has_reported_usage(session))
+        model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
+}
+
+void agent_session_prepare_resumed(struct agent_session *session, struct provider *provider,
+                                   const char *path, const struct session_meta *recorded,
+                                   struct transcript_log *transcript, struct agent_resumed *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (agent_recording_enabled(provider))
+        out->session_log = session_log_resume(path, recorded->provider, recorded->model,
+                                              recorded->effort, recorded->preset, session->n_items);
+    /* Staged until the next append, so an unused override leaves the file as recorded. */
+    session_log_set_meta(out->session_log, agent_provider_log_name(provider), session->model,
+                         session->model_label, session->effort, config_str("preset"));
+    transcript_log_append(transcript, session->items, session->n_items);
+
+    settle_resumed_metadata(provider, session);
+    out->tail = agent_session_resume_tail(session);
+    /* A pause stops before the loop's compact seam, so the record may end over the threshold;
+     * the run that continues it owes the pre-send pass. */
+    if (provider && session->model)
+        out->compact_owed = compact_should_auto(agent_session_last_context_tokens(session),
+                                                model_meta_context(provider, session->model));
 }
 
 /* An ordinary session then stores nothing extra, while a renamed provider or a gguf path still
@@ -530,7 +639,7 @@ static void fill_provenance(struct turn_provenance *provenance, struct agent_ses
 
 void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
                                   const struct stream_usage *usage, long elapsed_ms,
-                                  const struct stream_response *response)
+                                  const struct stream_response *response, enum item_origin origin)
 {
     struct turn_usage *turn_usage =
         agent_turn_usage_new(usage, elapsed_ms, provider, session->model);
@@ -541,6 +650,7 @@ void agent_session_add_turn_usage(struct agent_session *session, const struct pr
         session, (struct item){
                      .kind = ITEM_TURN_USAGE,
                      .usage = turn_usage,
+                     .origin = origin,
                      .provider = session->provider_id ? xstrdup(session->provider_id) : NULL,
                      .model = session->model && *session->model ? xstrdup(session->model) : NULL,
                  });

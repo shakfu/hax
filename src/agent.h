@@ -5,34 +5,11 @@
 /* Interactive frontend for running and mutating an agent REPL session. */
 
 #include "agent_core.h"
-#include "agent_usage.h"
 #include "provider.h"
 
 struct transcript_log;
 struct session_log;
 struct render_ctx;
-
-#define SESSION_STATS_MAX_TOOLS 8
-
-/* REPL usage accumulated since startup or the last /new. */
-struct session_stats {
-    long input_tokens;
-    long output_tokens;
-    long cached_tokens;
-    long cache_write_tokens;
-    long uncached_input_tokens;
-    struct spend_totals spend; /* release with agent_spend_free */
-    long worked_ms;
-    long user_turns;
-    long requests;
-    long tool_calls;
-    struct {
-        const char *name; /* borrowed static tool-registry name; NULL marks a free slot */
-        long count;
-    } tools[SESSION_STATS_MAX_TOOLS];
-    long latest_context_tokens; /* latest reported input + output, not a cumulative total */
-    long context_limit;         /* window resolved with latest_context_tokens; 0 if unknown */
-};
 
 /* Why an incomplete user turn can be resumed from the prompt. */
 enum agent_resume_reason {
@@ -54,7 +31,6 @@ struct agent_state {
     char *pending_preseed; /* owned text to seed into the next prompt */
     enum agent_resume_reason resume_reason;
     int compaction_deferred; /* settle before appending the next prompt */
-    struct session_stats stats;
 };
 
 /* Run the interactive REPL. A provider switch destroys the old provider and updates *provider_io.
@@ -92,9 +68,6 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
 
 /* Rebuild display settings between provider streams. */
 void agent_display_refresh(struct agent_state *state);
-
-/* Return accumulated session spend in USD; `estimated` follows agent_spend_total. */
-double agent_session_spend(const struct session_stats *stats, int *estimated);
 
 /* Replace history with a streamed summary. `instructions` may be NULL. Automatic calls suppress
  * no-op notices. Returns 1 only when history was replaced. */

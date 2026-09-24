@@ -66,7 +66,8 @@ hax --json "fix the failing test" | jq 'select(.kind == "tool_call" or .type == 
 
 A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with `-p`. `--raw` and
 `--bare` still record the conversation; combine either with `--no-session` for a disposable run.
-`max_turns` bounds a one-shot run's provider round-trips (default 100).
+A one-shot run is unlimited by default; set `max_turns` to abort after that many provider
+round-trips.
 
 A one-shot run responds to signals the way the REPL responds to Esc: SIGUSR1 pauses cleanly at
 the next turn boundary (outcome `paused`), and SIGINT (Ctrl-C) or SIGTERM interrupts at once,
@@ -83,7 +84,7 @@ Type `/help` for the authoritative live list.
 | `/new [preset]` | Start a fresh conversation, optionally with a preset. `/clear` is an alias. |
 | `/resume` | Pick a past session for this directory. |
 | `/fork [n]` | Create a new session before an earlier prompt; `/fork 0` clones the current tip. |
-| `/undo [n]` | Permanently truncate this session before an earlier prompt. |
+| `/undo [n]` | Roll the conversation back to before an earlier prompt. |
 | `/provider` | Choose a provider, model, and effort. |
 | `/model` | Choose a model and effort for the current provider. |
 | `/effort` | Choose reasoning effort when supported. |
@@ -93,13 +94,13 @@ Type `/help` for the authoritative live list.
 | `/compact [focus]` | Summarize older context, optionally emphasizing a focus. |
 | `/copy` | Copy the latest assistant response. |
 | `/tasks [kill <id>... \| kill all]` | List or stop background tasks. |
-| `/session` | Show session selection and local usage totals. |
+| `/session` | Show the session's selection and usage totals. |
 | `/usage` | Query provider account/subscription usage when supported. |
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
 
-Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` rewrites both
-memory and the session file and has no redo.
+Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` has no redo;
+the removed user turns still count toward the session's usage totals.
 
 ## Keyboard shortcuts
 
@@ -110,7 +111,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Enter | Submit; at a paused empty prompt, continue without adding a message. |
 | Shift-Enter | Insert a newline if the terminal sends LF for it. |
 | Up / Down | Recall previous/next prompts. |
-| Ctrl-R | Search persistent prompt history. |
+| Ctrl-R | Search prompt history. |
 | Esc | Pause after the current step so you can steer. |
 | Esc Esc | Interrupt the model or running tool immediately. |
 | Ctrl-C | Clear the current prompt; twice on an empty prompt quits. |
@@ -120,6 +121,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Ctrl-O | Open the rendered conversation in `$PAGER`. |
 | Ctrl-T | Open the model-facing transcript in `$PAGER`. |
 | Ctrl-V | Paste an image, or clipboard text when no image is available. |
+| Tab | Complete a `/` command name. |
 | `@` + Tab | Choose a project file with `fzf`. |
 
 Ctrl-O is the best view for reviewing what happened. Ctrl-T includes the system prompt, tool schemas,
@@ -176,7 +178,7 @@ image is present, Ctrl-V pastes text. Image understanding also depends on the se
 model/provider; hax detects support when metadata is available, and `image_input` can override
 detection.
 
-## Sessions and history
+## Sessions and prompt history
 
 Non-empty conversations are recorded as JSONL session files under:
 
@@ -184,10 +186,13 @@ Non-empty conversations are recorded as JSONL session files under:
 ~/.local/state/hax/sessions/<encoded-cwd>/
 ```
 
-Sessions are scoped to the current directory. `-c`, `--resume`, and `/resume` therefore show the
-history for where hax is running, not every repository. Sessions inactive for 30 days are removed by
-default; set `session_retention_days` to another value or `0` to keep them indefinitely. The file
-format is documented in [sessions.md](./sessions.md) and is safe to read from scripts.
+Sessions are scoped to the current directory. `-c`, `--resume`, and `/resume` therefore list the
+sessions for where hax is running, not every repository. Sessions inactive for 30 days are removed
+by default; set `session_retention_days` to another value or `0` to keep them indefinitely. The
+file format is documented in [sessions.md](./sessions.md) and is safe to read from scripts.
+
+Prompt history (Up, Ctrl-R) is scoped the same way: each directory keeps its own `history` file
+beside its session files, so recall stays within the project.
 
 Resuming restores the provider, model, effort, and preset last used by that conversation. A CLI
 selection flag deliberately overrides the restored choice:
@@ -201,8 +206,8 @@ The new selection is recorded in the resumed session. If its old provider or pre
 hax reports the problem rather than silently choosing another backend: a one-shot run exits with an
 error naming what the session recorded, while the REPL warns and resumes without it.
 
-`--no-session` (or `no_session`) prevents new session and prompt-history writes. It does not hide or
-disable existing sessions and prompt recall.
+`--no-session` (or `no_session`) prevents new session and prompt-history writes. It does not hide
+existing sessions or disable prompt recall.
 
 ## Pausing and steering
 
@@ -242,13 +247,15 @@ faster and cheaper in one conversation.
 ## Context, compaction, and usage
 
 After a turn, hax shows elapsed time, current context use, and spend when the provider or model
-metadata can supply it. A `~` marks estimated cost. `/session` shows totals for the current process;
-`/usage` asks the provider for account-level usage when supported. One-shot runs put equivalent stats
-on stderr.
+metadata can supply it. A `~` marks estimated cost. `/session` shows the conversation's totals,
+including undone user turns and retried requests, with a token row per model when models were
+switched; a resumed session shows the same totals. `/usage` asks the provider for account-level
+usage when supported. One-shot runs put equivalent stats on stderr.
 
-Automatic compaction summarizes old history near 85% of a known context window. Use `/compact`
-earlier when the conversation has accumulated obsolete exploration, optionally naming what the
-summary must preserve. Manual compaction works even when the model's context limit is unknown.
+Automatic compaction summarizes the older part of the conversation near 85% of a known context
+window. Use `/compact` earlier when the conversation has accumulated obsolete exploration,
+optionally naming what the summary must preserve. Manual compaction works even when the model's
+context limit is unknown.
 
 For local servers, configure a context window large enough for the system prompt, project context,
 conversation, and response. A small server-side context often appears as truncated answers rather

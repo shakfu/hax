@@ -6,58 +6,46 @@
 
 #include "provider.h"
 
-#define AGENT_STATS_MAX_SEGMENTS 3
-#define AGENT_STATS_SEGMENT_LEN  64
+/* Accounting for one provider response: usage arithmetic, the attempts one stream() call
+ * served, and the priced usage footer appended to the conversation. Conversation totals are
+ * agent_stats; display formatting is text/fmt. */
 
-/* Smallest cost the transcript and /session still display. */
-#define COST_DISPLAY_MIN 0.00005
+#define ATTEMPT_LOG_MAX 8
 
-/* Use decimal k/M suffixes for token counts — tokens are specified and billed in decimal
- * multiples, unlike bytes. Negative values produce "?". */
-void format_tokens(char *out, size_t out_size, long tokens);
-/* Include the usage percentage when context_limit is positive; negative context_tokens means
- * unknown usage ("? / 256k", no percentage). */
-void format_context(char *out, size_t out_size, long context_tokens, long context_limit);
-
-/* Format turn duration, context use, and session spend in display order. Negative token/time
- * values and nonpositive spend are omitted. Returns the number of populated segments. */
-int agent_format_stats_segments(char segments[][AGENT_STATS_SEGMENT_LEN], long context_tokens,
-                                long context_limit, long elapsed_ms, double session_spend,
-                                int spend_estimated);
-
-struct catalog_split;
-struct spend_record;
-
-/* Zero-initialize before use and release with agent_spend_free. */
-struct spend_totals {
-    struct spend_record *records;
-    size_t count;
-    size_t capacity;
+/* One request the provider served within a stream() call. */
+struct attempt {
+    struct stream_usage usage;
+    long elapsed_ms;
+    /* Owned; a stream_response only borrows its strings. */
+    char *response_id;
+    char *served_model;
+    char *route;
 };
 
-/* Record one response. Live rates are snapshotted so later model switches cannot reprice it; the
- * catalog identity is retained as a lazy fallback when rates are not yet available. */
-void agent_spend_account(struct spend_totals *totals, const struct stream_usage *usage,
-                         const struct provider *provider, const char *model);
+/* Usage of every served request in one stream() call: each retried attempt that reported
+ * usage, then the terminal response. Initialize with attempt_log_init and release with
+ * attempt_log_free. */
+struct attempt_log {
+    struct attempt attempts[ATTEMPT_LOG_MAX];
+    size_t count;
+    long attempt_started_ms;
+};
 
-/* Return session spend in USD. `estimated` is set when any response lacks reported cost,
- * including responses that cannot currently be priced. */
-double agent_spend_total(const struct spend_totals *totals, int *estimated);
+void attempt_log_init(struct attempt_log *log);
 
-/* Return true if a pending catalog fetch could make the spend estimate more complete. */
-int agent_spend_has_unpriced(const struct spend_totals *totals);
+/* Record the attempt that just ended; `response` may be NULL. Once the log is full, usage folds
+ * into the last entry so nothing billable is dropped. */
+void attempt_log_record(struct attempt_log *log, const struct stream_usage *usage,
+                        const struct stream_response *response);
 
-/* Sum estimated per-category costs into `split`; return true if any record could be priced.
- * Providers do not report category-level charges, so this split is inexact even when the total is
- * exact. */
-int agent_spend_split(const struct spend_totals *totals, struct catalog_split *split);
+/* Record a retried attempt; the next attempt's timing starts after the `delay_ms` backoff.
+ * Unreported usage records nothing: the provider served no request. */
+void attempt_log_retry(struct attempt_log *log, const struct stream_usage *usage, long delay_ms);
 
-void agent_spend_free(struct spend_totals *totals);
+/* True when any recorded attempt reported tokens or cost. */
+int attempt_log_has_usage(const struct attempt_log *log);
 
-/* Return input tokens billed at the ordinary input rate. Cache writes are subtracted only when
- * their rate replaces, rather than surcharges, ordinary input billing. */
-long agent_usage_uncached_input(const struct stream_usage *usage, const struct provider *provider,
-                                const char *model);
+void attempt_log_free(struct attempt_log *log);
 
 /* Return true when the response reports tokens or cost. */
 int agent_usage_is_reported(const struct stream_usage *usage);

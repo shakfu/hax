@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "agent_core.h"
+#include "agent_usage.h"
 #include "provider.h"
 #include "turn.h"
 
@@ -17,29 +18,24 @@
 /* One provider stream() call and the state assembled from its events. */
 struct agent_loop_turn {
     struct turn assembly;
+    /* The terminal attempt's usage alone, so input + output measures the context window. */
     struct stream_usage usage;
-    /* Summed usage of attempts that died mid-stream and were retried. Kept apart from `usage`
-     * so input + output still measures the terminal attempt's context window. */
-    struct stream_usage retry_usage;
-    /* Owned copy of the terminal event's stream_response, whose strings are only borrowed. */
-    char *response_id;
-    char *served_model;
-    char *route;
+    /* Every served attempt, retried ones included, for one footer each. */
+    struct attempt_log attempts;
     char *error_message;
-    long elapsed_ms;
 };
 
 /* Run one model turn. session_id is the conversation's stable id for provider affinity (may be
  * NULL). observer receives each event for optional presentation (its return value is ignored);
- * event assembly, terminal usage, errors, and timing are always captured here. tick is the
+ * event assembly, per-attempt usage and timing, and errors are always captured here. tick is the
  * provider's optional wait-loop side channel. */
 void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session *session,
                          struct provider *provider, const char *session_id, stream_cb observer,
                          void *observer_user, http_tick_cb tick, void *tick_user);
 void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn);
 
-/* Billable usage for the whole turn: the terminal attempt plus retried attempts. */
-struct stream_usage agent_loop_turn_usage_total(const struct agent_loop_turn *loop_turn);
+/* True when any attempt of the turn reported billable usage. */
+int agent_loop_turn_has_usage(const struct agent_loop_turn *loop_turn);
 
 enum agent_abort_reason {
     AGENT_ABORT_PROVIDER_ERROR,
@@ -91,7 +87,6 @@ struct agent_loop_hooks {
     stream_cb observe;
     http_tick_cb tick;
     void (*turn_begin)(void *user);
-    void (*turn_end)(const struct agent_loop_turn *loop_turn, void *user);
     int (*checkpoint)(void *user);
     void (*tool_seen)(const struct item *call, void *user);
     /* image_input is the resolved provider/model capability for the run context. */
@@ -139,7 +134,7 @@ struct agent_loop_params {
     struct cancel_state *cancel;
     struct transcript_log *tlog;
     struct session_log *slog;
-    int max_turns; /* < 0 means unlimited */
+    int max_turns; /* <= 0 means unlimited */
     /* Resuming an incomplete user turn with no new user input: the first round-trip continues
      * the previous seam rather than following a fresh user message, so it owes a turn boundary
      * like a follow-up turn does. */

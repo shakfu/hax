@@ -9,7 +9,9 @@
 
 /* Append-only conversation persistence. Each session is a JSONL file under the current
  * directory's bucket in the XDG state tree. The first line is a header; subsequent lines are
- * items or complete provider/model/effort/preset selection records. */
+ * items or control records: complete provider/model/effort/preset selections, /undo cuts, and
+ * completed user-turn timings. Nothing is ever rewritten, so a reader following the file sees
+ * every record once and applies undo records itself. */
 
 #define SESSION_FORMAT_VERSION 1
 
@@ -93,17 +95,25 @@ void session_log_discard_selection(struct session_log *log);
 void session_log_reset(struct session_log *log);
 void session_log_close(struct session_log *log);
 
-/* Keeps the first keep_turns typed user turns. new_item_count becomes the writer's in-memory high
- * water mark. An unmaterialized or NULL log is a successful no-op. On failure the file is
- * unchanged. */
-int session_log_truncate(struct session_log *log, size_t keep_turns, size_t new_item_count);
+/* Records that the conversation now keeps only its first keep_user_turns typed user turns. The cut
+ * items stay in the file for accounting; new_item_count becomes the writer's in-memory high water
+ * mark so the next append continues after the kept tail. An unmaterialized or NULL log is a
+ * successful no-op. Returns -1 when the record could not be written. */
+int session_log_undo(struct session_log *log, size_t keep_user_turns, size_t new_item_count);
+
+/* Records the wall time of a completed user turn. A no-op before materialization. */
+void session_log_user_turn(struct session_log *log, long elapsed_ms);
 
 /* True after the header has been written. */
 int session_log_materialized(const struct session_log *log);
 
-/* Copies the first keep_turns typed user turns into a sibling session with a fresh identity and a
- * forked_from header field. On success, out_path receives an owned path; it is NULL on failure. */
-int session_fork_file(const char *source_path, size_t keep_turns, char **out_path);
+/* Writes items[0, n_items) into a sibling session with a fresh identity and a forked_from header
+ * field, marking every copied item inherited. The header records `selection`'s provider, model,
+ * model_label, effort, and preset — the state the branch continues from, since the copied items
+ * carry their own provenance — and ignores its other fields. On success, out_path receives an
+ * owned path; it is NULL on failure. */
+int session_fork_file(const char *source_path, const struct item *items, size_t n_items,
+                      const struct session_header *selection, char **out_path);
 
 /* Borrowed until reset or close; non-NULL before materialization when recording is available. */
 const char *session_log_path(const struct session_log *log);
@@ -122,9 +132,28 @@ int session_path_is_standard(const char *path);
  * Returns 0 on success, -1 on failure. */
 int session_touch(const char *path);
 
-/* Loads owned items and optional metadata. Invalid JSON lines are skipped, incomplete tool calls
- * are removed, and old reasoning items inherit header provenance. Outputs are zeroed on failure.
- * Free items with item_free followed by free, and metadata with session_meta_free. */
+/* Everything a session file says about its conversation. Items and retired items are owned
+ * arrays; free each item with item_free before freeing the array, or use session_loaded_free. */
+struct session_loaded {
+    struct item *items; /* the live conversation after applying every undo record */
+    size_t n_items;
+    struct item *retired; /* items undo records removed, in file order */
+    size_t n_retired;
+    long worked_ms;         /* sum of recorded user-turn durations */
+    long last_user_turn_ms; /* newest duration recorded since the last undo; -1 when none */
+    struct session_meta meta;
+};
+
+/* Loads the whole file. Invalid JSON lines are skipped, incomplete tool calls are removed from the
+ * live conversation, and old reasoning items inherit header provenance. `out` is zeroed on
+ * failure. */
+int session_load_all(const char *path, struct session_loaded *out);
+
+/* Releases every field still owned by `loaded`; callers that transferred an array set it NULL. */
+void session_loaded_free(struct session_loaded *loaded);
+
+/* Loads only the live conversation and optional metadata, as session_load_all does. Free items
+ * with item_free followed by free, and metadata with session_meta_free. */
 int session_load(const char *path, struct item **out_items, size_t *out_count,
                  struct session_meta *out_meta);
 
@@ -153,6 +182,11 @@ struct session_entry {
  * contents are not read; labels are populated separately. */
 int session_list(const char *cwd, struct session_entry **out_entries, size_t *out_count);
 void session_list_free(struct session_entry *entries, size_t count);
+
+/* Return the owned path of cwd's prompt-history file, a sibling of its session files that listing
+ * and pruning ignore. Return NULL for a NULL cwd or when no state directory is available, so an
+ * unknown working directory records nothing, as with sessions. */
+char *session_prompt_history_path(const char *cwd);
 
 /* Reads a bounded file prefix, describing the session as it started: a later model or preset
  * switch is not reflected. The prompt is limited to max_cells. Overwrites out without releasing

@@ -9,7 +9,6 @@
 
 #include "agent.h"
 #include "agent_core.h"
-#include "agent_usage.h"
 #include "buf.h"
 #include "busy.h"
 #include "catalog.h"
@@ -27,6 +26,7 @@
 #include "terminal/picker.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
+#include "text/fmt.h"
 #include "transport/http.h"
 
 /* ---------- parallel availability probe ---------- */

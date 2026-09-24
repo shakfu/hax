@@ -110,6 +110,10 @@ const struct provider_def *provider_find(const char *name);
  * else the def's default, else the id. Borrowed; valid until the next config write. */
 const char *provider_display_name(const struct provider_def *def);
 
+/* models.dev identity without constructing the provider: the configured providers.<id>.catalog_id,
+ * where an explicit empty value opts out, else the def's. Borrowed; NULL means none. */
+const char *provider_catalog_id(const struct provider_def *def);
+
 /* Return the highest-priority user-facing def, or NULL when none is registered. */
 const struct provider_def *provider_default(void);
 

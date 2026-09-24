@@ -84,16 +84,16 @@ static const struct config_setting REGISTRY[] = {
      .description = "Inhibit idle system sleep while a turn is running (display may still blank)",
      .choices = CONFIG_CHOICES_BOOL, .editable = 1},
     {.key = "compact.auto", .env_var = "HAX_COMPACT_AUTO", .default_value = "1",
-     .description = "Auto-summarize history when it nears the context window "
+     .description = "Auto-summarize the conversation when it nears the context window "
                     "(manual /compact still works)",
      .choices = CONFIG_CHOICES_BOOL, .editable = 1},
     {.key = "compact.threshold", .env_var = "HAX_COMPACT_THRESHOLD", .default_value = "85",
      .description = "Auto-compact when context usage reaches this percent of the window",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 100, .editable = 1},
-    {.key = "max_turns", .env_var = "HAX_MAX_TURNS", .default_value = "auto",
-     .description = "Model round-trips per user turn: interactive then pauses for confirmation, "
-                    "one-shot aborts; auto is unlimited interactively and 100 in one-shot",
-     .choices = "auto", .example = "25", .kind = CONFIG_KIND_INT, .editable = 1},
+    {.key = "max_turns", .env_var = "HAX_MAX_TURNS", .default_value = "0",
+     .description = "Model round-trips per user turn before interactive pauses for confirmation "
+                    "and one-shot aborts; 0 is unlimited",
+     .kind = CONFIG_KIND_INT, .editable = 1},
 
     /* model catalog */
     {.key = "catalog.url", .env_var = "HAX_CATALOG_URL",

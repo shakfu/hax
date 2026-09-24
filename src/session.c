@@ -190,7 +190,7 @@ static const struct {
     {ITEM_ORIGIN_COMPACT_SEED, "compact_seed"}, {ITEM_ORIGIN_CONTINUATION, "continuation"},
     {ITEM_ORIGIN_INTERRUPTED, "interrupted"},   {ITEM_ORIGIN_SKIPPED, "skipped"},
     {ITEM_ORIGIN_REFUSED, "refused"},           {ITEM_ORIGIN_SUMMARIZED, "summarized"},
-    {ITEM_ORIGIN_TASK_NOTE, "task_note"},
+    {ITEM_ORIGIN_TASK_NOTE, "task_note"},       {ITEM_ORIGIN_COMPACTION, "compaction"},
 };
 
 static const char *origin_to_str(enum item_origin origin)
@@ -231,6 +231,8 @@ json_t *item_to_json(const struct item *item)
     json_set_optional_string(object, "origin", origin_to_str(item->origin));
     if (item->usage)
         json_object_set_new(object, "usage", turn_usage_to_json(item->usage));
+    if (item->inherited)
+        json_object_set_new(object, "inherited", json_true());
     if (item->n_images) {
         json_t *images = json_array();
         for (size_t i = 0; i < item->n_images; i++) {
@@ -273,6 +275,7 @@ int item_from_json(const json_t *object, struct item *out)
     out->origin = json_get_item_origin(object);
     if (kind == ITEM_TURN_USAGE)
         out->usage = turn_usage_from_json(json_object_get(object, "usage"));
+    out->inherited = json_is_true(json_object_get(object, "inherited"));
 
     json_t *images = json_object_get(object, "images");
     size_t image_count = json_is_array(images) ? json_array_size(images) : 0;
@@ -688,14 +691,6 @@ static int write_selection(struct session_log *log)
     return result;
 }
 
-static int selection_matches_log(const struct session_meta *meta, const struct session_log *log)
-{
-    return optional_strings_equal(meta->provider, log->provider) &&
-           optional_strings_equal(meta->model, log->model) &&
-           optional_strings_equal(meta->effort, log->effort) &&
-           optional_strings_equal(meta->preset, log->preset);
-}
-
 void session_log_begin(struct session_log *log)
 {
     if (!log || log->header_written || materialize_log(log) < 0 || write_header(log) < 0)
@@ -813,99 +808,31 @@ const char *session_log_id(const struct session_log *log)
     return log ? log->id : NULL;
 }
 
-/* Keep this predicate aligned with agent.c's in-memory typed-prompt scan. */
-static int json_line_is_typed_prompt(const json_t *object)
+int session_log_undo(struct session_log *log, size_t keep_user_turns, size_t new_item_count)
 {
-    const char *kind = json_string_value(json_object_get(object, "kind"));
-    return kind && strcmp(kind, "user") == 0 && json_get_item_origin(object) == ITEM_ORIGIN_NONE;
-}
-
-/* The cut includes the retained turn's response and excludes the next turn's boundary. */
-static long find_turn_cut_offset(const char *path, size_t keep_turns)
-{
-    FILE *file = fopen(path, "r");
-    if (!file)
-        return -1;
-
-    char *line = NULL;
-    size_t line_capacity = 0;
-    ssize_t bytes_read;
-    long current_offset = 0;
-    long previous_offset = -1;
-    int previous_was_boundary = 0;
-    long cut_offset = -1;
-    size_t turn_count = 0;
-
-    while ((bytes_read = getline(&line, &line_capacity, file)) >= 0) {
-        long line_offset = current_offset;
-        current_offset += bytes_read;
-
-        int is_boundary = 0;
-        int is_typed_prompt = 0;
-        json_t *object = json_loads(line, 0, NULL);
-        if (object) {
-            const char *kind = json_string_value(json_object_get(object, "kind"));
-            if (kind && strcmp(kind, "turn_boundary") == 0)
-                is_boundary = 1;
-            else
-                is_typed_prompt = json_line_is_typed_prompt(object);
-            json_decref(object);
-        }
-
-        if (is_typed_prompt) {
-            if (turn_count == keep_turns && cut_offset < 0)
-                cut_offset = previous_was_boundary ? previous_offset : line_offset;
-            turn_count++;
-        }
-        previous_offset = line_offset;
-        previous_was_boundary = is_boundary;
-    }
-    int read_failed = ferror(file);
-    free(line);
-    fclose(file);
-    if (read_failed)
-        return -1;
-
-    return cut_offset < 0 ? current_offset : cut_offset;
-}
-
-int session_log_truncate(struct session_log *log, size_t keep_turns, size_t new_item_count)
-{
-    if (!log || !log->path)
+    if (!log || !log->file || !log->header_written)
         return 0;
-    if (!log->file)
-        return 0;
-    if (fflush(log->file) != 0)
+    json_t *record = json_object();
+    json_object_set_new(record, "type", json_string("undo"));
+    json_object_set_new(record, "keep_user_turns", json_integer((json_int_t)keep_user_turns));
+    int result = write_json_line(log->file, record);
+    json_decref(record);
+    if (result < 0 || fflush(log->file) != 0)
         return -1;
-    long cut_offset = find_turn_cut_offset(log->path, keep_turns);
-    if (cut_offset < 0)
-        return -1;
-
-    /* Never extend a file shortened by another process after the offset scan. */
-    struct stat file_stat;
-    if (fstat(fileno(log->file), &file_stat) != 0 || (off_t)cut_offset > file_stat.st_size)
-        return -1;
-
-    /* A plain "w" stream must be repositioned before truncation or the next write leaves a hole. */
-    long original_offset = ftell(log->file);
-    if (original_offset < 0)
-        return -1;
-    if (fseek(log->file, cut_offset, SEEK_SET) != 0) {
-        fseek(log->file, original_offset, SEEK_SET);
-        return -1;
-    }
-    if (ftruncate(fileno(log->file), cut_offset) != 0) {
-        fseek(log->file, original_offset, SEEK_SET);
-        return -1;
-    }
     log->written_items = new_item_count;
-
-    /* Restate a live selection whose record was removed by the cut. */
-    struct session_meta metadata;
-    if (session_read_meta(log->path, &metadata) == 0 && !selection_matches_log(&metadata, log))
-        log->selection_pending = 1;
-    session_meta_free(&metadata);
     return 0;
+}
+
+void session_log_user_turn(struct session_log *log, long elapsed_ms)
+{
+    if (!log || !log->file || !log->header_written || elapsed_ms < 0)
+        return;
+    json_t *record = json_object();
+    json_object_set_new(record, "type", json_string("user_turn"));
+    json_object_set_new(record, "elapsed_ms", json_integer((json_int_t)elapsed_ms));
+    if (write_json_line(log->file, record) == 0)
+        fflush(log->file);
+    json_decref(record);
 }
 
 int session_log_materialized(const struct session_log *log)
@@ -928,44 +855,46 @@ static char *fork_session_path(const char *source_path, const char *filename_tim
     return path;
 }
 
-static int copy_bytes(FILE *source, FILE *destination, long byte_count)
+static json_t *read_header(const char *path)
 {
-    char buffer[65536];
-    while (byte_count > 0) {
-        size_t wanted = byte_count < (long)sizeof(buffer) ? (size_t)byte_count : sizeof(buffer);
-        size_t bytes_read = fread(buffer, 1, wanted, source);
-        if (bytes_read == 0 || fwrite(buffer, 1, bytes_read, destination) != bytes_read)
-            return -1;
-        byte_count -= (long)bytes_read;
+    FILE *source = fopen(path, "r");
+    if (!source)
+        return NULL;
+    char *line = NULL;
+    size_t capacity = 0;
+    json_t *header = NULL;
+    if (getline(&line, &capacity, source) >= 0)
+        header = json_loads(line, 0, NULL);
+    free(line);
+    fclose(source);
+    if (header && !json_is_object(header)) {
+        json_decref(header);
+        header = NULL;
     }
-    return 0;
+    return header;
 }
 
-int session_fork_file(const char *source_path, size_t keep_turns, char **out_path)
+/* Set `key` to `value`, or drop it so an absent field reads as unset rather than inherited. */
+static void set_or_delete_string(json_t *object, const char *key, const char *value)
+{
+    if (value && *value)
+        json_object_set_new(object, key, json_string(value));
+    else
+        json_object_del(object, key);
+}
+
+int session_fork_file(const char *source_path, const struct item *items, size_t n_items,
+                      const struct session_header *selection, char **out_path)
 {
     *out_path = NULL;
     int result = -1;
     int destination_created = 0;
     int destination_fd = -1;
-    FILE *source = NULL;
     FILE *destination = NULL;
-    json_t *header = NULL;
-    char *header_line = NULL;
     char *destination_path = NULL;
 
-    long cut_offset = find_turn_cut_offset(source_path, keep_turns);
-    if (cut_offset < 0)
-        goto out;
-
-    source = fopen(source_path, "r");
-    if (!source)
-        goto out;
-    size_t header_capacity = 0;
-    ssize_t header_length = getline(&header_line, &header_capacity, source);
-    if (header_length < 0)
-        goto out;
-    header = json_loads(header_line, 0, NULL);
-    if (!json_is_object(header))
+    json_t *header = read_header(source_path);
+    if (!header)
         goto out;
 
     char uuid[37];
@@ -983,6 +912,12 @@ int session_fork_file(const char *source_path, size_t keep_turns, char **out_pat
         json_object_set_new(header, "forked_from", json_string(source_id));
     json_object_set_new(header, "id", json_string(uuid));
     json_object_set_new(header, "timestamp", json_string(header_time));
+    set_or_delete_string(header, "provider", selection->provider);
+    set_or_delete_string(header, "model", selection->model);
+    set_or_delete_string(header, "model_label",
+                         differing_model_label(selection->model_label, selection->model));
+    set_or_delete_string(header, "effort", selection->effort);
+    set_or_delete_string(header, "preset", selection->preset);
 
     destination_path = fork_session_path(source_path, filename_time, uuid);
     destination_fd = open(destination_path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
@@ -996,10 +931,15 @@ int session_fork_file(const char *source_path, size_t keep_turns, char **out_pat
 
     if (write_json_line(destination, header) < 0)
         goto out;
-    if (cut_offset > header_length &&
-        (fseek(source, header_length, SEEK_SET) != 0 ||
-         copy_bytes(source, destination, cut_offset - header_length) < 0))
-        goto out;
+    for (size_t i = 0; i < n_items; i++) {
+        struct item copy = items[i];
+        copy.inherited = 1;
+        json_t *object = item_to_json(&copy);
+        int written = write_json_line(destination, object);
+        json_decref(object);
+        if (written < 0)
+            goto out;
+    }
     if (fclose(destination) != 0) {
         destination = NULL;
         goto out;
@@ -1018,11 +958,7 @@ out:
     if (result < 0 && destination_created)
         unlink(destination_path);
     free(destination_path);
-    free(header_line);
-    if (header)
-        json_decref(header);
-    if (source)
-        fclose(source);
+    json_decref(header);
     return result;
 }
 
@@ -1164,21 +1100,42 @@ static size_t remove_incomplete_tool_calls(struct item *items, size_t count)
     return kept;
 }
 
-int session_load(const char *path, struct item **out_items, size_t *out_count,
-                 struct session_meta *out_meta)
+/* Undo records name a typed-prompt count rather than an item index: item indices shift when the
+ * loader skips a torn line or drops an incomplete tool call, prompt counts do not. */
+static void apply_undo_record(struct session_loaded *loaded, size_t *retired_capacity,
+                              const json_t *object)
 {
-    if (out_meta)
-        memset(out_meta, 0, sizeof(*out_meta));
-    *out_items = NULL;
-    *out_count = 0;
+    json_t *value = json_object_get(object, "keep_user_turns");
+    if (!json_is_integer(value) || json_integer_value(value) < 0)
+        return;
+    size_t cut =
+        items_user_turn_cut(loaded->items, loaded->n_items, (size_t)json_integer_value(value));
+    for (size_t i = cut; i < loaded->n_items; i++)
+        push_item(&loaded->retired, &loaded->n_retired, retired_capacity, loaded->items[i]);
+    loaded->n_items = cut;
+    loaded->last_user_turn_ms = -1;
+}
+
+static void apply_user_turn_record(struct session_loaded *loaded, const json_t *object)
+{
+    json_t *value = json_object_get(object, "elapsed_ms");
+    if (!json_is_integer(value) || json_integer_value(value) < 0)
+        return;
+    loaded->last_user_turn_ms = (long)json_integer_value(value);
+    loaded->worked_ms += loaded->last_user_turn_ms;
+}
+
+int session_load_all(const char *path, struct session_loaded *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->last_user_turn_ms = -1;
 
     FILE *file = open_session_reader(path);
     if (!file)
         return -1;
 
-    struct item *items = NULL;
-    size_t count = 0;
-    size_t capacity = 0;
+    size_t live_capacity = 0;
+    size_t retired_capacity = 0;
     char *header_provider = NULL;
     char *header_model = NULL;
     char *line = NULL;
@@ -1190,24 +1147,24 @@ int session_load(const char *path, struct item **out_items, size_t *out_count,
             continue; /* A crash may leave one partial final record. */
 
         const char *type = json_string_value(json_object_get(object, "type"));
-        if (type && strcmp(type, "session") == 0) {
-            if (!header_provider)
-                header_provider = json_dup_string(object, "provider");
-            if (!header_model)
-                header_model = json_dup_string(object, "model");
-            if (out_meta) {
-                free(out_meta->id);
-                out_meta->id = json_dup_string(object, "id");
-                free(out_meta->cwd);
-                out_meta->cwd = json_dup_string(object, "cwd");
-                apply_selection_record(out_meta, object);
+        if (type) {
+            if (strcmp(type, "session") == 0) {
+                if (!header_provider)
+                    header_provider = json_dup_string(object, "provider");
+                if (!header_model)
+                    header_model = json_dup_string(object, "model");
+                free(out->meta.id);
+                out->meta.id = json_dup_string(object, "id");
+                free(out->meta.cwd);
+                out->meta.cwd = json_dup_string(object, "cwd");
+                apply_selection_record(&out->meta, object);
+            } else if (strcmp(type, "selection") == 0) {
+                apply_selection_record(&out->meta, object);
+            } else if (strcmp(type, "undo") == 0) {
+                apply_undo_record(out, &retired_capacity, object);
+            } else if (strcmp(type, "user_turn") == 0) {
+                apply_user_turn_record(out, object);
             }
-            json_decref(object);
-            continue;
-        }
-        if (type && strcmp(type, "selection") == 0) {
-            if (out_meta)
-                apply_selection_record(out_meta, object);
             json_decref(object);
             continue;
         }
@@ -1221,7 +1178,7 @@ int session_load(const char *path, struct item **out_items, size_t *out_count,
                 if (!item.model && header_model)
                     item.model = xstrdup(header_model);
             }
-            push_item(&items, &count, &capacity, item);
+            push_item(&out->items, &out->n_items, &live_capacity, item);
         }
         json_decref(object);
     }
@@ -1232,19 +1189,47 @@ int session_load(const char *path, struct item **out_items, size_t *out_count,
     free(header_provider);
     free(header_model);
     if (read_failed) {
-        for (size_t i = 0; i < count; i++)
-            item_free(&items[i]);
-        free(items);
-        if (out_meta)
-            session_meta_free(out_meta);
+        session_loaded_free(out);
         return -1;
     }
 
     /* Providers reject tool calls that lack a corresponding result after a crash. */
-    count = remove_incomplete_tool_calls(items, count);
-    degrade_excess_images(items, count);
-    *out_items = items;
-    *out_count = count;
+    out->n_items = remove_incomplete_tool_calls(out->items, out->n_items);
+    degrade_excess_images(out->items, out->n_items);
+    return 0;
+}
+
+void session_loaded_free(struct session_loaded *loaded)
+{
+    for (size_t i = 0; i < loaded->n_items; i++)
+        item_free(&loaded->items[i]);
+    free(loaded->items);
+    for (size_t i = 0; i < loaded->n_retired; i++)
+        item_free(&loaded->retired[i]);
+    free(loaded->retired);
+    session_meta_free(&loaded->meta);
+    memset(loaded, 0, sizeof(*loaded));
+}
+
+int session_load(const char *path, struct item **out_items, size_t *out_count,
+                 struct session_meta *out_meta)
+{
+    struct session_loaded loaded;
+    if (out_meta)
+        memset(out_meta, 0, sizeof(*out_meta));
+    *out_items = NULL;
+    *out_count = 0;
+    if (session_load_all(path, &loaded) != 0)
+        return -1;
+    *out_items = loaded.items;
+    *out_count = loaded.n_items;
+    loaded.items = NULL;
+    loaded.n_items = 0;
+    if (out_meta) {
+        *out_meta = loaded.meta;
+        memset(&loaded.meta, 0, sizeof(loaded.meta));
+    }
+    session_loaded_free(&loaded);
     return 0;
 }
 
@@ -1400,6 +1385,18 @@ int session_list(const char *cwd, struct session_entry **out_entries, size_t *ou
     *out_entries = entries;
     *out_count = count;
     return 0;
+}
+
+char *session_prompt_history_path(const char *cwd)
+{
+    if (!cwd)
+        return NULL;
+    char *directory = session_directory(cwd);
+    if (!directory)
+        return NULL;
+    char *path = path_join(directory, "history");
+    free(directory);
+    return path;
 }
 
 void session_list_free(struct session_entry *entries, size_t count)
