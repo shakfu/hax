@@ -39,11 +39,20 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   process rather than one agent; constructing a second `Agent` used to raise. Configuration stays
   process-wide, so each agent copies its provider and model as it is built and `cancel()` remains
   process-wide. See [bindings/python/README.md](bindings/python/README.md).
-- Shell-like Tab completion of `/` commands, with a dim placeholder for a command's arguments.
+- Shell-like Tab completion of `/` commands and their arguments.
+- A dim placeholder after a `/` command shows the arguments it takes.
+- `/provider`, `/model`, and `/effort` take an id or level and apply it without a picker:
+  `/model <id>` also switches models on providers that cannot list theirs, and `/provider <id>`
+  starts on that provider's default model, or on none until `/model` picks one.
+- The built-in pickers take fzf's keys: Ctrl-J/Ctrl-K move the selection, and Ctrl-W and
+  Alt-Backspace delete a word of the query.
 - A preset name right after `hax` starts with that preset: `hax review` is short for
   `hax --preset review`, and `hax review -p "..."` works the same way in one-shot mode.
 - `/session` shows a token row per model when the conversation switched models, how many user
   turns `/undo` removed, and what a fork inherited from its source.
+- DeepSeek provider (`deepseek`): set `DEEPSEEK_API_KEY`; `/usage` shows the account balance.
+- `reasoning_required` provider setting for Chat Completions servers that reject tool calls
+  without their reasoning, such as a proxy to DeepSeek.
 
 ### Changed
 
@@ -86,6 +95,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- `HAX_REASONING_ROUNDTRIP` is renamed `HAX_OPENAI_REASONING_ROUNDTRIP`, like the other variables
+  that configure `openai-compatible`; the old name is no longer read.
+- After a pause or interruption, "enter to continue" now appears as a placeholder in the prompt
+  instead of a separate hint line, and continuing leaves no empty prompt behind.
 - Prompt history (Up, Ctrl-R) is scoped to the working directory like sessions: each directory
   keeps its own `history` file beside its session files, so a prompt typed in one project no
   longer comes back in another. The old global `~/.local/state/hax/history` is no longer read and
@@ -98,14 +111,22 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   session spent on, including undone user turns and retried requests.
 - Session files are append-only: `/undo` records the cut instead of truncating the file. Scripts
   reading session files should see [docs/sessions.md](docs/sessions.md) for the new records.
+- Tool-call headers split a long regex, path, or other long argument to fill the row, instead of
+  leaving it out of a truncated header.
 - Prompt and tool guidance favor native tools for ordinary file operations, and backgrounding when
   there is useful work to overlap rather than an immediate wait.
 - Custom providers no longer take their models.dev catalog identity from their own name; set
   `catalog_id` explicitly (for example `"catalog_id": "groq"`) to keep pricing and context
   metadata. Local servers and proxies without one never contact models.dev. See
   [docs/providers.md](docs/providers.md#custom-providers).
+- Chat Completions providers now send a model's reasoning back by default, in the same field the
+  server streamed it in, so thinking models on custom and local servers keep their earlier
+  reasoning without configuration. `reasoning_roundtrip` accepts `auto`, `off`, or a field name;
+  `on` now means `auto` rather than always `reasoning_content`.
 - `/model` and `/effort` wait briefly for the model catalog refresh, so pricing and context
   columns appear even on a cold cache.
+- Model listings and the models.dev catalog download compressed, about a tenth of their former
+  size.
 - The collapsed preview for read-only bash commands now tolerates `echo`, `printf`, `true`, and
   `false` between exploration commands, such as the `echo ---` separators some models place
   between searches, and covers read-only git subcommands like `log`, `show`, `diff`, `status`,
@@ -113,6 +134,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Fixed
 
+- Ollama models now get their own earlier reasoning back in later requests. Thinking models could
+  otherwise degrade over a long session, especially across tool calls.
+- A turn that finishes almost at once, such as one that fails right away, no longer adds half a
+  second while hax waits for the keep-awake helper to stop. A bash command killed just after it
+  started now stops at its SIGTERM instead of running on until the SIGKILL after the grace period.
 - Theme colors are more readable and consistent, including quiet roles in the `light` theme and
   the `rose` tint in the `dark` theme.
 - `config.json` and `state.json` are now written with a trailing newline, matching `auth.json`

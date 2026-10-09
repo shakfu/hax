@@ -2,6 +2,7 @@
 #ifndef HAX_PROVIDER_H
 #define HAX_PROVIDER_H
 
+#include <jansson.h>
 #include <stddef.h>
 
 #include "catalog.h"
@@ -69,6 +70,8 @@ struct item {
     char *reasoning_json;
     /* REASONING: human-readable reasoning; an item may carry either form or both. */
     char *reasoning_text;
+    /* REASONING: Chat Completions member reasoning_text streamed in; NULL when unknown. */
+    char *reasoning_field;
     /* REASONING / TURN_USAGE: source identity. Opaque reasoning may be bound to this exact pair. */
     char *provider;
     char *model;
@@ -234,6 +237,9 @@ struct stream_event {
         struct {
             const char *text; /* NULL or "" allowed — signals reasoning
                                  activity even when no plaintext is exposed */
+            /* Static storage: the Chat Completions member `text` arrived in; NULL for other
+             * wires. */
+            const char *field;
         } reasoning_delta;
         struct {
             int attempt;      /* 1-based attempt that just failed */
@@ -279,6 +285,10 @@ enum provider_cap {
     PROVIDER_CAP_NO = 2,
 };
 
+/* Whether the JSON string array `list` contains `value`; a missing or malformed list is unknown,
+ * not unsupported. */
+enum provider_cap provider_cap_listed(const json_t *list, const char *value);
+
 /* Raw metadata reported by a provider for one model. Every field after `id` is optional;
  * model_info_init establishes the unknown sentinels. Resolved metadata belongs in model_meta.h. */
 struct model_info {
@@ -323,7 +333,23 @@ struct model_probe {
     /* Locate `model` in the response and fill initialized `out`. Runs off-thread without access to
      * the provider, so implementations must be pure and thread-safe. */
     void (*parse)(const char *body, const char *model, struct model_info *out);
+    /* Without `parse`, the response lists models in an array of objects: the root member holding
+     * the array (NULL → "data"), each entry's id member (NULL → "id"), and the refinement applied
+     * to the entry whose id is `model`, under the same purity contract; without a refinement the
+     * listing yields its ids alone. Static strings. */
+    const char *list_member;
+    const char *id_member;
+    void (*parse_entry)(const json_t *entry, struct model_info *out);
+    /* Optional: whether to leave an entry out of the listed ids, as the model picker does. */
+    int (*entry_hidden)(const json_t *entry);
 };
+
+/* Fill initialized `out` from a probe response through `probe`'s parse or listing locator; a
+ * response that is not JSON or lacks `model` leaves it untouched. With the locator, `model` may be
+ * NULL, and a non-NULL `ids` receives the listed ids other than hidden ones (string_array_free),
+ * or NULL when the response holds no well-formed listing. */
+void model_probe_parse(const struct model_probe *probe, const char *body, const char *model,
+                       struct model_info *out, char ***ids);
 
 /* Release all request fields owned by `probe` and leave it zeroed. NULL-safe. */
 void model_probe_clear(struct model_probe *probe);
@@ -364,8 +390,9 @@ struct provider {
                        char **error, http_tick_cb tick, void *tick_user);
     /* Return a borrowed array of accepted wire effort values. Zero or NULL means unsupported. */
     size_t (*list_efforts)(struct provider *provider, const char *const **efforts);
-    /* Prepare a small metadata request for one model. Return 0 with owned request fields, or -1
-     * when nothing can be fetched. NULL leaves metadata resolution to the catalog. */
+    /* Prepare a small metadata request for `model`, or for the listing alone when it is NULL.
+     * Return 0 with owned request fields, or -1 when nothing can be fetched. NULL leaves metadata
+     * resolution to the catalog. */
     int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
     void (*destroy)(struct provider *provider);
     /* Every destroy callback must call model_meta_release before freeing the provider. */

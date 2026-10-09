@@ -33,15 +33,15 @@ int picker_core_text_cells(const char *text);
 /* Number of cells allocated to an item's label within a terminal row. */
 int picker_core_label_cells(const struct picker_item *item, int terminal_cols);
 
-/* Appends text while replacing terminal control and unsafe Unicode codepoints with '?'. */
-void picker_core_append_sanitized(struct buf *output, const char *text, size_t len);
-
 /* Every space-separated query term must occur in `text`; ASCII case is ignored. An empty or NULL
  * query matches any text, while NULL text is treated as empty. */
 int picker_core_match(const char *text, const char *query);
 
 /* Rebuilds `matches` for the current query; storage must hold `options->item_count` entries. */
 void picker_core_update_matches(struct picker_core *core);
+
+/* Shortens the query to `len` bytes and refilters; a `len` at or past the end is a no-op. */
+void picker_core_truncate_query(struct picker_core *core, size_t len);
 
 /* Restores selection and scroll invariants after a viewport change. */
 void picker_core_clamp_view(struct picker_core *core);

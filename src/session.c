@@ -25,6 +25,7 @@
 #include "system/git.h"
 #include "system/path.h"
 #include "system/rand.h"
+#include "text/display_safe.h"
 #include "text/width.h"
 
 /* struct stat's sub-second mtime field is spelled differently across
@@ -226,6 +227,7 @@ json_t *item_to_json(const struct item *item)
                             json_integer((json_int_t)item->output_hidden_tail));
     json_set_optional_string(object, "reasoning_json", item->reasoning_json);
     json_set_optional_string(object, "reasoning_text", item->reasoning_text);
+    json_set_optional_string(object, "reasoning_field", item->reasoning_field);
     json_set_optional_string(object, "provider", item->provider);
     json_set_optional_string(object, "model", item->model);
     json_set_optional_string(object, "origin", origin_to_str(item->origin));
@@ -270,6 +272,7 @@ int item_from_json(const json_t *object, struct item *out)
         out->output_hidden_tail = (size_t)json_integer_value(hidden_tail);
     out->reasoning_json = json_dup_string(object, "reasoning_json");
     out->reasoning_text = json_dup_string(object, "reasoning_text");
+    out->reasoning_field = json_dup_string(object, "reasoning_field");
     out->provider = json_dup_string(object, "provider");
     out->model = json_dup_string(object, "model");
     out->origin = json_get_item_origin(object);

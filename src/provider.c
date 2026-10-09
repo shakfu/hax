@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 #include "provider.h"
 
+#include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "xalloc.h"
+#include "text/json_scan.h"
 
 char *item_image_placeholder(const struct item_image *image)
 {
@@ -89,6 +91,7 @@ void item_free(struct item *item)
     free(item->images);
     free(item->reasoning_json);
     free(item->reasoning_text);
+    free(item->reasoning_field);
     free(item->provider);
     free(item->model);
     turn_usage_free(item->usage);
@@ -106,6 +109,21 @@ void turn_usage_free(struct turn_usage *usage)
     free(usage->provenance.route);
     free(usage->provenance.response_id);
     free(usage);
+}
+
+enum provider_cap provider_cap_listed(const json_t *list, const char *value)
+{
+    if (!json_is_array(list))
+        return PROVIDER_CAP_UNKNOWN;
+    size_t index;
+    json_t *member;
+    json_array_foreach(list, index, member)
+    {
+        const char *text = json_string_value(member);
+        if (text && strcmp(text, value) == 0)
+            return PROVIDER_CAP_YES;
+    }
+    return PROVIDER_CAP_NO;
 }
 
 void model_info_init(struct model_info *info)
@@ -139,6 +157,64 @@ void model_info_free(struct model_info *models, size_t n_models)
     for (size_t i = 0; i < n_models; i++)
         model_info_clear(&models[i]);
     free(models);
+}
+
+void model_probe_parse(const struct model_probe *probe, const char *body, const char *model,
+                       struct model_info *out, char ***ids)
+{
+    if (ids)
+        *ids = NULL;
+    if (probe->parse) {
+        probe->parse(body, model, out);
+        return;
+    }
+
+    /* Listings can run to megabytes once tree-parsed, so parse one entry at a time. */
+    struct json_scan_entry list;
+    struct json_scan entries;
+    if (json_scan_find(body, probe->list_member ? probe->list_member : "data", &list) != 1 ||
+        json_scan_array(&entries, list.value) != 0)
+        return;
+    const char *id_member = probe->id_member ? probe->id_member : "id";
+    char **listed = NULL;
+    size_t listed_count = 0;
+    size_t listed_capacity = 0;
+    int found = 0;
+    struct json_scan_entry element;
+    int scanned;
+    while ((scanned = json_scan_next(&entries, &element)) == 1) {
+        json_t *entry = json_scan_load(&element);
+        if (!entry) {
+            scanned = -1;
+            break;
+        }
+        const char *id = json_string_value(json_object_get(entry, id_member));
+        if (id && model && probe->parse_entry && !found && strcmp(id, model) == 0) {
+            probe->parse_entry(entry, out);
+            found = 1;
+        }
+        if (ids && id && *id && !(probe->entry_hidden && probe->entry_hidden(entry))) {
+            /* Room for the terminator. */
+            if (listed_count + 1 >= listed_capacity) {
+                listed_capacity = listed_capacity ? listed_capacity * 2 : 64;
+                listed = xrealloc(listed, listed_capacity * sizeof(*listed));
+            }
+            listed[listed_count++] = xstrdup(id);
+        }
+        json_decref(entry);
+        if (found && !ids)
+            break;
+    }
+
+    if (!ids)
+        return;
+    if (listed)
+        listed[listed_count] = NULL;
+    /* A partial listing would pass for the whole one. */
+    if (scanned < 0)
+        string_array_free(listed);
+    else
+        *ids = listed;
 }
 
 void model_probe_clear(struct model_probe *probe)

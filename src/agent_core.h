@@ -87,9 +87,9 @@ void agent_session_init(struct agent_session *session, struct provider *provider
  * tells the model the tool exists but does not decide what runs when it is called. */
 int agent_session_add_tool(struct agent_session *session, const struct tool_def *def);
 
-/* Re-resolve request settings for `provider` without changing history or tools. Returns -1 when
- * the provider has no configured or default model; the existing settings remain unchanged. */
-int agent_session_reconfigure(struct agent_session *session, struct provider *provider);
+/* Re-resolve request settings for `provider` without changing history or tools. Like startup, a
+ * provider with no configured or default model leaves the model unset until one is chosen. */
+void agent_session_reconfigure(struct agent_session *session, struct provider *provider);
 
 /* Wait for model metadata and update cached effort. Returns true if it changed. `previous`, when
  * non-NULL, receives ownership of the replaced value; otherwise the old value is freed. */

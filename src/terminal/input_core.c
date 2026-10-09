@@ -7,6 +7,7 @@
 
 #include "xalloc.h"
 #include "terminal/input.h"
+#include "text/display_safe.h"
 #include "text/utf8.h"
 
 /* ---------------- public API: alloc / free ---------------- */
@@ -31,8 +32,34 @@ void input_free(struct input *in)
     free(in->hist);
     free(in->persist_path);
     free(in->preseed);
+    free(in->empty_placeholder);
     free(in->candidates);
     free(in);
+}
+
+static char *unsanitized_ghost_text(const struct input *in)
+{
+    if (in->cursor != in->len)
+        return NULL;
+    if (in->exit_armed && in->len == 0)
+        return xstrdup("ctrl+c again to exit");
+    if (in->candidates)
+        return xstrdup(in->candidates);
+    if (in->len == 0 && in->empty_placeholder)
+        return xstrdup(in->empty_placeholder);
+    if (in->hint_fn)
+        return in->hint_fn(in->buf, in->hint_user);
+    return NULL;
+}
+
+char *input_core_ghost_text(const struct input *in)
+{
+    char *ghost = unsanitized_ghost_text(in);
+    if (!ghost)
+        return NULL;
+    char *safe_ghost = sanitize_for_display(ghost, strlen(ghost));
+    free(ghost);
+    return safe_ghost;
 }
 
 int input_core_prompt_width(const char *prompt)
@@ -204,29 +231,28 @@ void input_core_kill_to_bol(struct input *in)
     buf_erase(in, b, in->cursor - b);
 }
 
-/* Ctrl-W uses whitespace boundaries; Meta word operations use readline's alphanumeric
- * boundaries. Bytes >= 0x80 count as word bytes so neither scan splits a UTF-8 sequence. */
-static size_t scan_ws_left(const char *buf, size_t i)
+size_t input_core_word_start(const char *text, size_t end)
 {
-    while (i > 0 && isspace((unsigned char)buf[i - 1]))
-        i--;
-    while (i > 0 && !isspace((unsigned char)buf[i - 1]))
-        i--;
-    return i;
+    while (end > 0 && isspace((unsigned char)text[end - 1]))
+        end--;
+    while (end > 0 && !isspace((unsigned char)text[end - 1]))
+        end--;
+    return end;
 }
 
+/* Bytes >= 0x80 count as word bytes so alnum scans never split a UTF-8 sequence. */
 static int is_word_byte(unsigned char c)
 {
     return c >= 0x80 || isalnum(c);
 }
 
-static size_t scan_alnum_left(const char *buf, size_t i)
+size_t input_core_alnum_word_start(const char *text, size_t end)
 {
-    while (i > 0 && !is_word_byte((unsigned char)buf[i - 1]))
-        i--;
-    while (i > 0 && is_word_byte((unsigned char)buf[i - 1]))
-        i--;
-    return i;
+    while (end > 0 && !is_word_byte((unsigned char)text[end - 1]))
+        end--;
+    while (end > 0 && is_word_byte((unsigned char)text[end - 1]))
+        end--;
+    return end;
 }
 
 static size_t scan_alnum_right(const char *buf, size_t len, size_t i)
@@ -240,7 +266,7 @@ static size_t scan_alnum_right(const char *buf, size_t len, size_t i)
 
 void input_core_move_word_left(struct input *in)
 {
-    in->cursor = scan_alnum_left(in->buf, in->cursor);
+    in->cursor = input_core_alnum_word_start(in->buf, in->cursor);
 }
 
 void input_core_move_word_right(struct input *in)
@@ -250,13 +276,13 @@ void input_core_move_word_right(struct input *in)
 
 void input_core_kill_word_back(struct input *in)
 {
-    size_t i = scan_ws_left(in->buf, in->cursor);
+    size_t i = input_core_word_start(in->buf, in->cursor);
     buf_erase(in, i, in->cursor - i);
 }
 
 void input_core_kill_word_back_alnum(struct input *in)
 {
-    size_t i = scan_alnum_left(in->buf, in->cursor);
+    size_t i = input_core_alnum_word_start(in->buf, in->cursor);
     buf_erase(in, i, in->cursor - i);
 }
 

@@ -4,6 +4,7 @@
 # dropped, so a clean phase emits only its compact confirmation.
 # Usage: [BUILD_DIR=dir] scripts/check.sh build|lint
 #        [BUILD_DIR=dir] scripts/check.sh test [name...]
+# LLVM_VERSION (default 20) picks Debian/Ubuntu's side-by-side LLVM for lint.
 
 set -eu
 
@@ -25,8 +26,17 @@ else
     build_suffix=" ($BUILD_DIR)"
 fi
 
-# Homebrew's keg-only LLVM tools are not linked into PATH on macOS.
+llvm_version_set=${LLVM_VERSION:+1}
+LLVM_VERSION=${LLVM_VERSION:-20}
+
+# Prefer Debian/Ubuntu's side-by-side LLVM_VERSION: the unversioned default can predate the range
+# .clang-tidy stays clean for (Ubuntu 24.04 ships 18). Homebrew's keg-only LLVM tools are not
+# linked into PATH on macOS.
 llvm_tool() {
+    if [ -x "/usr/lib/llvm-$LLVM_VERSION/bin/$1" ]; then
+        printf '%s\n' "/usr/lib/llvm-$LLVM_VERSION/bin/$1"
+        return
+    fi
     if command -v "$1" >/dev/null 2>&1; then
         command -v "$1"
         return
@@ -133,6 +143,9 @@ build_project() {
 }
 
 lint_sources() {
+    if [ -n "$llvm_version_set" ] && [ ! -d "/usr/lib/llvm-$LLVM_VERSION/bin" ]; then
+        printf 'warning: no /usr/lib/llvm-%s; using clang tools from PATH\n' "$LLVM_VERSION" >&2
+    fi
     clang_format=$(llvm_tool clang-format)
     clang_tidy=$(llvm_tool clang-tidy)
     run_clang_tidy=$(llvm_tool run-clang-tidy)

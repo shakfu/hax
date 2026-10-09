@@ -79,7 +79,7 @@ char *truncate_for_display(const char *str, size_t max_cells)
     return result;
 }
 
-/* Unlike wrapping, ellipsis truncation may return zero rather than exceed max_cells. */
+/* May return zero rather than exceed max_cells; see forced_row_end. */
 static size_t strict_break_pos(const char *str, size_t length, size_t max_cells,
                                size_t *next_offset)
 {
@@ -102,23 +102,26 @@ static size_t strict_break_pos(const char *str, size_t length, size_t max_cells,
     }
 
     if (offset >= length) {
-        if (next_offset)
-            *next_offset = length;
+        *next_offset = length;
         return length;
     }
     if (last_space == SIZE_MAX) {
         size_t row_end = advance_cells(str, length, max_cells);
-        if (next_offset)
-            *next_offset = row_end;
+        *next_offset = row_end;
         return row_end;
     }
 
     size_t row_end = last_space;
     while (row_end > 0 && str[row_end - 1] == ' ')
         row_end--;
-    if (next_offset)
-        *next_offset = last_space + 1;
+    *next_offset = last_space + 1;
     return row_end;
+}
+
+/* Taking one oversized codepoint preserves forward progress where a row cannot be empty. */
+static size_t forced_row_end(const char *str, size_t length)
+{
+    return skip_zero_width(str, length, utf8_next(str, length, 0));
 }
 
 size_t wrap_break_pos(const char *str, size_t length, size_t max_cells, size_t *next_offset)
@@ -127,8 +130,7 @@ size_t wrap_break_pos(const char *str, size_t length, size_t max_cells, size_t *
     size_t next = 0;
     size_t row_end = strict_break_pos(str, length, max_cells, &next);
     if (row_end == 0 && next == 0 && length > 0) {
-        /* Taking one oversized codepoint preserves forward progress. */
-        row_end = skip_zero_width(str, length, utf8_next(str, length, 0));
+        row_end = forced_row_end(str, length);
         next = row_end;
     }
     if (next_offset)
@@ -147,6 +149,72 @@ size_t wrap_row_bytes(const char *str, size_t max_cells, size_t *separator_bytes
         next_offset++;
     *separator_bytes = next_offset - row_bytes;
     return row_bytes;
+}
+
+/* Reflowed rows give up an intact token only when keeping it would leave more than this many cells,
+ * or half a narrow row, unused: a long pattern or path is more legible split than pushed out of
+ * view. */
+#define REFLOW_MAX_SLACK_CELLS 16
+
+/* Each mark ends a unit of a command-line token: a regex alternative, path component, list item,
+ * command, or option name. */
+static int is_reflow_break_mark(char c)
+{
+    return c != '\0' && strchr("|/,;&=", c) != NULL;
+}
+
+/* Choose one reflowed row's end: a space, else a mark, each only within the slack limit, else the
+ * last codepoint boundary that fits. May return zero rather than exceed max_cells. */
+static size_t reflow_break_pos(const char *str, size_t length, size_t max_cells,
+                               size_t *next_offset)
+{
+    size_t offset = 0;
+    size_t cells = 0;
+    size_t space = SIZE_MAX;
+    size_t space_cells = 0;
+    size_t mark_break = SIZE_MAX;
+    size_t mark_break_cells = 0;
+    int after_mark = 0;
+    while (offset < length) {
+        size_t codepoint_bytes;
+        size_t next_cells = codepoint_cells_at(str, length, offset, &codepoint_bytes);
+        /* A mark break lands before the next visible non-mark codepoint, keeping runs such as "&&"
+         * whole and combining marks with their mark. */
+        if (str[offset] == ' ') {
+            space = offset;
+            space_cells = cells;
+        } else if (after_mark && next_cells > 0 && !is_reflow_break_mark(str[offset])) {
+            mark_break = offset;
+            mark_break_cells = cells;
+        }
+        if (next_cells > 0)
+            after_mark = is_reflow_break_mark(str[offset]);
+        if (cells + next_cells > max_cells)
+            break;
+        cells += next_cells;
+        offset += codepoint_bytes;
+    }
+    if (offset >= length) {
+        *next_offset = length;
+        return length;
+    }
+
+    size_t max_slack = max_cells / 2;
+    if (max_slack > REFLOW_MAX_SLACK_CELLS)
+        max_slack = REFLOW_MAX_SLACK_CELLS;
+    if (space != SIZE_MAX && max_cells - space_cells <= max_slack) {
+        size_t row_end = space;
+        while (row_end > 0 && str[row_end - 1] == ' ')
+            row_end--;
+        *next_offset = space + 1;
+        return row_end;
+    }
+    if (mark_break != SIZE_MAX && max_cells - mark_break_cells <= max_slack) {
+        *next_offset = mark_break;
+        return mark_break;
+    }
+    *next_offset = offset;
+    return offset;
 }
 
 char *reflow_for_display(const char *str, int first_row_cells, int other_row_cells, int max_rows,
@@ -193,8 +261,9 @@ char *reflow_for_display(const char *str, int first_row_cells, int other_row_cel
                 buf_append(&result, str + offset, row_bytes);
                 break;
             }
-            size_t row_bytes =
-                strict_break_pos(str + offset, remaining, (size_t)before_ellipsis_cells, NULL);
+            size_t next_offset;
+            size_t row_bytes = reflow_break_pos(str + offset, remaining,
+                                                (size_t)before_ellipsis_cells, &next_offset);
             buf_append(&result, str + offset, row_bytes);
             buf_append(&result, "...", 3);
             break;
@@ -202,71 +271,14 @@ char *reflow_for_display(const char *str, int first_row_cells, int other_row_cel
 
         size_t next_offset;
         size_t row_bytes =
-            wrap_break_pos(str + offset, remaining, (size_t)content_cells, &next_offset);
+            reflow_break_pos(str + offset, remaining, (size_t)content_cells, &next_offset);
+        if (next_offset == 0) {
+            row_bytes = forced_row_end(str + offset, remaining);
+            next_offset = row_bytes;
+        }
         buf_append(&result, str + offset, row_bytes);
         buf_append(&result, "\n", 1);
         offset += next_offset;
     }
     return buf_steal(&result);
-}
-
-/* Bounds invisible byte growth while preserving ordinary combining sequences. */
-#define MAX_ZERO_WIDTH_PER_BASE 8
-
-char *flatten_for_display(const char *str)
-{
-    if (!str)
-        return xstrdup("");
-
-    size_t length = strlen(str);
-    /* Every transformation preserves, removes, or replaces input bytes with one byte. */
-    char *result = xmalloc(length + 1);
-    size_t result_length = 0;
-    int previous_was_space = 1;
-    int zero_width_run = 0;
-    size_t offset = 0;
-    while (offset < length) {
-        unsigned char byte = (unsigned char)str[offset];
-        if (byte < 0x80) {
-            int is_space = byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r' ||
-                           byte < 0x20 || byte == 0x7f;
-            if (is_space) {
-                if (!previous_was_space) {
-                    result[result_length++] = ' ';
-                    previous_was_space = 1;
-                }
-            } else {
-                result[result_length++] = (char)byte;
-                previous_was_space = 0;
-            }
-            zero_width_run = 0;
-            offset++;
-            continue;
-        }
-
-        size_t codepoint_bytes;
-        int cells = utf8_codepoint_cells(str, length, offset, &codepoint_bytes);
-        if (cells < 0) {
-            result[result_length++] = '?';
-            zero_width_run = 0;
-            previous_was_space = 0;
-        } else if (cells == 0) {
-            if (zero_width_run < MAX_ZERO_WIDTH_PER_BASE) {
-                memcpy(result + result_length, str + offset, codepoint_bytes);
-                result_length += codepoint_bytes;
-                zero_width_run++;
-            }
-        } else {
-            memcpy(result + result_length, str + offset, codepoint_bytes);
-            result_length += codepoint_bytes;
-            zero_width_run = 0;
-            previous_was_space = 0;
-        }
-        offset += codepoint_bytes;
-    }
-
-    if (result_length > 0 && result[result_length - 1] == ' ')
-        result_length--;
-    result[result_length] = '\0';
-    return result;
 }

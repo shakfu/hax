@@ -2,15 +2,12 @@
 #ifndef HAX_TESTS_HARNESS_H
 #define HAX_TESTS_HARNESS_H
 
-#include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
-/* Sanitizer detection, for tests that must widen or skip timing-sensitive
- * checks that sanitizer interceptors (notably fork) slow by orders of
- * magnitude. Clang reports via __has_feature, gcc via __SANITIZE_*__. */
+/* Sanitizer detection, for tests that must widen or skip timing-sensitive checks that sanitizer
+ * interceptors (notably fork) slow by orders of magnitude. Clang reports via __has_feature, gcc via
+ * __SANITIZE_*__. */
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
 #define T_TSAN 1
@@ -26,10 +23,10 @@
 #define T_ASAN 1
 #endif
 
-/* Each test binary is a single translation unit, so a `static` counter
- * here gives us exactly one per binary with no link-time coordination. */
-static int t_failures = 0;
-static int t_skips = 0;
+/* This process's tallies; T_REPORT turns them into the exit status. A forked child inherits its
+ * parent's counts. */
+extern int t_failures;
+extern int t_skips;
 
 #define FAIL(fmt, ...)                                                                             \
     do {                                                                                           \
@@ -57,8 +54,8 @@ static int t_skips = 0;
             FAIL("bytes mismatch: want %zu, got %zu", _wl, _gl);                                   \
     } while (0)
 
-/* Bail out of the current (void) test function, recording why. The note
- * lands in the captured test log, not the console, on passing runs. */
+/* Bail out of the current (void) test function, recording why. On passing runs the note lands in
+ * the captured test log, not the console. */
 #define T_SKIP(why)                                                                                \
     do {                                                                                           \
         fprintf(stderr, "%s:%d: skip: %s\n", __FILE__, __LINE__, why);                             \
@@ -66,135 +63,7 @@ static int t_skips = 0;
         return;                                                                                    \
     } while (0)
 
-/* Temp dirs handed out by t_tempdir(), removed recursively at process
- * exit. Ownership is per-pid: the owner check keeps forked children that
- * never call t_tempdir() from destroying the parent's dirs, and entries
- * below t_tmpdir_first were created by an ancestor (which removes them
- * itself), so a child that does call it cleans only what it created. */
-static char **t_tmpdirs;
-static size_t t_n_tmpdirs;
-static size_t t_tmpdir_first; /* first entry owned by this process */
-static pid_t t_tmpdir_owner;
-
-static inline void t_tempdir_cleanup(void)
-{
-    if (getpid() != t_tmpdir_owner)
-        return;
-    for (size_t i = 0; i < t_n_tmpdirs; i++) {
-        if (i >= t_tmpdir_first) {
-            /* Absolute paths: cleanup must not depend on whatever PATH
-             * the test exited with. Restore permissions so fixtures
-             * locked down to provoke EACCES don't defeat removal — but
-             * on directories only (rm needs search/write there; file
-             * modes are irrelevant to unlink), so a hard link inside
-             * the fixture can't rewrite an external inode's mode.
-             * `-exec \;` (not `+`) chmods each dir at visit time,
-             * before find descends into it. */
-            char cmd[192];
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/bin/find '%s' -type d -exec /bin/chmod u+rwx {} \\; 2>/dev/null; "
-                     "/bin/rm -rf '%s'",
-                     t_tmpdirs[i], t_tmpdirs[i]);
-            if (system(cmd) != 0)
-                fprintf(stderr, "t_tempdir: failed to remove %s\n", t_tmpdirs[i]);
-        }
-        /* Inherited copies are freed only here, at exit — mid-run they
-         * must stay intact, tests hold pointers into them. */
-        free(t_tmpdirs[i]);
-    }
-    free(t_tmpdirs);
-    t_tmpdirs = NULL;
-    t_n_tmpdirs = 0;
-    t_tmpdir_first = 0;
-}
-
-/* Create a throwaway directory under /tmp. The returned path is canonical:
- * on macOS /tmp is a symlink to /private/tmp, so a fixture that chdir()s
- * here and code under test that calls getcwd() would otherwise disagree on
- * the same directory's name. The harness owns the returned path and removes
- * the whole tree at exit; callers must not free, remove, or
- * outlive-reference it in spawned processes. Aborts on failure: no test
- * proceeds meaningfully without its fixture dir. */
-static inline char *t_tempdir(void)
-{
-    if (t_tmpdir_owner != getpid()) {
-        /* First call in this process. In a fork child the inherited
-         * entries stay intact (the parent removes those dirs); everything
-         * from here on is this process's to remove. Registering the
-         * handler again is harmless: handlers run LIFO, so the inherited
-         * registration sees an already-emptied list. */
-        t_tmpdir_first = t_n_tmpdirs;
-        t_tmpdir_owner = getpid();
-        atexit(t_tempdir_cleanup);
-    }
-    char *dir = strdup("/tmp/hax_test_XXXXXX");
-    if (!dir || !mkdtemp(dir)) {
-        fprintf(stderr, "t_tempdir: %s\n", strerror(errno));
-        abort();
-    }
-    /* Canonical or nothing: quietly handing back the /tmp spelling would
-     * resurface as a puzzling assertion in whichever test compares this
-     * against a getcwd, far from the actual cause. */
-    char *real = realpath(dir, NULL);
-    if (!real) {
-        fprintf(stderr, "t_tempdir: realpath(%s): %s\n", dir, strerror(errno));
-        abort();
-    }
-    free(dir);
-    dir = real;
-    char **grown = realloc(t_tmpdirs, (t_n_tmpdirs + 1) * sizeof(*grown));
-    if (!grown)
-        abort();
-    t_tmpdirs = grown;
-    t_tmpdirs[t_n_tmpdirs++] = dir;
-    return dir;
-}
-
-/* Replace PATH with `value` (NULL unsets it) and return the previous value for t_path_restore,
- * NULL when it was unset. Aborts on allocation failure like t_tempdir. */
-static inline char *t_path_replace(const char *value)
-{
-    const char *current = getenv("PATH");
-    char *saved = NULL;
-    if (current) {
-        saved = strdup(current);
-        if (!saved)
-            abort();
-    }
-    if (value)
-        setenv("PATH", value, 1);
-    else
-        unsetenv("PATH");
-    return saved;
-}
-
-/* Put `dir` ahead of the current PATH entries, so a stub there shadows the real command while
- * the utilities the stub runs stay reachable. Returns the previous value for t_path_restore. */
-static inline char *t_path_prepend(const char *dir)
-{
-    const char *current = getenv("PATH");
-    if (!current || !*current)
-        return t_path_replace(dir);
-    size_t len = strlen(dir) + 1 + strlen(current) + 1;
-    char *combined = malloc(len);
-    if (!combined)
-        abort();
-    snprintf(combined, len, "%s:%s", dir, current);
-    char *saved = t_path_replace(combined);
-    free(combined);
-    return saved;
-}
-
-/* Restore PATH from t_path_replace or t_path_prepend and release the saved copy. */
-static inline void t_path_restore(char *saved)
-{
-    if (saved)
-        setenv("PATH", saved, 1);
-    else
-        unsetenv("PATH");
-    free(saved);
-}
-
+/* End main(), exiting nonzero if anything failed. */
 #define T_REPORT()                                                                                 \
     do {                                                                                           \
         if (t_skips)                                                                               \
@@ -203,5 +72,22 @@ static inline void t_path_restore(char *saved)
             fprintf(stderr, "%d failures\n", t_failures);                                          \
         return t_failures != 0;                                                                    \
     } while (0)
+
+/* Create a scratch directory under /tmp and return its canonical path: on macOS, /tmp is a symlink
+ * that getcwd() resolves. The harness owns the path and removes the tree when the creating process
+ * exits, even if a fixture locked it down; callers must not free or remove it, nor leave spawned
+ * processes using it. Aborts on failure. */
+char *t_tempdir(void);
+
+/* Replace PATH with `value` (NULL unsets it) and return the previous value for t_path_restore, NULL
+ * when it was unset. Aborts on allocation failure. */
+char *t_path_replace(const char *value);
+
+/* Put `dir` ahead of the current PATH entries, so a stub there shadows the real command while the
+ * utilities the stub runs stay reachable. Returns the previous value for t_path_restore. */
+char *t_path_prepend(const char *dir);
+
+/* Restore PATH from t_path_replace or t_path_prepend and release the saved copy. */
+void t_path_restore(char *saved);
 
 #endif /* HAX_TESTS_HARNESS_H */

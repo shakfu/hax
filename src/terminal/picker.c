@@ -19,6 +19,7 @@
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
+#include "text/display_safe.h"
 #include "text/utf8.h"
 #include "text/width.h"
 
@@ -397,7 +398,9 @@ static void render_title(struct frame *frame, const char *title, int line_count)
         } else {
             size_t separator_bytes;
             size_t line_bytes = wrap_row_bytes(remaining, (size_t)frame->width, &separator_bytes);
-            picker_core_append_sanitized(&frame->row, remaining, line_bytes);
+            char *safe_line = sanitize_for_display(remaining, line_bytes);
+            buf_append_str(&frame->row, safe_line);
+            free(safe_line);
             remaining += line_bytes + separator_bytes;
         }
         buf_append_str(&frame->row, ANSI_BOLD_OFF);
@@ -439,7 +442,9 @@ static void render_footer(struct frame *frame, const struct picker *picker,
             } else {
                 size_t separator_bytes;
                 size_t line_bytes = wrap_row_bytes(remaining, (size_t)text_cells, &separator_bytes);
-                picker_core_append_sanitized(&frame->row, remaining, line_bytes);
+                char *safe_line = sanitize_for_display(remaining, line_bytes);
+                buf_append_str(&frame->row, safe_line);
+                free(safe_line);
                 remaining += line_bytes + separator_bytes;
             }
             buf_append_str(&frame->row, ANSI_BOLD_OFF);
@@ -573,7 +578,7 @@ enum picker_input_result {
     PICKER_INPUT_CANCEL,
 };
 
-static void apply_navigation_action(struct picker_core *core, enum input_action action)
+static void apply_escape_action(struct picker_core *core, enum input_action action)
 {
     switch (action) {
     case INPUT_ACTION_HISTORY_PREV:
@@ -594,6 +599,11 @@ static void apply_navigation_action(struct picker_core *core, enum input_action 
     case INPUT_ACTION_PAGE_DOWN:
         picker_core_page_selection(core, PICKER_DIRECTION_NEXT);
         break;
+    case INPUT_ACTION_KILL_WORD_BACK_ALNUM: {
+        size_t word_start = input_core_alnum_word_start(core->query.data, core->query.len);
+        picker_core_truncate_query(core, word_start);
+        break;
+    }
     default:
         break;
     }
@@ -603,27 +613,28 @@ static enum picker_input_result process_input_byte(struct picker_core *core, uns
 {
     if (byte == 0x03 || byte == 0x07) /* Ctrl-C / Ctrl-G */
         return PICKER_INPUT_CANCEL;
-    if (byte == 0x0d || byte == 0x0a) /* Enter / LF */
+    /* Raw mode clears ICRNL, so Enter arrives as CR and LF is Ctrl-J, which moves down as in
+     * fzf. */
+    if (byte == 0x0d)
         return core->match_count ? PICKER_INPUT_ACCEPT : PICKER_INPUT_CONTINUE;
     if (byte == 0x7f || byte == 0x08) { /* Backspace */
-        if (core->query.len) {
-            core->query.len = utf8_prev(core->query.data, core->query.len);
-            core->query.data[core->query.len] = '\0';
-            picker_core_update_matches(core);
-        }
+        picker_core_truncate_query(core, utf8_prev(core->query.data, core->query.len));
         return PICKER_INPUT_CONTINUE;
     }
     if (byte == 0x15) { /* Ctrl-U */
-        if (core->query.len) {
-            core->query.len = 0;
-            core->query.data[0] = '\0';
-            picker_core_update_matches(core);
-        }
+        picker_core_truncate_query(core, 0);
         return PICKER_INPUT_CONTINUE;
     }
-    if (byte == 0x0e || byte == 0x10) { /* Ctrl-N / Ctrl-P */
-        picker_core_move_selection(core, byte == 0x0e ? PICKER_DIRECTION_NEXT
-                                                      : PICKER_DIRECTION_PREVIOUS);
+    if (byte == 0x17) { /* Ctrl-W */
+        picker_core_truncate_query(core, input_core_word_start(core->query.data, core->query.len));
+        return PICKER_INPUT_CONTINUE;
+    }
+    if (byte == 0x0e || byte == 0x0a) { /* Ctrl-N / Ctrl-J */
+        picker_core_move_selection(core, PICKER_DIRECTION_NEXT);
+        return PICKER_INPUT_CONTINUE;
+    }
+    if (byte == 0x10 || byte == 0x0b) { /* Ctrl-P / Ctrl-K */
+        picker_core_move_selection(core, PICKER_DIRECTION_PREVIOUS);
         return PICKER_INPUT_CONTINUE;
     }
     if (byte == 0x1b) {
@@ -632,7 +643,7 @@ static enum picker_input_result process_input_byte(struct picker_core *core, uns
             return PICKER_INPUT_CANCEL;
         struct escape_reader reader = {.pending_byte = next_byte};
         enum input_action action = input_core_decode_escape(read_escape_byte, &reader);
-        apply_navigation_action(core, action);
+        apply_escape_action(core, action);
         return PICKER_INPUT_CONTINUE;
     }
     if (byte < 0x20)

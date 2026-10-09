@@ -13,6 +13,7 @@
 struct captured_event {
     enum stream_event_kind kind;
     char *text;
+    const char *field; /* static storage, per the event contract */
     char *id;
     char *name;
     char *args_delta;
@@ -67,6 +68,7 @@ static int capture_event(const struct stream_event *event, void *user)
         break;
     case EV_REASONING_DELTA:
         captured->text = strdup(event->u.reasoning_delta.text ? event->u.reasoning_delta.text : "");
+        captured->field = event->u.reasoning_delta.field;
         break;
     case EV_RETRY:
         break;
@@ -186,6 +188,7 @@ static void test_reasoning_delta_openrouter(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT_STR_EQ(capture.events[0].text, "Hmm");
+    EXPECT_STR_EQ(capture.events[0].field, "reasoning");
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -196,6 +199,7 @@ static void test_reasoning_delta_llamacpp(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_REASONING_DELTA);
     EXPECT_STR_EQ(capture.events[0].text, "Let");
+    EXPECT_STR_EQ(capture.events[0].field, "reasoning_content");
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -822,6 +826,18 @@ static void test_usage_captured_from_trailing_chunk(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
+static void test_usage_deepseek_cache_hits(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    feed_finish(&parser, "stop");
+    chat_events_feed(&parser, "{\"choices\":[],\"usage\":{\"prompt_tokens\":1000,"
+                              "\"completion_tokens\":5,\"prompt_cache_hit_tokens\":900,"
+                              "\"prompt_cache_miss_tokens\":100}}");
+    chat_events_feed(&parser, "[DONE]");
+    EXPECT(capture.events[0].usage.cached_tokens == 900);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
 static void test_usage_without_cached_details(void)
 {
     EVENTS_FIXTURE(capture, parser);
@@ -1029,6 +1045,7 @@ int main(void)
     test_finalize_after_finish_without_sentinel_emits_done();
     test_usage_default_unknown();
     test_usage_captured_from_trailing_chunk();
+    test_usage_deepseek_cache_hits();
     test_usage_without_cached_details();
     test_usage_cost_captured();
     test_response_identity_captured_from_chunks();

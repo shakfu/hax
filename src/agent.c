@@ -39,6 +39,7 @@
 #include "system/tempfiles.h"
 #include "terminal/ansi.h"
 #include "terminal/input.h"
+#include "terminal/input_core.h"
 #include "terminal/interrupt.h"
 #include "terminal/notify.h"
 #include "terminal/theme.h"
@@ -437,7 +438,8 @@ static void show_history_cb(void *user)
     free(output);
 }
 
-int agent_apply_settings(struct agent_state *state, struct provider *provider, int announce)
+void agent_apply_settings(struct agent_state *state, struct provider *provider,
+                          enum apply_announce announce)
 {
     struct agent_session *session = state->session;
     struct provider *previous_provider = state->provider;
@@ -445,15 +447,9 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     /* Snapshot the model before reconfigure overwrites it, to tell a real
      * /model change from a /provider or /effort apply that left it the same. */
     char *previous_model = session->model ? xstrdup(session->model) : NULL;
-    if (agent_session_reconfigure(session, provider) != 0) {
-        free(previous_model);
-        return -1;
-    }
-
-    /* Refresh only after validation so a rolled-back selection never changes the display. */
+    agent_session_reconfigure(session, provider);
     agent_display_refresh(state);
 
-    /* Provider ownership transfers only after session reconfiguration succeeds. */
     if (provider_changed) {
         state->provider = provider;
         if (previous_provider)
@@ -477,16 +473,15 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     session_log_set_meta(state->session_log, agent_provider_log_name(provider), session->model,
                          session->model_label, session->effort, config_str("preset"));
 
-    if (!announce)
-        return 0;
+    if (announce == APPLY_SILENT)
+        return;
 
-    /* Replace a stale startup banner; mid-conversation a banner would imply a reset. */
-    if (session->n_items == 0) {
+    if (announce == APPLY_BANNER_WHEN_EMPTY && session->n_items == 0) {
         render_open_block(state->render);
         banner_print(provider, session);
         disp_sync_external_line(&state->render->disp); /* banner bypasses disp */
         fflush(stdout);
-        return 0;
+        return;
     }
 
     /* Selection notices are display-only; the model cannot act on them. */
@@ -494,11 +489,15 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     /* Include the stance because a preset can change more than provider and model. */
     const char *preset = config_str("preset");
     char *stance = (preset && *preset) ? xasprintf("[%s] ", preset) : xstrdup("");
-    char *label = session->effort ? xasprintf("switched to %s%s · %s · %s", stance,
-                                              provider->name ? provider->name : "?", model_label,
-                                              session->effort)
-                                  : xasprintf("switched to %s%s · %s", stance,
-                                              provider->name ? provider->name : "?", model_label);
+    const char *provider_name = provider->name ? provider->name : "?";
+    char *label;
+    if (!model_label)
+        label = xasprintf("switched to %s%s · no model — use /model", stance, provider_name);
+    else if (session->effort)
+        label = xasprintf("switched to %s%s · %s · %s", stance, provider_name, model_label,
+                          session->effort);
+    else
+        label = xasprintf("switched to %s%s · %s", stance, provider_name, model_label);
     free(stance);
 
     render_open_block(state->render);
@@ -508,7 +507,6 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     disp_putc(&state->render->disp, '\n');
     disp_flush(&state->render->disp);
     free(label);
-    return 0;
 }
 
 /* Swapping or cutting history invalidates both resumable state and compaction debt tied to the
@@ -567,35 +565,35 @@ void agent_new_conversation(struct agent_state *state)
     banner_print(state->provider, state->session);
 }
 
-/* Redraw with every prompt so slash-command output cannot hide the empty-send meaning. */
-static void render_resume_hint(struct render_ctx *render, enum agent_resume_reason reason)
+/* A pause or turn limit leaves no trace in the conversation, so only the prompt names it; an
+ * interruption or provider error is already explained above. The prompt carries the empty-send
+ * meaning, so slash-command output cannot scroll it away. */
+static const char *resume_placeholder(enum agent_resume_reason reason)
 {
-    const char *status;
-    const char *action = "enter to continue";
     switch (reason) {
+    case AGENT_RESUME_NONE:
+        return NULL;
     case AGENT_RESUME_PAUSED:
-        status = "paused";
-        break;
+        return "paused — enter to continue";
     case AGENT_RESUME_MAX_TURNS:
-        status = "max turns reached";
-        break;
+        return "max turns reached — enter to continue";
     case AGENT_RESUME_INTERRUPTED:
-        status = "interrupted";
-        break;
+        return "enter to continue";
     case AGENT_RESUME_ERROR:
-        status = "provider error";
-        action = "enter to retry";
-        break;
-    default:
-        return;
+        return "enter to retry";
     }
+    return NULL;
+}
+
+/* Ends every hard-interrupted user turn: a tool's own marker covers only its call, and collapsed or
+ * undispatched calls draw none. */
+static void render_interrupt_marker(struct render_ctx *render)
+{
+    render_open_block(render);
     disp_write_ansi(&render->disp, ANSI_DIM);
-    disp_printf(&render->disp, "[%s — %s]", status, action);
+    disp_printf(&render->disp, "%s", INTERRUPT_MARKER);
     disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
-    disp_putc(&render->disp, '\n'); /* one blank line between hint and prompt */
-    /* Commit newlines before the editor erases and repaints the prompt row. */
-    disp_commit_newlines(&render->disp);
     disp_flush(&render->disp);
 }
 
@@ -1141,6 +1139,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     input_history_open_tty(input, history_path, recording_enabled);
     free(history_path);
     free(cwd);
+    struct input_completer slash_completer;
+    slash_completer_init(&slash_completer, &state);
     input_add_completer(input, &slash_completer);
     input_add_completer(input, &file_mention_completer);
     input_set_hint(input, slash_hint_cb, NULL);
@@ -1157,12 +1157,9 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
     for (;;) {
         disp_block_separator(&render.disp);
-        /* Redraw the resumable hint so slash output cannot hide the empty-send meaning. */
-        if (state.resume_reason != AGENT_RESUME_NONE)
-            render_resume_hint(&render, state.resume_reason);
         /* Only a resumable turn gives an empty send a meaning; otherwise
          * the editor keeps swallowing bare Enter. */
-        input_set_empty_submit(input, state.resume_reason != AGENT_RESUME_NONE);
+        input_set_empty_submit(input, resume_placeholder(state.resume_reason));
         cursor_show();
         /* Rebuilt each iteration so a runtime theme change (/config theme …)
          * recolors the prompt instead of keeping the startup theme's bytes. */
@@ -1178,8 +1175,10 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             continue;
         }
 
-        /* Slash handlers may override this when they drive the display themselves. */
-        disp_sync_external_line(&render.disp);
+        /* An empty send erased its prompt row, so the separator above it still stands. Slash
+         * handlers may override this when they drive the display themselves. */
+        if (*line)
+            disp_sync_external_line(&render.disp);
         if (handle_slash_input(input, &state, line)) {
             current_provider = state.provider;
             free(line);
@@ -1241,8 +1240,6 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             }
         }
         free(line);
-        /* input_readline left the cursor at column 0 of a fresh row. */
-        disp_sync_external_line(&render.disp);
 
         /* A background metadata probe may refine effort before the first request; announce the
          * value that will actually be sent. */
@@ -1322,17 +1319,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         /* Close active rendering before post-turn output can emit terminal control sequences. */
         render_set_mode(&render, RENDER_IDLE);
 
-        /* History and the resume hint already expose interruptions; another live marker duplicates
-         * them. */
-        if (user_turn_complete && user_pressed_escape) {
-            /* Confirm an Esc that arrived after the last pause point. */
-            render_open_block(&render);
-            disp_write_ansi(&render.disp, ANSI_DIM);
-            disp_printf(&render.disp, "[finished before pause]");
-            disp_write_ansi(&render.disp, ANSI_RESET);
-            disp_putc(&render.disp, '\n');
-            disp_flush(&render.disp);
-        }
+        if (state.resume_reason == AGENT_RESUME_INTERRUPTED)
+            render_interrupt_marker(&render);
 
         /* Time worked counts errored/interrupted turns too — the wall time
          * was spent either way, and /session's total should reflect it. */

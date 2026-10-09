@@ -72,7 +72,7 @@ Conversation records, in order. `kind` is one of:
 | `assistant` | Assistant message text. |
 | `tool_call` | A requested tool invocation: `call_id`, `tool_name`, and `arguments` (raw JSON as a string). |
 | `tool_result` | The paired result: `call_id`, `output`, and optionally `images`. |
-| `reasoning` | Provider reasoning state (`reasoning_json`/`reasoning_text`) with its `provider`/`model`. |
+| `reasoning` | Provider reasoning state (`reasoning_json`/`reasoning_text`) with its `provider`/`model`; `reasoning_field` names the Chat Completions field the text streamed in. |
 | `turn_boundary` | Separates provider round-trips ("turns"). The first one precedes the user prompt. |
 | `turn_usage` | Usage footer for one round-trip; see below. |
 
@@ -127,6 +127,5 @@ hax --json "run the tests and fix the first failure" |
     jq 'select(.kind == "tool_call" or .type == "result")'
 ```
 
-The stream can be tried without a provider — from a scratch directory, since the scripted tool
-call writes `out.txt` into the cwd:
-`HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/tool_roundtrip.txt hax --json go`.
+The stream can be tried without a provider, from the repository root:
+`HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax --json go`.

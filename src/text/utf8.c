@@ -64,6 +64,7 @@ int utf8_is_valid(const char *bytes, size_t length)
     return 1;
 }
 
+/* Not utf8_encode: libjansson.a exports that name, so the static release link would clash. */
 size_t utf8_encode_codepoint(uint32_t codepoint, char out[4])
 {
     if ((codepoint >= 0xD800 && codepoint <= 0xDFFF) || codepoint > 0x10FFFF)

@@ -22,7 +22,7 @@
 - **Inspectable** — See exactly what was sent to the model and what it replied in a usable
   transcript view (Ctrl+T). Optionally collect a detailed wire protocol trace.
 - **Broad provider support** — OpenAI (+compatible), Anthropic (+compatible), Codex (via a ChatGPT
-  subscription), OpenRouter, OpenCode Zen/Go, llama.cpp, and custom endpoints.
+  subscription), OpenRouter, OpenCode Zen/Go, DeepSeek, llama.cpp, Ollama, and custom endpoints.
 - **Well-behaved Unix tool** — XDG paths, clean stdout in `-p` one-shot mode with resume hints on
   stderr, plain-text config and session files, composition via subprocesses instead of plugins.
 
@@ -72,8 +72,9 @@ make install              # optional; may prompt for sudo
 completion when available. On other platforms, install those packages by hand and run `make`.
 
 For hacking on hax, `make symlink` links the freshly built binary into `~/.local/bin` so it
-stays on `PATH` across rebuilds. `make lint` additionally needs `clang-format` and
-`clang-tidy` (`scripts/install_deps.sh lint` installs them).
+stays on `PATH` across rebuilds. `make tests` additionally needs `tmux`, which drives the
+interactive scenarios (`scripts/install_deps.sh tests` installs it), and `make lint` needs
+`clang-format` and `clang-tidy` (`scripts/install_deps.sh lint` installs them).
 
 The examples below use `hax` as if it is on `PATH`; after a plain build, use `./build/hax`.
 
@@ -89,6 +90,7 @@ and choose a model. hax remembers interactive provider, model, and effort select
 | `anthropic` | Set `ANTHROPIC_API_KEY`. |
 | `openrouter` | Set `OPENROUTER_API_KEY`. |
 | `opencode-zen` / `opencode-go` | Set `OPENCODE_API_KEY`. |
+| `deepseek` | Set `DEEPSEEK_API_KEY`. |
 | `llama.cpp` | Run `llama-server`. |
 | `ollama` | Run `ollama serve`. |
 | Compatible or custom endpoint | See [docs/providers.md](./docs/providers.md). |

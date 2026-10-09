@@ -15,6 +15,7 @@
 #include "providers/codex.h"
 #include "providers/codex_auth.h"
 #include "providers/codex_settings.h"
+#include "providers/deepseek.h"
 #include "providers/http_provider.h"
 #include "providers/llamacpp.h"
 #include "providers/mock.h"
@@ -114,6 +115,19 @@ static const struct provider_def DEFS[] = {
         .extra_headers = OPENCODE_HEADERS,
         .query_usage = opencode_go_query_usage,
     },
+    {
+        .id = "deepseek",
+        .base_url = "https://api.deepseek.com",
+        .pinned = 1,
+        .api_key_env = "DEEPSEEK_API_KEY",
+        .catalog_id = "deepseek",
+        /* Thinking mode answers 400 when a tool loop's assistant messages come back without
+         * reasoning_content, even when the model produced none. */
+        .reasoning_roundtrip = "reasoning_content",
+        .reasoning_required = 1,
+        .parse_model = deepseek_parse_model,
+        .query_usage = deepseek_query_usage,
+    },
     /* Local servers. */
     {
         /* Dot-free so the id names its providers.llamacpp config block ('.' is the config key
@@ -121,8 +135,7 @@ static const struct provider_def DEFS[] = {
         .id = "llamacpp",
         .display_name = "llama.cpp",
         .base_url = "http://127.0.0.1:{port}/v1",
-        /* Interleaved-thinking models can leak tool calls into reasoning unless prior
-         * reasoning returns through llama-server's reasoning_content field. */
+        /* llama-server reads prior reasoning only from `reasoning_content`. */
         .reasoning_roundtrip = "reasoning_content",
         /* Prompt-prefill progress for big local prompts; the parser always understands the
          * reply, so only the request member needs declaring. */
@@ -142,13 +155,13 @@ static const struct provider_def DEFS[] = {
         .id = "ollama",
         .base_url = "http://127.0.0.1:{port}/v1",
         .port = 11434,
-        /* ollama caps the runtime context at OLLAMA_CONTEXT_LENGTH (4096 by default) and
-         * ignores a per-request num_ctx on its OpenAI endpoint, so hax can't widen it — a
-         * prompt near that size truncates the reply to "length". Point the user at the only
-         * real fix. */
+        /* The OpenAI endpoint reads prior reasoning only from `reasoning`. */
+        .reasoning_roundtrip = "reasoning",
+        /* The OpenAI endpoint ignores a per-request num_ctx, so hax can't widen the context;
+         * point the user at the server-side settings. */
         .length_hint = "ollama's context window may be too small for the prompt — "
                        "restart `ollama serve` with a larger OLLAMA_CONTEXT_LENGTH "
-                       "(e.g. 16384), or raise num_ctx on the model",
+                       "(e.g. 65536), or raise num_ctx on the model",
         /* ollama's thinking is a per-model toggle/budget, not a categorical effort, and its
          * local models aren't the hosted ones the catalog describes: no effort ladder, no
          * catalog_id. */

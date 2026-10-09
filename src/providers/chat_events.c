@@ -148,17 +148,32 @@ static void handle_text_delta(struct chat_events *parser, const char *text)
     emit_event(parser, &event);
 }
 
+/* In preference order: a server that streams both carries the same text in each. */
+static const char *const REASONING_MEMBERS[] = {"reasoning", "reasoning_content"};
+#define N_REASONING_MEMBERS (sizeof(REASONING_MEMBERS) / sizeof(REASONING_MEMBERS[0]))
+
+const char *chat_reasoning_member(const char *name)
+{
+    for (size_t i = 0; name && i < N_REASONING_MEMBERS; i++)
+        if (strcmp(name, REASONING_MEMBERS[i]) == 0)
+            return REASONING_MEMBERS[i];
+    return NULL;
+}
+
 static void handle_reasoning_delta(struct chat_events *parser, json_t *delta)
 {
-    const char *text = json_string_value(json_object_get(delta, "reasoning"));
-    if (!text)
-        text = json_string_value(json_object_get(delta, "reasoning_content"));
+    const char *text = NULL;
+    const char *field = NULL;
+    for (size_t i = 0; !text && i < N_REASONING_MEMBERS; i++) {
+        field = REASONING_MEMBERS[i];
+        text = json_string_value(json_object_get(delta, field));
+    }
     if (!text || !*text)
         return;
 
     struct stream_event event = {
         .kind = EV_REASONING_DELTA,
-        .u.reasoning_delta = {.text = text},
+        .u.reasoning_delta = {.text = text, .field = field},
     };
     emit_event(parser, &event);
 }
@@ -325,6 +340,10 @@ static void capture_usage(struct chat_events *parser, json_t *root)
                 parser->usage.cache_write_1h_tokens = parser->usage.cache_write_tokens;
         }
     }
+    /* DeepSeek documents only its own hit count, though it mirrors it into the details. */
+    value = json_object_get(usage, "prompt_cache_hit_tokens");
+    if (parser->usage.cached_tokens < 0 && json_is_integer(value))
+        parser->usage.cached_tokens = (long)json_integer_value(value);
 
     value = json_object_get(usage, "cost");
     if (json_is_number(value) && json_number_value(value) >= 0)

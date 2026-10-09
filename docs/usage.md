@@ -85,9 +85,9 @@ Type `/help` for the authoritative live list.
 | `/resume` | Pick a past session for this directory. |
 | `/fork [n]` | Create a new session before an earlier prompt; `/fork 0` clones the current tip. |
 | `/undo [n]` | Roll the conversation back to before an earlier prompt. |
-| `/provider` | Choose a provider, model, and effort. |
-| `/model` | Choose a model and effort for the current provider. |
-| `/effort` | Choose reasoning effort when supported. |
+| `/provider [id]` | Switch provider. |
+| `/model [id]` | Switch the current provider's model. |
+| `/effort [level]` | Set reasoning effort, when the model supports it. |
 | `/preset [name]` | Apply a config-defined preset. |
 | `/preset-save <name> [tint]` | Save the current provider/model/effort as a preset. |
 | `/config [key [value]]` | Inspect settings or change one for this process. |
@@ -98,6 +98,13 @@ Type `/help` for the authoritative live list.
 | `/usage` | Query provider account/subscription usage when supported. |
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
+
+Without an argument, `/provider`, `/model`, and `/effort` open pickers, and the provider and model
+pickers continue to the settings that depend on them. With an argument they switch directly:
+`/provider <id>` starts on the provider's default model, or none until `/model` picks one, and
+`/model <id>` keeps the current effort where the new model allows it. Model ids complete from the
+provider's model list, fetched in the background; where that isn't available, open the `/model`
+picker once.
 
 Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` has no redo;
 the removed user turns still count toward the session's usage totals.
@@ -121,7 +128,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Ctrl-O | Open the rendered conversation in `$PAGER`. |
 | Ctrl-T | Open the model-facing transcript in `$PAGER`. |
 | Ctrl-V | Paste an image, or clipboard text when no image is available. |
-| Tab | Complete a `/` command name. |
+| Tab | Complete a `/` command name or argument. |
 | `@` + Tab | Choose a project file with `fzf`. |
 
 Ctrl-O is the best view for reviewing what happened. Ctrl-T includes the system prompt, tool schemas,
