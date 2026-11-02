@@ -58,8 +58,10 @@ struct agent_state {
 };
 
 /* Run the interactive REPL. A provider switch destroys the old provider and updates *provider_io.
- * The caller retains ownership of the provider left in *provider_io on return. */
-int agent_run(struct provider **provider_io, const struct hax_opts *options);
+ * The caller retains ownership of the provider left in *provider_io on return. A non-NULL
+ * `initial_prompt` is submitted as the first input, as if typed. */
+int agent_run(struct provider **provider_io, const struct hax_opts *options,
+              const char *initial_prompt);
 
 /* Reset conversation history, logs, tracked temporary files, and per-conversation statistics.
  * Background tasks are resolved in the outgoing record and stopped. */

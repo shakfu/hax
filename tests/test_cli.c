@@ -80,7 +80,7 @@ static void test_parse_rejects_incompatible_resume_options(void)
     EXPECT(cli_parse(3, picker_oneshot, &options) == CLI_PARSE_ERROR);
 }
 
-static void test_parse_rejects_missing_values_and_interactive_prompt(void)
+static void test_parse_rejects_missing_values(void)
 {
     struct cli_options options;
     char *empty_provider[] = {"hax", "--provider=", NULL};
@@ -88,9 +88,6 @@ static void test_parse_rejects_missing_values_and_interactive_prompt(void)
 
     char *empty_resume[] = {"hax", "--resume=", NULL};
     EXPECT(cli_parse(2, empty_resume, &options) == CLI_PARSE_ERROR);
-
-    char *interactive_prompt[] = {"hax", "hello", NULL};
-    EXPECT(cli_parse(2, interactive_prompt, &options) == CLI_PARSE_ERROR);
 }
 
 static void test_parse_leading_preset(void)
@@ -127,13 +124,28 @@ static void test_parse_leading_preset(void)
     free(prompt);
 
     char *after_flag[] = {"hax", "-c", "review", NULL};
-    EXPECT(cli_parse(3, after_flag, &options) == CLI_PARSE_ERROR);
+    EXPECT(cli_parse(3, after_flag, &options) == CLI_PARSE_OK);
+    EXPECT(options.selection.preset == NULL);
+    EXPECT(cli_read_prompt(&options, 3, after_flag, stdin, 1, &prompt) == 0);
+    EXPECT_STR_EQ(prompt, "review");
+    free(prompt);
 
     char *both_forms[] = {"hax", "review", "--preset=daily", NULL};
     EXPECT(cli_parse(3, both_forms, &options) == CLI_PARSE_ERROR);
 
     char *unknown[] = {"hax", "reviw", NULL};
-    EXPECT(cli_parse(2, unknown, &options) == CLI_PARSE_ERROR);
+    EXPECT(cli_parse(2, unknown, &options) == CLI_PARSE_OK);
+    EXPECT(options.selection.preset == NULL);
+    EXPECT(cli_read_prompt(&options, 2, unknown, stdin, 1, &prompt) == 0);
+    EXPECT_STR_EQ(prompt, "reviw");
+    free(prompt);
+
+    char *preset_and_prompt[] = {"hax", "review", "fix", "it", NULL};
+    EXPECT(cli_parse(4, preset_and_prompt, &options) == CLI_PARSE_OK);
+    EXPECT_STR_EQ(options.selection.preset, "review");
+    EXPECT(cli_read_prompt(&options, 4, preset_and_prompt, stdin, 1, &prompt) == 0);
+    EXPECT_STR_EQ(prompt, "fix it");
+    free(prompt);
 
     /* A first word that is not a preset keeps its prompt meaning. */
     char *trailing_print[] = {"hax", "fix", "the", "tests", "-p", NULL};
@@ -319,6 +331,43 @@ static void test_read_prompt_promptless_resume_continues(void)
     fclose(stream);
 }
 
+/* Without -p, positional words become the REPL's first message; stdin stays the REPL's input. */
+static void test_interactive_prompt_from_arguments(void)
+{
+    struct cli_options options;
+    char *argv[] = {"hax", "--model=m", "fix", "the tests", NULL};
+    EXPECT(cli_parse(4, argv, &options) == CLI_PARSE_OK);
+    EXPECT(options.one_shot == 0);
+    EXPECT_STR_EQ(options.selection.model, "m");
+
+    FILE *stream = prompt_stream("from stdin\n");
+    char *prompt = NULL;
+    EXPECT(cli_read_prompt(&options, 4, argv, stream, 0, &prompt) == 0);
+    EXPECT_STR_EQ(prompt, "fix the tests");
+    free(prompt);
+    EXPECT(ftell(stream) == 0);
+
+    /* No positional words leaves the REPL unseeded, even with piped stdin. */
+    char *bare[] = {"hax", NULL};
+    EXPECT(cli_parse(1, bare, &options) == CLI_PARSE_OK);
+    EXPECT(cli_read_prompt(&options, 1, bare, stream, 0, &prompt) == 0);
+    EXPECT(prompt == NULL);
+    EXPECT(ftell(stream) == 0);
+
+    char *empty[] = {"hax", "", NULL};
+    EXPECT(cli_parse(2, empty, &options) == CLI_PARSE_OK);
+    EXPECT(cli_read_prompt(&options, 2, empty, stream, 0, &prompt) == 0);
+    EXPECT(prompt == NULL);
+    fclose(stream);
+
+    char *resumed[] = {"hax", "--resume=abc123", "go", "on", NULL};
+    EXPECT(cli_parse(4, resumed, &options) == CLI_PARSE_OK);
+    EXPECT(options.resume_mode == CLI_RESUME_SELECT);
+    EXPECT(cli_read_prompt(&options, 4, resumed, stdin, 1, &prompt) == 0);
+    EXPECT_STR_EQ(prompt, "go on");
+    free(prompt);
+}
+
 static void test_resolve_missing_session(void)
 {
     setenv("XDG_STATE_HOME", t_tempdir(), 1);
@@ -439,7 +488,7 @@ int main(void)
     test_parse_selection_and_prompt_arguments();
     test_parse_resume_modes();
     test_parse_rejects_incompatible_resume_options();
-    test_parse_rejects_missing_values_and_interactive_prompt();
+    test_parse_rejects_missing_values();
     test_parse_leading_preset();
     test_parse_json_implies_print();
     test_parse_version_prints_and_exits();
@@ -447,6 +496,7 @@ int main(void)
     test_read_prompt_from_stream();
     test_read_prompt_rejects_missing_or_empty_input();
     test_read_prompt_promptless_resume_continues();
+    test_interactive_prompt_from_arguments();
     test_resolve_missing_session();
     test_resolve_session_by_latest_id_and_prefix();
     test_subagent_depth_validation();

@@ -99,6 +99,7 @@ Run hax from the project directory you want it to work in:
 
 ```sh
 hax                         # interactive REPL
+hax "fix the tests"         # interactive REPL, starting with this prompt
 hax -p "list TODOs"         # run one prompt and print the final answer
 printf "explain x" | hax -p # read the prompt from stdin
 hax -c                      # continue the latest session for this directory

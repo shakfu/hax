@@ -17,10 +17,14 @@ and the environment shown to the model are all based on the current directory.
 
 ## CLI modes
 
-With no arguments, hax starts the interactive REPL:
+Without `-p`, hax starts the interactive REPL. A positional PROMPT, its words joined with spaces,
+is submitted as the first message, as if typed; stdin is not read for it. After `-c` or `--resume`,
+it becomes the next message of the resumed conversation. A first word that names a preset selects
+that preset and is not part of the prompt.
 
 ```sh
 hax                              # interactive
+hax "fix the failing test"       # interactive, starting with this prompt
 hax -p "fix the failing test"    # one-shot
 printf "explain x" | hax -p      # one-shot prompt from stdin
 hax -c                           # continue the latest session here
@@ -33,7 +37,7 @@ hax --resume=ID -p "continue"    # resume non-interactively
 | `-p`, `--print` | Run to completion and print the final assistant message to stdout. |
 | `--json` | One-shot (implies `-p`) with stdout as JSON-line conversation records, closed by a `result` record. |
 | `-c`, `--continue` | Resume the newest session for the current directory. |
-| `--resume[=ID]` | Pick a session, or resume an id/unique prefix. The id form works with `-p`; without a prompt it continues the run. |
+| `--resume[=ID]` | Pick a session, or resume an id/unique prefix. The id form works with `-p`; without a prompt it continues the run. A prompt becomes the next message. |
 | `--no-session` | Do not record this run or add its prompts to persistent recall. |
 | `--raw` | Send only the prompt: no system/context sections and no tools. |
 | `--bare` | Keep the base prompt, environment, and tools, but omit project/delegation context. |

@@ -1205,7 +1205,8 @@ static void set_resume_state(struct agent_state *state, const struct agent_loop_
     }
 }
 
-int agent_run(struct provider **provider_io, const struct hax_opts *options)
+int agent_run(struct provider **provider_io, const struct hax_opts *options,
+              const char *initial_prompt)
 {
     /* Slash handlers replace state.provider; resynchronize this local after each dispatch and
      * return the final live provider to the caller. */
@@ -1297,17 +1298,28 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
     for (;;) {
         disp_block_separator(&render.disp);
-        /* Redraw the resumable hint so slash output cannot hide the empty-send meaning. */
-        if (state.resume_reason != AGENT_RESUME_NONE)
-            render_resume_hint(&render, state.resume_reason);
-        /* Only a resumable turn gives an empty send a meaning; otherwise
-         * the editor keeps swallowing bare Enter. */
-        input_set_empty_submit(input, state.resume_reason != AGENT_RESUME_NONE);
-        cursor_show();
-        /* Rebuilt each iteration so a runtime theme change (/config theme …)
-         * recolors the prompt instead of keeping the startup theme's bytes. */
-        char *line = input_readline(input, build_prompt(prompt_buffer, sizeof(prompt_buffer)));
-        cursor_hide();
+        char *line;
+        if (initial_prompt) {
+            line = xstrdup(initial_prompt);
+            initial_prompt = NULL;
+            /* Echo as the editor commits a submitted line; non-tty reads echo nothing. */
+            if (cursor_supported()) {
+                input_render_user_message_to(stdout, line, strlen(line), input_display_cols());
+                cursor_hide();
+            }
+        } else {
+            /* Redraw the resumable hint so slash output cannot hide the empty-send meaning. */
+            if (state.resume_reason != AGENT_RESUME_NONE)
+                render_resume_hint(&render, state.resume_reason);
+            /* Only a resumable turn gives an empty send a meaning; otherwise
+             * the editor keeps swallowing bare Enter. */
+            input_set_empty_submit(input, state.resume_reason != AGENT_RESUME_NONE);
+            cursor_show();
+            /* Rebuilt each iteration so a runtime theme change (/config theme …)
+             * recolors the prompt instead of keeping the startup theme's bytes. */
+            line = input_readline(input, build_prompt(prompt_buffer, sizeof(prompt_buffer)));
+            cursor_hide();
+        }
         if (!line) {
             putchar('\n');
             break;

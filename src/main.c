@@ -200,7 +200,7 @@ int main(int argc, char **argv)
         goto cleanup_provider;
 
     result = options.one_shot ? oneshot_run(provider, prompt, &options.agent_options)
-                              : agent_run(&provider, &options.agent_options);
+                              : agent_run(&provider, &options.agent_options, prompt);
 
 cleanup_provider:
     /* Providers must join background work before global libcurl teardown. */

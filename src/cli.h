@@ -47,10 +47,10 @@ struct cli_options {
  * getopt. */
 enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *options);
 
-/* Build the one-shot prompt from positional arguments or `input`. `input_is_tty` is supplied by
- * the caller so tests need no terminal. On success, `prompt` receives an owned string, or NULL
- * in interactive mode and on a promptless one-shot resume, which continues the recorded
- * conversation. */
+/* Build the prompt from positional arguments or, in one-shot mode only, `input`. `input_is_tty`
+ * is supplied by the caller so tests need no terminal. On success, `prompt` receives an owned
+ * string, or NULL for an interactive run without positional words and on a promptless one-shot
+ * resume, which continues the recorded conversation. */
 int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FILE *input,
                     int input_is_tty, char **prompt);
 

@@ -40,7 +40,7 @@ static const struct help_option {
     {"--resume[=ID]",
      "Resume a past conversation in this directory, restoring its recorded settings: pick "
      "from a list, or give a session ID. Works with -p; without a prompt, the conversation "
-     "continues from where it stopped."},
+     "continues from where it stopped. A PROMPT becomes the next message."},
     {"--no-session",
      "Don't record this conversation: nothing to resume afterwards, and the prompts you type "
      "aren't added to Ctrl-R recall. Earlier sessions and prompts stay readable."},
@@ -83,7 +83,9 @@ void cli_print_help(void)
     ui_wrapped_rows("hax [PRESET] [OPTIONS] [PROMPT...]", (int)strlen("usage: "), columns, "");
     fputc('\n', stdout);
 
-    ui_wrapped_rows("With no arguments, runs an interactive REPL.", 0, columns, "");
+    ui_wrapped_rows("Without -p, runs an interactive REPL; a PROMPT is submitted as its first "
+                    "message.",
+                    0, columns, "");
     fputc('\n', stdout);
     printf("%soptions%s\n", bold, reset);
 
@@ -126,28 +128,6 @@ static const char *leading_preset(int argc, char **argv)
     return argv[1];
 }
 
-static void report_unknown_leading_word(const char *word)
-{
-    char **names = NULL;
-    size_t count = config_preset_names(&names);
-
-    struct buf known;
-    buf_init(&known);
-    for (size_t i = 0; i < count; i++) {
-        buf_append_str(&known, i == 0 ? " (presets: " : ", ");
-        buf_append_str(&known, names[i]);
-        free(names[i]);
-    }
-    free(names);
-    if (count > 0)
-        buf_append_str(&known, ")");
-
-    hax_err("'%s' is not a preset%s\n"
-            "A prompt needs -p / --print. Try 'hax --help' for usage.",
-            word, known.data ? known.data : "");
-    buf_free(&known);
-}
-
 enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *options)
 {
     enum {
@@ -180,7 +160,6 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
 
     memset(options, 0, sizeof(*options));
 
-    const char *first_word = argc > 1 ? argv[1] : NULL;
     const char *preset = leading_preset(argc, argv);
     int skipped = preset ? 1 : 0;
     /* getopt names argv[0] in its diagnostics, so shift the program name over the consumed
@@ -272,16 +251,6 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
         hax_err("-p with --resume requires a session id (e.g. --resume=ID)");
         return CLI_PARSE_ERROR;
     }
-    if (!options->one_shot && optind < argc) {
-        /* getopt permutes argv, so identify the lone word by pointer, not position. */
-        if (!preset && optind == argc - 1 && argv[optind] == first_word)
-            report_unknown_leading_word(first_word);
-        else
-            hax_err("positional arguments require -p / --print\n"
-                    "Try 'hax --help' for usage.");
-        return CLI_PARSE_ERROR;
-    }
-
     options->first_prompt_arg = optind;
     return CLI_PARSE_OK;
 }
@@ -343,8 +312,17 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
                     int input_is_tty, char **prompt)
 {
     *prompt = NULL;
-    if (!options->one_shot)
+    if (!options->one_shot) {
+        /* The REPL reads its own input from stdin, so only positional words seed a first turn. */
+        if (options->first_prompt_arg < argc)
+            *prompt =
+                join_arguments(argc - options->first_prompt_arg, argv + options->first_prompt_arg);
+        if (*prompt && !**prompt) {
+            free(*prompt);
+            *prompt = NULL;
+        }
         return 0;
+    }
     /* Resuming gives a missing prompt a meaning — continue the recorded conversation, like the
      * REPL's empty-send resume — so only a fresh run rejects it. */
     int resuming = options->resume_mode != CLI_RESUME_NONE;
