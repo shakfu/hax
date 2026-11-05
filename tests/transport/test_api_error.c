@@ -290,7 +290,7 @@ static void test_model_list_error_key_missing(void)
 
 static void test_model_list_error_empty_2xx(void)
 {
-    char *message = format_model_list_error("llama.cpp", "http://127.0.0.1:8080/v1", 0, 200);
+    char *message = format_model_list_error("llama.cpp", "http://127.0.0.1:9090/v1", 0, 200);
     EXPECT_STR_EQ(message, "llama.cpp sent an empty or truncated /models response");
     free(message);
 }
@@ -304,8 +304,8 @@ static void test_model_list_error_http_status(void)
 
 static void test_model_list_error_unreachable(void)
 {
-    char *message = format_model_list_error("llama.cpp", "http://127.0.0.1:8080/v1", 0, 0);
-    EXPECT_STR_EQ(message, "could not reach llama.cpp at http://127.0.0.1:8080/v1");
+    char *message = format_model_list_error("llama.cpp", "http://127.0.0.1:9090/v1", 0, 0);
+    EXPECT_STR_EQ(message, "could not reach llama.cpp at http://127.0.0.1:9090/v1");
     free(message);
 }
 

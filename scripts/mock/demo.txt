@@ -67,8 +67,8 @@ end-turn
 # Turn 9: keep a Markdown table buffered long enough to show `composing...`.
 # The intro renders immediately; the completed table should replace the spinner
 # without leaving an extra status row.
-text Here's a quick comparison of the OpenAI-family presets:
+text Here's a quick reference for the signals a terminal program usually meets:
 delay 250
-text \n\n| Preset | Default base URL | Context probe |\n| --- | --- | --- |\n| openai | api.openai.com | none |\n| openai_compat | (your URL) | none |\n| llamacpp | 127.0.0.1:8080 | /props background |\n| openrouter | openrouter.ai/api | /endpoints background |\n
+text \n\n| Signal | Number | Default action |\n| --- | --- | --- |\n| SIGINT | 2 | terminate |\n| SIGQUIT | 3 | terminate with core dump |\n| SIGTERM | 15 | terminate |\n| SIGWINCH | 28 | ignore |\n
 usage in=1020 out=72
 end-turn

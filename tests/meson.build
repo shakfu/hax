@@ -2,6 +2,7 @@
 test_support = static_library('test_support',
     'harness.c',
     'loopback.c',
+    'output.c',
     'tools/bash_fixtures.c',
     dependencies: [hax_dep],
 )
@@ -56,6 +57,10 @@ test_sources = [
     'test_turn.c',
     'test_xalloc.c',
 
+    'commands/test_login.c',
+    'commands/test_session_cmd.c',
+    'commands/test_tasks.c',
+
     'providers/test_anthropic_body.c',
     'providers/test_anthropic_events.c',
     'providers/test_anthropic_models.c',
@@ -82,6 +87,7 @@ test_sources = [
     'render/test_ctrl_strip.c',
     'render/test_diff_color.c',
     'render/test_disp.c',
+    'render/test_footer.c',
     'render/test_markdown.c',
     'render/test_markdown_scan.c',
     'render/test_markdown_table.c',
@@ -106,10 +112,13 @@ test_sources = [
     'system/test_tempfiles.c',
 
     'terminal/test_clipboard.c',
+    'terminal/test_escape.c',
     'terminal/test_input.c',
     'terminal/test_input_core.c',
     'terminal/test_interrupt.c',
+    'terminal/test_live_region.c',
     'terminal/test_picker_core.c',
+    'terminal/test_sgr.c',
     'terminal/test_theme.c',
     'terminal/test_vt_resolve.c',
     'terminal/test_width.c',
@@ -124,6 +133,7 @@ test_sources = [
     'text/test_placeholder.c',
     'text/test_sha256.c',
     'text/test_shell_quote.c',
+    'text/test_trim.c',
     'text/test_url.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
@@ -173,11 +183,15 @@ endforeach
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
     'oneshot',
+    'repl_complete',
     'repl_interrupt',
+    'repl_resize',
     'repl_smoke',
+    'repl_status',
+    'repl_status_label',
+    'repl_status_tools',
 ]
 
-python = find_program('python3')
 e2e_env = environment({'HAX_BIN': hax_exe.full_path()})
 e2e_env.prepend('TSAN_OPTIONS', 'atexit_sleep_ms=0', separator: ':')
 foreach name : e2e_scenarios

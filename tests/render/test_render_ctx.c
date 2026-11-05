@@ -51,6 +51,7 @@ static void fixture_enable_markdown(struct fixture *fixture)
 static void fixture_destroy(struct fixture *fixture)
 {
     md_free(fixture->render.md);
+    disp_free(&fixture->render.disp);
     fclose(fixture->stream);
     free(fixture->bytes);
 }
@@ -68,7 +69,7 @@ static void test_text_delta_ignores_initial_line_endings(void)
 
     const char *text = "\n\n\thello";
     render_text_delta(&fixture.render, text, strlen(text));
-    EXPECT_STR_EQ(fixture_output(&fixture), "\thello");
+    EXPECT_STR_EQ(fixture_output(&fixture), "    hello");
     EXPECT(fixture.render.mode == RENDER_TEXT);
     EXPECT(fixture.render.stream.answer_started);
     fixture_destroy(&fixture);
@@ -84,6 +85,18 @@ static void test_text_delta_preserves_line_endings_after_text_starts(void)
     render_text_delta(&fixture.render, "\nsecond", strlen("\nsecond"));
 
     EXPECT_STR_EQ(fixture_output(&fixture), "first\nsecond");
+    fixture_destroy(&fixture);
+}
+
+static void test_plain_text_expands_tabs(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+
+    render_text_delta(&fixture.render, "a\tb\t", strlen("a\tb\t"));
+    EXPECT_STR_EQ(fixture_output(&fixture), "a    b    ");
+    EXPECT(fixture.render.disp.column == 10);
     fixture_destroy(&fixture);
 }
 
@@ -125,43 +138,12 @@ static void test_reasoning_reopened_wraps_from_column_zero(void)
     fixture_destroy(&fixture);
 }
 
-static void test_table_spinner_tracks_buffered_table(void)
-{
-    struct fixture fixture;
-    if (!fixture_init(&fixture))
-        return;
-    fixture_enable_markdown(&fixture);
-
-    const char *header = "| A |\n|---|\n";
-    render_text_delta(&fixture.render, header, strlen(header));
-    EXPECT(md_in_table(fixture.render.md));
-    EXPECT(fixture.render.table.started_at_ms > 0);
-
-    long started_at_ms = fixture.render.table.started_at_ms;
-    render_show_table_spinner(&fixture.render);
-    EXPECT(fixture.render.table.spinner_visible);
-
-    const char *row = "| x |\n";
-    render_write_text(&fixture.render, row, strlen(row));
-    EXPECT(md_in_table(fixture.render.md));
-    EXPECT(fixture.render.table.spinner_visible);
-    EXPECT(fixture.render.table.started_at_ms == started_at_ms);
-
-    const char *after = "after\n";
-    render_write_text(&fixture.render, after, strlen(after));
-    EXPECT(!md_in_table(fixture.render.md));
-    EXPECT(!fixture.render.table.spinner_visible);
-    EXPECT(fixture.render.table.started_at_ms == 0);
-    fixture_destroy(&fixture);
-}
-
 static void test_stream_begin_resets_per_stream_state(void)
 {
     struct fixture fixture;
     if (!fixture_init(&fixture))
         return;
 
-    fixture.render.table.started_at_ms = 10;
     fixture.render.retry.deadline_ms = 20;
     fixture.render.retry.next_attempt = 2;
     fixture.render.retry.max_attempts = 3;
@@ -170,7 +152,6 @@ static void test_stream_begin_resets_per_stream_state(void)
     render_stream_begin(&fixture.render);
 
     EXPECT(fixture.render.mode == RENDER_WAITING);
-    EXPECT(fixture.render.table.started_at_ms == 0);
     EXPECT(fixture.render.retry.deadline_ms == 0);
     EXPECT(fixture.render.retry.next_attempt == 0);
     EXPECT(fixture.render.retry.max_attempts == 0);
@@ -188,14 +169,12 @@ static void test_stream_begin_preserves_tool_cluster(void)
     render_set_mode(&fixture.render, RENDER_TOOL_CLUSTER);
     fixture.render.cluster.last_tool = "read";
     fixture.render.cluster.line_open = 1;
-    fixture.render.cluster.line_cells = 12;
     fixture.render.stream.content_seen = 1;
     render_stream_begin(&fixture.render);
 
     EXPECT(fixture.render.mode == RENDER_TOOL_CLUSTER);
     EXPECT_STR_EQ(fixture.render.cluster.last_tool, "read");
     EXPECT(fixture.render.cluster.line_open);
-    EXPECT(fixture.render.cluster.line_cells == 12);
     EXPECT(!fixture.render.stream.content_seen);
     fixture_destroy(&fixture);
 }
@@ -208,7 +187,7 @@ static void test_stream_retry_marks_rendered_output(void)
 
     render_text_delta(&fixture.render, "partial", strlen("partial"));
     EXPECT(fixture.render.stream.output_rendered);
-    render_stream_retry(&fixture.render);
+    render_stream_retry(&fixture.render, 1, 3, 1000);
 
     EXPECT(strstr(fixture_output(&fixture), "[unexpected end]") != NULL);
     EXPECT(fixture.render.mode == RENDER_WAITING);
@@ -225,11 +204,40 @@ static void test_stream_retry_silent_without_output(void)
         return;
 
     fixture.render.stream.content_seen = 1;
-    render_stream_retry(&fixture.render);
+    render_stream_retry(&fixture.render, 1, 3, 1000);
 
     EXPECT_STR_EQ(fixture_output(&fixture), "");
     EXPECT(fixture.render.mode == RENDER_IDLE);
     EXPECT(!fixture.render.stream.content_seen);
+    fixture_destroy(&fixture);
+}
+
+static void test_retry_lasts_until_the_retried_attempt_streams(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+
+    render_stream_retry(&fixture.render, 1, 3, 1000);
+    EXPECT(fixture.render.retry.deadline_ms > 0);
+    EXPECT(fixture.render.retry.next_attempt == 2);
+    EXPECT(fixture.render.retry.max_attempts == 3);
+
+    render_retry_end(&fixture.render);
+    EXPECT(fixture.render.retry.deadline_ms == 0);
+    fixture_destroy(&fixture);
+}
+
+static void test_finish_ends_a_pending_retry(void)
+{
+    struct fixture fixture;
+    if (!fixture_init(&fixture))
+        return;
+
+    render_stream_retry(&fixture.render, 1, 3, 1000);
+    render_finish(&fixture.render);
+    EXPECT(fixture.render.mode == RENDER_IDLE);
+    EXPECT(fixture.render.retry.deadline_ms == 0);
     fixture_destroy(&fixture);
 }
 
@@ -264,12 +272,10 @@ static void test_closing_tool_cluster_resets_substate(void)
     render_set_mode(&fixture.render, RENDER_TOOL_CLUSTER);
     fixture.render.cluster.last_tool = "read";
     fixture.render.cluster.line_open = 1;
-    fixture.render.cluster.line_cells = 12;
     render_set_mode(&fixture.render, RENDER_IDLE);
 
     EXPECT(fixture.render.cluster.last_tool == NULL);
     EXPECT(!fixture.render.cluster.line_open);
-    EXPECT(fixture.render.cluster.line_cells == 0);
     fixture_destroy(&fixture);
 }
 
@@ -277,13 +283,15 @@ int main(void)
 {
     test_text_delta_ignores_initial_line_endings();
     test_text_delta_preserves_line_endings_after_text_starts();
+    test_plain_text_expands_tabs();
     test_closing_reasoning_resets_style();
     test_reasoning_reopened_wraps_from_column_zero();
-    test_table_spinner_tracks_buffered_table();
     test_stream_begin_resets_per_stream_state();
     test_stream_begin_preserves_tool_cluster();
     test_stream_retry_marks_rendered_output();
     test_stream_retry_silent_without_output();
+    test_retry_lasts_until_the_retried_attempt_streams();
+    test_finish_ends_a_pending_retry();
     test_retry_label_counts_down_then_marks_in_flight();
     test_closing_tool_cluster_resets_substate();
 

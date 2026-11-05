@@ -3,7 +3,7 @@
 Run hax from the directory you want it to work in. Sessions, project instructions, file completion,
 and the environment shown to the model are all based on the current directory.
 
-## A good everyday workflow
+## Workflow
 
 1. Start `hax` in the repository and choose a provider/model with `/provider` if needed.
 2. State the goal, constraints, and how the result should be verified. Mention relevant files with
@@ -15,7 +15,7 @@ and the environment shown to the model are all based on the current directory.
 5. Review the diff and validation results before accepting the work. hax has no per-command approval
    prompts and is not a security boundary; use OS-level isolation for untrusted work.
 
-## CLI modes
+## Options
 
 With no arguments, hax starts the interactive REPL:
 
@@ -44,6 +44,11 @@ hax --resume=ID -p "continue"    # resume non-interactively
 | `-h`, `--help` | Show current CLI help. |
 | `-v`, `--version` | Show the version. |
 
+A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with `-p`. `--raw` and
+`--bare` still record the conversation; combine either with `--no-session` for a disposable run.
+
+### One-shot mode
+
 In one-shot mode, positional arguments are joined with spaces. With no arguments, a non-terminal
 stdin becomes the prompt. The final answer goes to stdout; the provider banner, usage stats, errors,
 and resume hint go to stderr. This makes `hax -p` safe to pipe without losing diagnostics:
@@ -57,15 +62,14 @@ For orchestrators and scripts that want to observe a run as it happens — turns
 cost — `--json` (which implies `-p`) turns stdout into a JSONL event stream: the run's session
 records live as they are appended, closed by a `result` record with the outcome, final text,
 usage, and the session id for a follow-up `--resume=ID -p`. The stderr banner and stats are
-omitted; errors and warnings still go there. See [sessions.md](./sessions.md) for the record
-reference.
+omitted; errors and warnings still go there. The records are described in
+[sessions.md](./sessions.md).
 
 ```sh
-hax --json "fix the failing test" | jq 'select(.kind == "tool_call" or .type == "result")'
+hax --json "fix the failing test" |
+    jq 'select(.kind == "tool_call" or .type == "result")'
 ```
 
-A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with `-p`. `--raw` and
-`--bare` still record the conversation; combine either with `--no-session` for a disposable run.
 A one-shot run is unlimited by default; set `max_turns` to abort after that many provider
 round-trips.
 
@@ -98,6 +102,7 @@ Type `/help` for the authoritative live list.
 | `/usage` | Query provider account/subscription usage when supported. |
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
+| `/help` | List commands and keyboard shortcuts. |
 
 Without an argument, `/provider`, `/model`, and `/effort` open pickers, and the provider and model
 pickers continue to the settings that depend on them. With an argument they switch directly:
@@ -124,7 +129,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Ctrl-C | Clear the current prompt; twice on an empty prompt quits. |
 | Ctrl-D | Quit on an empty prompt. |
 | Ctrl-L | Clear the screen and redraw the prompt. |
-| Ctrl-G | Edit the prompt in `$EDITOR`. |
+| Ctrl-G | Edit the prompt in `$VISUAL` or `$EDITOR`. |
 | Ctrl-O | Open the rendered conversation in `$PAGER`. |
 | Ctrl-T | Open the model-facing transcript in `$PAGER`. |
 | Ctrl-V | Paste an image, or clipboard text when no image is available. |
@@ -164,13 +169,17 @@ Skills are discovered at `<dir>/.agents/skills/<name>/SKILL.md`, searched in thi
 2. `~/.config/hax/skills/`, for skills meant only for hax;
 3. `~/.agents/skills/`, the cross-agent location other tools install into and read from.
 
-The first match for a given skill name wins, so a nearer directory shadows a wider one. hax only
-reads `~/.agents/skills` and never writes to it. A skill should explain when and how to use a CLI
-or repeatable workflow; project policy usually belongs in `AGENTS.md` instead.
+The directory name is the skill's name, and the first match for a name wins, so a nearer directory
+shadows a wider one. hax only reads `~/.agents/skills` and never writes to it. The model sees each
+skill's name and the `description` from the YAML front matter that opens its `SKILL.md`, and reads
+the whole file when a task matches, so the description should say when to use the skill. A skill
+should explain when and how to use a CLI or repeatable workflow; project policy usually belongs in
+`AGENTS.md` instead.
 
 Use `--bare` for a task that needs tools but should not receive project instructions, skills, or
 subagent guidance. Use `--raw` only when you want a plain model chat with no tools. Individual
-context sections can also be disabled through [configuration](./configuration.md).
+context sections can also be turned off with the `no_*` settings in
+[configuration.md](./configuration.md).
 
 ## Files and images
 
@@ -230,7 +239,7 @@ remain visible, but unfinished reasoning is discarded so it cannot confuse the n
 model had not yet produced answer text or a tool call, the conversation is left unchanged; press
 Enter on an empty line to retry. `max_turns` provides the same kind of periodic check-in after a
 configured number of model round-trips. In one-shot mode, SIGUSR1 and SIGINT request the same
-pause and interrupt from outside; see [CLI modes](#cli-modes).
+pause and interrupt from outside; see [One-shot mode](#one-shot-mode).
 
 Resuming an interrupted conversation (`--resume`, `-c`, `/resume`) offers the same empty-Enter
 continue at the first prompt.
@@ -243,7 +252,8 @@ tasks are reported without polling. Tasks belong to the conversation and are sto
 it. In one-shot mode, tasks not awaited before the final answer are stopped.
 
 Set `no_tasks` to disable this behavior and make command timeouts kill the command. Related timeout
-and concurrency settings are in [configuration](./configuration.md#tools-and-transport).
+and concurrency settings are listed under Tools and transport in
+[configuration.md](./configuration.md#tools-and-transport).
 
 When explicitly asked to use subagents, hax can run additional `hax -p` processes as background
 tasks. They inherit the current provider/model/effort by default. Presets with a `description` are

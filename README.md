@@ -50,14 +50,16 @@ brew install oleksandrchekhovskyi/hax/hax
 
 On Arch Linux, hax is in the [AUR](https://aur.archlinux.org/packages/hax) as `hax`.
 
-On any Linux distribution, download the prebuilt static binary for your architecture (x86_64 or
-aarch64) from the [latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest),
-then unpack the `hax` binary into any directory on your `PATH`.
+Alternatively, prebuilt binaries for Linux (x86_64 and aarch64) and macOS (Apple Silicon) are
+available from the [latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest):
+unpack the `hax` binary into any directory on your `PATH`. The Linux binaries are fully static,
+and the macOS one needs only libraries that ship with macOS. If macOS refuses to run a binary
+downloaded through a browser, clear its quarantine flag with `xattr -d com.apple.quarantine hax`.
 
 ### From source
 
 Building from source gives a binary linked against your system's shared libraries instead of
-a static one:
+the libraries the prebuilt binaries bundle:
 
 ```sh
 git clone https://github.com/OleksandrChekhovskyi/hax.git
@@ -108,8 +110,9 @@ hax --resume                # pick a past session for this directory
 hax --resume=ID -p "next"   # resume a specific session in one-shot mode
 ```
 
-Run `hax --help` for CLI usage. In the REPL, type `/help` for slash commands and shortcuts.
-See [docs/usage.md](./docs/usage.md) for more detailed usage documentation.
+Run `hax --help` for CLI usage, or `man hax` where the man pages are installed. In the REPL, type
+`/help` for slash commands and shortcuts. See [docs/usage.md](./docs/usage.md) for more detailed
+usage documentation.
 
 ## Configuration
 
@@ -120,6 +123,16 @@ CLI selection flag overrides them.
 
 See [docs/configuration.md](./docs/configuration.md) for the file format, resolution order, presets,
 and the setting reference.
+
+## Extras
+
+Optional companions that live outside the core binary, each a small Python CLI with a skill that
+tells hax when to use it:
+
+- [hax-web](https://github.com/OleksandrChekhovskyi/hax-web) — web search and readable page
+  fetching.
+- [hax-mcp](https://github.com/OleksandrChekhovskyi/hax-mcp) — tools of MCP servers, with
+  definitions entering the model's context only as a task needs them.
 
 ## More docs
 

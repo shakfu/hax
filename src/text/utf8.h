@@ -13,6 +13,9 @@ size_t utf8_sequence_length(unsigned char byte);
  * must be between one and four, and the caller must provide that many readable bytes. */
 int utf8_sequence_is_valid(const char *bytes, size_t length);
 
+/* utf8_sequence_is_valid() that also stores the scalar value in out when it returns nonzero. */
+int utf8_decode_codepoint(const char *bytes, size_t length, uint32_t *out);
+
 /* Return whether the entire counted buffer is valid UTF-8. */
 int utf8_is_valid(const char *bytes, size_t length);
 

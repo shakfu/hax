@@ -136,6 +136,7 @@ static void test_body_shape(void)
     EXPECT_STR_EQ(item_type(tool), "function");
     EXPECT_STR_EQ(json_string_value(json_object_get(tool, "name")), "bash");
     EXPECT(json_object_get(tool, "function") == NULL);
+    EXPECT(json_object_get(tool, "strict") == json_false());
     EXPECT(json_object_get(body, "parallel_tool_calls") == json_true());
 
     json_t *reasoning = json_object_get(body, "reasoning");

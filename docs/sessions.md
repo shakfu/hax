@@ -114,11 +114,11 @@ records:
 | `session_id` | Resume handle for `hax --resume=ID -p`; with no prompt, the resumed run continues where this one stopped. |
 
 `interrupted` and `paused` report a stop signal (SIGINT/SIGTERM and SIGUSR1 respectively; see
-[usage.md](./usage.md#cli-modes)). A startup failure can end the stream before any result record,
-so also treat process exit as terminal. The exit status matches plain `-p`: 0 on `complete`, 130
-on a signal-caused `interrupted`, 1 otherwise. When the stream itself becomes unwritable mid-run
-(the consumer exited, the disk filled), hax stops the run and exits nonzero rather than keep
-working unobserved.
+One-shot mode in [usage.md](./usage.md#one-shot-mode)). A startup failure can end the stream before
+any result record, so also treat process exit as terminal. The exit status matches plain `-p`: 0 on
+`complete`, 130 on a signal-caused `interrupted`, 1 otherwise. When the stream itself becomes
+unwritable mid-run (the consumer exited, the disk filled), hax stops the run and exits nonzero
+rather than keep working unobserved.
 
 Example — watch tool calls and cost from a script, no state-directory knowledge needed:
 
@@ -127,5 +127,4 @@ hax --json "run the tests and fix the first failure" |
     jq 'select(.kind == "tool_call" or .type == "result")'
 ```
 
-The stream can be tried without a provider, from the repository root:
-`HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax --json go`.
+The mock provider shows the stream without credentials: `HAX_PROVIDER=mock hax --json hello`.

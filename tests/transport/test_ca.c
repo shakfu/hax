@@ -162,6 +162,28 @@ static void test_missing_default_probes_known_paths(void)
     free(dir);
 }
 
+static void test_valid_default_dir_does_not_cover_missing_default_file(void)
+{
+    char *root = t_tempdir();
+    make_file(root, "/etc/ssl/ca-bundle.pem");
+    make_file(root, "/etc/ssl/certs/4042bcee.0");
+
+    char *file = NULL;
+    char *dir = NULL;
+    EXPECT(ca_resolve(root, NULL, NULL, NULL, "OpenSSL/3.5.0", NULL,
+                      "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs", &file,
+                      &dir) == CA_STORE_PROBED);
+
+    char want_file[1024];
+    char want_dir[1024];
+    snprintf(want_file, sizeof(want_file), "%s/etc/ssl/ca-bundle.pem", root);
+    snprintf(want_dir, sizeof(want_dir), "%s/etc/ssl/certs", root);
+    EXPECT_STR_EQ(file, want_file);
+    EXPECT_STR_EQ(dir, want_dir);
+    free(file);
+    free(dir);
+}
+
 static void test_probe_prefers_debian_bundle(void)
 {
     char *root = t_tempdir();
@@ -403,6 +425,7 @@ int main(void)
     test_valid_curl_default_dir_left_alone();
     test_unhashed_curl_default_dir_rejected();
     test_missing_default_probes_known_paths();
+    test_valid_default_dir_does_not_cover_missing_default_file();
     test_probe_prefers_debian_bundle();
     test_probe_finds_fedora_bundle();
     test_probed_dir_needs_hashed_certs();

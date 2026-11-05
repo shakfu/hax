@@ -71,9 +71,9 @@ response, so any `~$` amount is an API-equivalent estimate from model metadata, 
 the subscription.
 
 Codex serves some models a smaller default context window than they support — the `/model` picker
-shows the sanctioned ceiling as "272k context (up to 872k)". A
-[`catalog.models`](./configuration.md#model-metadata) override raises the window for
-one model; keying the block `codex` leaves the `openai` provider alone:
+shows the sanctioned ceiling as "272k context (up to 872k)". A `catalog.models` override (see
+Model metadata in [configuration.md](./configuration.md#model-metadata)) raises the window for one
+model; keying the block `codex` leaves the `openai` provider alone:
 
 ```json
 {
@@ -119,8 +119,8 @@ hax --provider=openrouter --model=anthropic/claude-sonnet-5
 Turn stats and `/session` show the cost OpenRouter reports; `/usage` shows API key spend and
 available credits.
 
-The [transcript](debugging.md#transcript-log) reports the upstream endpoint OpenRouter routed each
-response to, which is how to confirm that `extra_body` routing preferences took effect.
+The transcript (Ctrl-T, or the `HAX_TRANSCRIPT` file) reports the upstream endpoint OpenRouter
+routed each response to, which is how to confirm that `extra_body` routing preferences took effect.
 
 By default hax sends app attribution (`HTTP-Referer`, `X-Title`, `X-OpenRouter-Categories`) and
 the conversation id as `x-session-id`, which OpenRouter uses for sticky routing and to group the
@@ -181,7 +181,7 @@ opt-out before sending proprietary code.
 
 ## llama.cpp
 
-`llama.cpp` connects to a local `llama-server`, by default at `http://127.0.0.1:8080/v1`:
+`llama.cpp` connects to a local `llama-server`, by default at `http://127.0.0.1:9931/v1`:
 
 ```sh
 llama-server -m /path/to/model.gguf -c 32768
@@ -190,8 +190,9 @@ hax --provider=llama.cpp
 
 Its config block is named `providers.llamacpp` because dots separate config path components.
 
-Use `HAX_LLAMACPP_PORT=9090` for another local port, or `HAX_LLAMACPP_BASE_URL` for a complete URL.
-If the server uses `--api-key`, set `HAX_LLAMACPP_API_KEY`.
+Use `HAX_LLAMACPP_PORT` for another local port (`8080` for llama.cpp releases before v0.7.0), or
+`HAX_LLAMACPP_BASE_URL` for a complete URL. If the server uses `--api-key`, set
+`HAX_LLAMACPP_API_KEY`.
 
 Both a classic single-model server and router mode (`llama-server` started without a model) work.
 hax adopts the model automatically when the server leaves no ambiguity — the single served model,
@@ -340,16 +341,16 @@ Advanced fields depend on the protocol:
 | `openai-responses` | `send_cache_key` |
 | `anthropic-messages` | `max_tokens`, `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`, `version` |
 
-Their values and defaults are listed under
-[Provider settings](./configuration.md#provider-settings). Leave them unset unless the endpoint
+Their values and defaults are listed under Provider settings in
+[configuration.md](./configuration.md#provider-settings). Leave them unset unless the endpoint
 documents a need; selecting a provider warns about block members hax does not recognize or that its
 `api` does not use.
 
 Reasoning replay needs no setup: hax returns a model's reasoning in the field the server streamed it
 in. Set `reasoning_roundtrip` to a field name only for a server that reads reasoning from a
 different field, or to `off` for one that rejects it. Turn `reasoning_required` on for a server
-that rejects tool calls without their reasoning, such as a proxy to DeepSeek; it takes effect once
-the field is known from `catalog_id` or `reasoning_roundtrip`.
+that rejects tool calls without their reasoning, such as a proxy to DeepSeek without a
+`catalog_id`; it takes effect once the field is known from `catalog_id` or `reasoning_roundtrip`.
 
 Every provider reads only its own block. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` variables belong
 to the shipped `openai-compatible` / `anthropic-compatible` blocks and do not bleed into others;
@@ -384,7 +385,10 @@ survives restarts, while `/new` starts a fresh one — for gateways that route o
   "providers": {
     "openrouter": {
       "extra_body": {
-        "provider": { "order": ["baseten"], "allow_fallbacks": false }
+        "provider": {
+          "order": ["baseten"],
+          "allow_fallbacks": false
+        }
       }
     },
     "gateway": {
@@ -409,12 +413,14 @@ literally into a header value — one more reason to prefer `$VAR`.
 
 ## Mock provider
 
-`mock` is a development backend with no network or model. It is hidden from auto-selection and the
-provider picker but can be selected explicitly:
+`mock` is a development backend with no network or model; without a script it echoes the prompt
+back. It is hidden from auto-selection and the provider picker but can be selected explicitly,
+which is handy for trying the interface or the `--json` stream without credentials:
 
 ```sh
 HAX_PROVIDER=mock hax
-HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax
 ```
 
-See [Troubleshooting and development diagnostics](./debugging.md#mock-provider) for its script format.
+Mock runs record no session unless `HAX_NO_SESSION=0` is set. `HAX_MOCK_SCRIPT` names a script of
+canned turns to replay instead; the format is described in `docs/debugging.md` in the hax source
+tree.

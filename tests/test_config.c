@@ -93,7 +93,7 @@ static void test_registry_default(void)
     clear_env();
     config_load(NULL);
     /* llamacpp.port has a fixed default in the registry. */
-    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), config_default("providers.llamacpp.port"));
     /* File overrides the default. */
     EXPECT(config_load("{\"providers\": {\"llamacpp\": {\"port\": \"9090\"}}}") == 0);
     EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "9090");
@@ -154,7 +154,7 @@ static void test_default_on_unset_and_invalid(void)
     EXPECT(config_load("{\"context_limit\": \"nope\"}") == 0);
     EXPECT(config_tokens("context_limit") == 0);
     /* config_default exposes the registry default tier directly. */
-    EXPECT_STR_EQ(config_default("providers.llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_default("providers.llamacpp.port"), "9931");
     EXPECT(config_default("model") == NULL);
     EXPECT(config_default("no.such.key") == NULL);
 
@@ -208,13 +208,14 @@ static void test_empty_means_unset(void)
     EXPECT(config_bool("show_reasoning") == 1);
     /* With no file value either, the registry default applies. */
     EXPECT(config_load(NULL) == 0);
-    EXPECT_STR_EQ(config_str_nonempty("providers.llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_str_nonempty("providers.llamacpp.port"),
+                  config_default("providers.llamacpp.port"));
     EXPECT(config_duration_ms("bash.timeout") == 120 * 1000);
     EXPECT(config_bool("show_reasoning") == 0);
     /* config_str applies the same policy now: an empty tier is skipped for a
      * setting where "" has no meaning, so the port reads its default rather
      * than a blank string. */
-    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), config_default("providers.llamacpp.port"));
     /* A setting that documents a meaning for empty keeps it verbatim. */
     setenv("HAX_SYSTEM_PROMPT", "", 1);
     const char *sp = config_str("system_prompt");
@@ -451,7 +452,7 @@ static void test_default_sentinel(void)
     setenv("HAX_LLAMACPP_PORT", "9999", 1);
     EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "9999");
     config_set_override("providers.llamacpp.port", CONFIG_VALUE_DEFAULT);
-    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), "8080");
+    EXPECT_STR_EQ(config_str("providers.llamacpp.port"), config_default("providers.llamacpp.port"));
     /* An empty override on this key is "unset" (a port has no meaning for
      * ""), so it falls through to the env value instead of reading blank —
      * distinct from the sentinel above, which lands on the default. */
@@ -893,6 +894,26 @@ static void test_choice_value_validation(void)
     EXPECT(!config_value_valid(theme, "dar"));
     EXPECT(!config_value_valid(theme, "darker"));
     EXPECT(!config_value_valid(theme, ""));
+}
+
+/* Only an explicit on/off spelling decides; auto, unset, and junk all defer to the consumer. */
+static void test_tristate(void)
+{
+    clear_env();
+    EXPECT(config_load(NULL) == 0);
+    EXPECT(config_tristate("image_input") == -1);
+    EXPECT(config_scoped_tristate("providers.x", "cache") == -1);
+    EXPECT(config_scoped_tristate(NULL, "cache") == -1);
+    EXPECT(config_load(
+               "{\"image_input\": \"off\","
+               " \"providers\": {\"x\": {\"cache\": true, \"reasoning_required\": \"maybe\"}}}") ==
+           0);
+    EXPECT(config_tristate("image_input") == 0);
+    EXPECT(config_scoped_tristate("providers.x", "cache") == 1);
+    EXPECT(config_scoped_tristate("providers.x", "reasoning_required") == -1);
+    EXPECT(config_load("{\"image_input\": \"auto\"}") == 0);
+    EXPECT(config_tristate("image_input") == -1);
+    EXPECT(config_load(NULL) == 0);
 }
 
 static void test_sort_models_auto(void)
@@ -2207,6 +2228,7 @@ int main(void)
     test_string_and_integer_value_validation();
     test_bounded_and_scaled_value_validation();
     test_choice_value_validation();
+    test_tristate();
     test_sort_models_auto();
     test_empty_policy();
     test_nested_and_flat();

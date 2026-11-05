@@ -20,14 +20,17 @@ from __future__ import annotations
 import atexit
 import difflib
 import errno
+import fcntl
 import os
 import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import textwrap
 import time
 import traceback
@@ -397,6 +400,27 @@ class Terminal:
     def send(self, *keys: str) -> None:
         """Send named keys in tmux's spelling: Enter, Escape, C-c, BSpace, ..."""
         self._run("send-keys", "-t", "hax", "--", *keys)
+
+    def resize(self, columns: int, rows: int) -> None:
+        """Resize the terminal and wait until hax would see the new size. tmux rewraps the rows
+        already on screen, as most terminals do."""
+        self._run("resize-window", "-t", "hax", "-x", str(columns), "-y", str(rows))
+        # tmux resizes the pane's pty after the command returns, so a key sent at once could reach
+        # hax while it still reads the old size.
+        tty = self._run("display-message", "-p", "-t", "hax", "#{pane_tty}").strip()
+        fd = os.open(tty, os.O_RDONLY | os.O_NOCTTY)
+        try:
+            deadline = time.monotonic() + 10
+            while True:
+                packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8))
+                height, width = struct.unpack("HHHH", packed)[:2]
+                if (width, height) == (columns, rows):
+                    return
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"pane stayed {width}x{height}, not {columns}x{rows}")
+                time.sleep(0.005)
+        finally:
+            os.close(fd)
 
     def screen(self, styles: bool = False) -> str:
         """The visible rows; `styles` keeps the SGR sequences that color and dim them."""

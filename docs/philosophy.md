@@ -36,13 +36,18 @@ instructions well. A convention documented in `AGENTS.md` or a skill usually rep
 
 ## Decisions
 
-### No MCP
+### No MCP in the core
 
 A capability the model needs is a CLI tool with a README. The model already knows how to run
 programs, read their help text, and recover from their errors; a skill (`SKILL.md`) tells it
 when to reach for one. This keeps capabilities usable outside hax too — by you, by scripts, by
 other agents — instead of locking them behind an agent-specific protocol, another long-running
 process, and another config surface.
+
+The same pattern covers services that offer only an MCP server:
+[hax-mcp](https://github.com/OleksandrChekhovskyi/hax-mcp) is a separate CLI with a skill that
+calls their tools from the shell, bringing tool definitions into the context only as a task needs
+them rather than all up front.
 
 ### No hooks or plugins
 

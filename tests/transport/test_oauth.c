@@ -403,25 +403,55 @@ static void test_listener_timeout_and_cancel(void)
     oauth_listener_close(listener);
 }
 
-/* A port whose [::1] side belongs to another service must be passed over — a browser resolving
- * localhost to ::1 would deliver the callback there — unless no candidate is fully free, where
- * v4-only coverage still beats failing. */
-static void test_listener_avoids_v6_conflict(void)
+/* Listen on an ephemeral [::1] port. Returns the fd and sets *port, or -1. */
+static int squat_v6(int *port)
 {
-    int squatter = socket(AF_INET6, SOCK_STREAM, 0);
-    if (squatter < 0)
-        T_SKIP("no IPv6 support");
+    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
     struct sockaddr_in6 addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin6_family = AF_INET6;
     addr.sin6_addr = in6addr_loopback;
-    if (bind(squatter, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(squatter, 1) != 0) {
-        close(squatter);
-        T_SKIP("cannot listen on ::1");
-    }
     socklen_t addr_len = sizeof(addr);
-    EXPECT(getsockname(squatter, (struct sockaddr *)&addr, &addr_len) == 0);
-    int taken_port = ntohs(addr.sin6_port);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(fd, 1) != 0 ||
+        getsockname(fd, (struct sockaddr *)&addr, &addr_len) != 0) {
+        close(fd);
+        return -1;
+    }
+    *port = ntohs(addr.sin6_port);
+    return fd;
+}
+
+/* Whether another socket holds 127.0.0.1:port. SO_REUSEADDR as the listener sets it, so TIME_WAIT
+ * does not count. */
+static int v4_port_held(int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return 0;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int held = bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 && errno == EADDRINUSE;
+    close(fd);
+    return held;
+}
+
+/* A port whose [::1] side belongs to another service must be passed over — a browser resolving
+ * localhost to ::1 would deliver the callback there — unless no candidate is fully free, where
+ * v4-only coverage still beats failing. The squatter's 127.0.0.1 side is unreserved, so a parallel
+ * test can bind it first; that port proves nothing, and the check moves to a fresh one. */
+static void test_listener_avoids_v6_conflict(void)
+{
+    int taken_port = 0;
+    int squatter = squat_v6(&taken_port);
+    if (squatter < 0)
+        T_SKIP("cannot listen on ::1");
 
     int port = 0;
     const int ports[] = {taken_port, 0};
@@ -431,8 +461,17 @@ static void test_listener_avoids_v6_conflict(void)
     EXPECT(port != taken_port);
     oauth_listener_close(listener);
 
-    const int only_conflicted[] = {taken_port};
-    listener = oauth_listener_open(only_conflicted, 1, &port);
+    for (int attempt = 0; attempt < 10; attempt++) {
+        const int only_conflicted[] = {taken_port};
+        listener = oauth_listener_open(only_conflicted, 1, &port);
+        if (listener || !v4_port_held(taken_port))
+            break;
+        close(squatter);
+        squatter = squat_v6(&taken_port);
+        EXPECT(squatter >= 0);
+        if (squatter < 0)
+            return;
+    }
     EXPECT(listener != NULL);
     EXPECT(port == taken_port);
     oauth_listener_close(listener);

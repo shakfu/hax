@@ -17,6 +17,7 @@
 #include "loopback.h"
 #include "model_meta.h"
 #include "provider.h"
+#include "system/clock.h"
 
 /* Parent-made temp root; children carve their own XDG_CACHE_HOME under it. */
 static char *g_root;
@@ -58,16 +59,25 @@ static void backdate_snapshot_days(long days)
     EXPECT(utimes(path, tv) == 0);
 }
 
-/* Poll the asynchronous refresh for at most three seconds. */
+/* Bound on the clock, not a poll count: under a parallel suite the fetch thread's connect and
+ * reply can take several seconds. Matches the loopback server's ten-second accept timeout. */
+#define FETCH_WAIT_MS 10000
+
+static void pause_10ms(void)
+{
+    struct timespec ts = {0, 10 * 1000 * 1000};
+    nanosleep(&ts, NULL);
+}
+
+/* Poll the asynchronous refresh until it lands or FETCH_WAIT_MS passes. */
 static int wait_for_rate(const char *provider_id, const char *model, double expected_rate)
 {
-    for (int attempt = 0; attempt < 300; attempt++) {
+    for (long start = monotonic_ms(); monotonic_ms() - start < FETCH_WAIT_MS;) {
         struct catalog_entry entry;
         if (catalog_lookup(NULL, provider_id, model, &entry) == 0 &&
             entry.cost_input == expected_rate)
             return 1;
-        struct timespec ts = {0, 10 * 1000 * 1000};
-        nanosleep(&ts, NULL);
+        pause_10ms();
     }
     return 0;
 }
@@ -139,10 +149,9 @@ static void run_bad_payload_scenario(const char *name, const char *bad_body)
     EXPECT(loopback_serve(&server) == 0);
     catalog_prefetch();
     /* catalog_shutdown joins validation after the server has delivered the full response. */
-    for (int i = 0; i < 300 && !atomic_load(&server.served); i++) {
-        struct timespec ts = {0, 10 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-    }
+    for (long start = monotonic_ms();
+         !atomic_load(&server.served) && monotonic_ms() - start < FETCH_WAIT_MS;)
+        pause_10ms();
     EXPECT(atomic_load(&server.served));
     loopback_stop(&server);
     catalog_shutdown();

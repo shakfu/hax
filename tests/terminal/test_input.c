@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -134,6 +135,33 @@ static void test_history_open_tty_ignores_piped_input(void)
     free(path);
 }
 
+static void test_readline_piped_trims(void)
+{
+    char *path = xasprintf("%s/stdin", t_tempdir());
+    FILE *f = fopen(path, "w");
+    EXPECT(f != NULL);
+    if (!f) {
+        free(path);
+        return;
+    }
+    fputs("  hi \t\n \n", f);
+    fclose(f);
+    int fd = open(path, O_RDONLY);
+    EXPECT(fd >= 0 && dup2(fd, STDIN_FILENO) == STDIN_FILENO);
+    close(fd);
+
+    struct input *in = input_new();
+    char *line = input_readline(in, "> ");
+    EXPECT_STR_EQ(line, "  hi");
+    free(line);
+    line = input_readline(in, "> ");
+    EXPECT_STR_EQ(line, "");
+    free(line);
+    EXPECT(input_readline(in, "> ") == NULL);
+    input_free(in);
+    free(path);
+}
+
 static void noop_view(void *user)
 {
     (void)user;
@@ -211,6 +239,7 @@ int main(void)
     test_history_missing_file();
     test_history_session_entry_persists_on_resubmit();
     test_history_open_tty_ignores_piped_input();
+    test_readline_piped_trims();
     test_modal_key_macro();
     test_modal_key_bind_and_rebind();
     test_modal_key_rejects_printable();

@@ -22,6 +22,7 @@
 #include "terminal/ui.h"
 #include "terminal/width.h"
 #include "text/fmt.h"
+#include "text/trim.h"
 #include "text/width.h"
 #include "tools/bash_env.h"
 
@@ -35,7 +36,7 @@ static const struct help_option {
      "spaces) when given, otherwise from stdin if stdin is not a terminal."},
     {"--json",
      "Non-interactive JSON output (implies -p): stream the run as JSON records on stdout, "
-     "one per line, ending with a result record. Format reference: docs/sessions.md."},
+     "one per line, ending with a result record. Format reference: hax-sessions(5)."},
     {"-c, --continue", "Resume the most recent conversation in this directory."},
     {"--resume[=ID]",
      "Resume a past conversation in this directory, restoring its recorded settings: pick "
@@ -100,7 +101,7 @@ void cli_print_help(void)
     fputc('\n', stdout);
     ui_wrapped_rows("The selection flags (--provider, --model, --effort, --preset) apply to "
                     "this run only and take priority over every other source. Configuration "
-                    "and precedence are covered in README.md.",
+                    "and precedence are covered in hax-config(5).",
                     0, columns, "");
 }
 
@@ -330,15 +331,6 @@ static char *read_stream(FILE *input)
     return buf_steal(&buffer);
 }
 
-static void strip_final_newline(char *text)
-{
-    size_t length = strlen(text);
-    if (length > 0 && text[length - 1] == '\n')
-        text[--length] = '\0';
-    if (length > 0 && text[length - 1] == '\r')
-        text[length - 1] = '\0';
-}
-
 int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FILE *input,
                     int input_is_tty, char **prompt)
 {
@@ -358,7 +350,6 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
             hax_err("failed to read stdin");
             return -1;
         }
-        strip_final_newline(*prompt);
     } else if (resuming) {
         return 0;
     } else {
@@ -366,7 +357,7 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
         return -1;
     }
 
-    if (!**prompt) {
+    if (!trim_prompt(*prompt)) {
         free(*prompt);
         *prompt = NULL;
         if (resuming)

@@ -25,10 +25,12 @@
 #include "system/spawn.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
+#include "terminal/live_region.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
 #include "text/display_safe.h"
+#include "text/trim.h"
 #include "text/utf8.h"
 #include "text/utf8_sanitize.h"
 #include "text/width.h"
@@ -60,10 +62,8 @@ static int editor_columns(int terminal_columns)
 
 static void refresh_terminal_size(struct input *in)
 {
-    int terminal_columns;
-
-    terminal_size(&terminal_columns, &in->terminal_rows);
-    in->display_columns = editor_columns(terminal_columns);
+    terminal_size(&in->terminal_columns, &in->terminal_rows);
+    in->display_columns = editor_columns(in->terminal_columns);
 }
 
 int input_display_cols(void)
@@ -296,39 +296,52 @@ static void handle_escape_sequence(struct input *in)
 
 /* ---------------- render / paint ---------------- */
 
-static void buf_append_csi(struct buf *out, int value, char final)
+static void write_frame(const struct buf *frame)
 {
-    char sequence[24];
-    int len = snprintf(sequence, sizeof(sequence), ANSI_CSI "%d%c", value, final);
-
-    buf_append(out, sequence, (size_t)len);
+    fwrite(frame->data ? frame->data : "", 1, frame->len, stdout);
+    fflush(stdout);
 }
 
-/* Raw mode disables OPOST, so row breaks must include CR. A clipped window already
- * starts on its first visible row and needs only that row's indent. */
+/* Rows are collected whole so the region records each one's painted width. A clipped window
+ * already starts on its first visible row and needs only that row's indent. */
 struct paint_context {
+    struct live_region *region;
     struct buf *frame;
+    struct buf row;
+    int row_cells;
     int first_row;
 };
+
+static void paint_flush_row(struct paint_context *context)
+{
+    live_region_add_row(context->region, context->frame, context->row.data ? context->row.data : "",
+                        context->row.len, context->row_cells);
+    buf_reset(&context->row);
+    context->row_cells = 0;
+}
 
 static void paint_emit(const struct input_render_event *event, void *user)
 {
     struct paint_context *context = user;
 
     if (event->kind == INPUT_RENDER_GLYPH) {
-        buf_append(context->frame, event->bytes, event->n);
+        buf_append(&context->row, event->bytes, event->n);
+        context->row_cells = event->col + event->width;
         return;
     }
     if (event->row > context->first_row)
-        buf_append_str(context->frame, ANSI_ERASE_LINE "\r\n");
+        paint_flush_row(context);
     for (int column = 0; column < event->col; column++)
-        buf_append(context->frame, " ", 1);
+        buf_append(&context->row, " ", 1);
+    context->row_cells = event->col;
 }
 
-/* Omit an indicator that would wrap because paint accounts for it as one row. Return
- * its width so resize recovery can account for later terminal reflow. */
-static int append_clip_indicator(struct buf *frame, int hidden_rows, int columns)
+/* Omit an indicator that would wrap, because the region counts it as one row. */
+static void add_clip_indicator(struct live_region *region, struct buf *frame, int hidden_rows,
+                               int columns)
 {
+    struct buf row;
+    buf_init(&row);
     int painted_width = 0;
 
     if (hidden_rows > 0) {
@@ -337,15 +350,15 @@ static int append_clip_indicator(struct buf *frame, int hidden_rows, int columns
                                     hidden_rows, hidden_rows == 1 ? "" : "s");
         int width = (int)strlen(indicator) - (have_utf8 ? 2 : 0);
         if (width < columns) {
-            buf_append_str(frame, ANSI_DIM);
-            buf_append_str(frame, indicator);
-            buf_append_str(frame, ANSI_BOLD_OFF);
+            buf_append_str(&row, ANSI_DIM);
+            buf_append_str(&row, indicator);
+            buf_append_str(&row, ANSI_BOLD_OFF);
             painted_width = width;
         }
         free(indicator);
     }
-    buf_append_str(frame, ANSI_ERASE_LINE);
-    return painted_width;
+    live_region_add_row(region, frame, row.data ? row.data : "", row.len, painted_width);
+    buf_free(&row);
 }
 
 /* Keep the prompt compact while reserving two rows for clipping indicators. */
@@ -385,20 +398,17 @@ static void paint(struct input *in)
     struct buf frame;
     buf_init(&frame);
     buf_append_str(&frame, ANSI_SYNC_BEGIN);
+    live_region_rewind(&in->region, &frame, in->terminal_columns);
 
-    if (in->painted_cursor_row > 0)
-        buf_append_csi(&frame, in->painted_cursor_row, 'A');
-    buf_append(&frame, "\r", 1);
+    if (clipped)
+        add_clip_indicator(&in->region, &frame, first_row, in->display_columns);
 
-    int top_indicator_width = 0;
-    if (clipped) {
-        top_indicator_width = append_clip_indicator(&frame, first_row, in->display_columns);
-        buf_append_str(&frame, "\r\n");
+    struct paint_context context = {.region = &in->region, .frame = &frame, .first_row = first_row};
+    buf_init(&context.row);
+    if (first_row == 0) {
+        buf_append_str(&context.row, in->prompt);
+        context.row_cells = prompt_width;
     }
-    if (first_row == 0)
-        buf_append_str(&frame, in->prompt);
-
-    struct paint_context context = {.frame = &frame, .first_row = first_row};
     if (clipped) {
         input_core_render_window(in->buf, in->len, in->cursor, prompt_width, continuation_column,
                                  in->display_columns, first_row, first_row + visible_rows - 1,
@@ -408,149 +418,48 @@ static void paint(struct input *in)
                           in->display_columns, paint_emit, &context, NULL);
     }
 
-    /* Ghost text after the buffer end; the cursor repositioning below lands on top of it. */
+    /* Ghost text after the buffer end; the cursor placement below lands on top of it. */
     in->ghost_painted = 0;
     if (!clipped && layout.end_col < in->display_columns) {
         char *ghost = input_core_ghost_text(in);
         if (ghost && *ghost) {
             char *fitted =
                 truncate_for_display(ghost, (size_t)(in->display_columns - layout.end_col));
-            buf_append_str(&frame, ANSI_DIM);
-            buf_append_str(&frame, fitted);
-            buf_append_str(&frame, ANSI_BOLD_OFF);
+            buf_append_str(&context.row, ANSI_DIM);
+            buf_append_str(&context.row, fitted);
+            buf_append_str(&context.row, ANSI_BOLD_OFF);
+            context.row_cells += (int)display_cells(fitted);
             in->ghost_painted = 1;
             free(fitted);
         }
         free(ghost);
     }
+    paint_flush_row(&context);
+    buf_free(&context.row);
 
-    if (clipped) {
-        buf_append_str(&frame, ANSI_ERASE_LINE "\r\n");
-        append_clip_indicator(&frame, layout.total_rows - first_row - visible_rows,
-                              in->display_columns);
-    }
-    buf_append_str(&frame, ANSI_ERASE_BELOW);
+    if (clipped)
+        add_clip_indicator(&in->region, &frame, layout.total_rows - first_row - visible_rows,
+                           in->display_columns);
 
-    int cursor_screen_row = clipped ? layout.cursor_row - first_row + 1 : layout.cursor_row;
-    int end_screen_row = clipped ? visible_rows + 1 : layout.end_row;
-    int rows_up = end_screen_row - cursor_screen_row;
-    if (rows_up > 0)
-        buf_append_csi(&frame, rows_up, 'A');
-    buf_append(&frame, "\r", 1);
-    if (layout.cursor_col > 0)
-        buf_append_csi(&frame, layout.cursor_col, 'C');
-
+    int cursor_row = clipped ? layout.cursor_row - first_row + 1 : layout.cursor_row;
+    live_region_end_frame(&in->region, &frame, cursor_row, layout.cursor_col);
     buf_append_str(&frame, ANSI_SYNC_END);
-    fwrite(frame.data, 1, frame.len, stdout);
-    fflush(stdout);
+    write_frame(&frame);
     buf_free(&frame);
 
-    in->painted_cursor_row = cursor_screen_row;
-    in->painted_rows = clipped ? visible_rows + 2 : layout.total_rows;
-    in->previous_paint_clipped = clipped;
     in->window_top = first_row;
-    in->top_indicator_width = top_indicator_width;
-}
-
-/* Record row widths under the old geometry for resize reflow calculations. */
-struct row_widths {
-    int *values;
-    int capacity;
-    int count;
-    int current;
-};
-
-static void collect_row_width(const struct input_render_event *event, void *user)
-{
-    struct row_widths *widths = user;
-
-    if (event->kind == INPUT_RENDER_GLYPH) {
-        int end_column = event->col + event->width;
-        if (end_column > widths->current)
-            widths->current = end_column;
-        return;
-    }
-    if (widths->count < widths->capacity)
-        widths->values[widths->count] = widths->current;
-    widths->count++;
-    widths->current = event->col;
-}
-
-/* On width changes, rewalk the old layout to account for terminals that reflow each
- * painted row into multiple physical rows. This must run before applying the next key so the
- * saved paint state still describes the screen. Terminals that truncate instead of reflowing
- * may briefly over-clear or leave one stale row. */
-static int handle_resize(struct input *in)
-{
-    int terminal_columns;
-    int new_rows;
-
-    terminal_size(&terminal_columns, &new_rows);
-    int new_columns = editor_columns(terminal_columns);
-    if (new_columns == in->display_columns && new_rows == in->terminal_rows)
-        return 0;
-
-    int old_columns = in->display_columns;
-    in->display_columns = new_columns;
-    in->terminal_rows = new_rows;
-    if (new_columns == old_columns) {
-        if (new_rows > 0 && in->painted_cursor_row >= new_rows)
-            in->painted_cursor_row = new_rows - 1;
-        return 1;
-    }
-
-    int cursor_climb = 0;
-    if (in->painted_rows > 0 && new_columns > 0) {
-        int prompt_width = input_core_prompt_width(in->prompt);
-        int capacity = in->window_top + in->painted_rows + 1;
-        struct row_widths widths = {
-            .values = xcalloc((size_t)capacity, sizeof(int)),
-            .capacity = capacity,
-            .current = prompt_width,
-        };
-        struct input_layout layout;
-        int continuation_column = in->continuation_at_column_zero ? 0 : prompt_width;
-
-        input_core_render(in->buf, in->len, in->cursor, prompt_width, continuation_column,
-                          old_columns, collect_row_width, &widths, &layout);
-        if (widths.count < widths.capacity)
-            widths.values[widths.count] = widths.current;
-        widths.count++;
-
-        int first_row = in->previous_paint_clipped ? in->window_top : 0;
-        if (in->previous_paint_clipped) {
-            cursor_climb = in->top_indicator_width > 0
-                               ? (in->top_indicator_width + new_columns - 1) / new_columns
-                               : 1;
-        }
-        int last_row = layout.cursor_row < widths.count ? layout.cursor_row : widths.count;
-        if (last_row > first_row)
-            cursor_climb +=
-                reflow_physical_rows(widths.values + first_row, last_row - first_row, new_columns);
-        cursor_climb += layout.cursor_col / new_columns;
-        free(widths.values);
-
-        /* A terminal cannot retain more rows above the cursor than its viewport. */
-        if (new_rows > 0 && cursor_climb >= new_rows)
-            cursor_climb = new_rows - 1;
-    }
-
-    in->painted_cursor_row = cursor_climb;
-    in->painted_rows = 0;
-    return 1;
 }
 
 static void leave_edit_area(struct input *in)
 {
-    int down = in->painted_rows - 1 - in->painted_cursor_row;
-    if (down > 0)
-        printf(ANSI_CSI "%dB", down);
+    struct buf frame;
+    buf_init(&frame);
+    live_region_leave(&in->region, &frame, in->terminal_columns);
     if (in->ghost_painted)
-        fputs(ANSI_ERASE_LINE, stdout);
-    fputs("\r\n", stdout);
-    fflush(stdout);
-    in->painted_cursor_row = 0;
-    in->painted_rows = 0;
+        buf_append_str(&frame, ANSI_ERASE_LINE);
+    buf_append_str(&frame, "\r\n");
+    write_frame(&frame);
+    buf_free(&frame);
     in->ghost_painted = 0;
 }
 
@@ -600,44 +509,23 @@ static void render_submitted(struct input *in)
 
     buf_init(&frame);
     buf_append_str(&frame, ANSI_SYNC_BEGIN);
-    if (in->painted_cursor_row > 0)
-        buf_append_csi(&frame, in->painted_cursor_row, 'A');
-    buf_append(&frame, "\r", 1);
+    live_region_rewind(&in->region, &frame, in->terminal_columns);
     append_user_message(&frame, in->buf, in->len, in->display_columns);
     buf_append_str(&frame, ANSI_ERASE_BELOW);
     buf_append_str(&frame, ANSI_SYNC_END);
-    fwrite(frame.data, 1, frame.len, stdout);
-    fflush(stdout);
+    write_frame(&frame);
     buf_free(&frame);
-
-    in->painted_cursor_row = 0;
-    in->painted_rows = 0;
     in->ghost_painted = 0;
 }
 
-/* Erase line-by-line because erase-below from the top of the screen can push a stale
- * screen into scrollback in tmux and some terminals. Cursor-down clamps instead of scrolling. */
 static void erase_edit_area(struct input *in)
 {
     struct buf frame;
-    int rows = in->painted_rows > 0 ? in->painted_rows : 1;
 
     buf_init(&frame);
-    if (in->painted_cursor_row > 0)
-        buf_append_csi(&frame, in->painted_cursor_row, 'A');
-    buf_append(&frame, "\r", 1);
-    for (int row = 0; row < rows; row++) {
-        buf_append_str(&frame, ANSI_ERASE_LINE);
-        if (row + 1 < rows)
-            buf_append_csi(&frame, 1, 'B');
-    }
-    if (rows > 1)
-        buf_append_csi(&frame, rows - 1, 'A');
-    fwrite(frame.data, 1, frame.len, stdout);
-    fflush(stdout);
+    live_region_erase(&in->region, &frame, in->terminal_columns);
+    write_frame(&frame);
     buf_free(&frame);
-    in->painted_cursor_row = 0;
-    in->painted_rows = 0;
     in->ghost_painted = 0;
 }
 
@@ -711,15 +599,7 @@ static void open_editor(struct input *in)
     char *content = aborted ? NULL : fs_read_file(path, &n);
     unlink(path);
     if (content) {
-        /* The edit buffer is NUL-terminated; preserve embedded NUL positions as spaces. */
-        for (size_t k = 0; k < n; k++) {
-            if (content[k] == '\0')
-                content[k] = ' ';
-        }
-        /* Drop one trailing newline — most editors append one automatically. */
-        if (n > 0 && content[n - 1] == '\n')
-            content[--n] = '\0';
-        input_core_set_buffer(in, content);
+        input_core_load_edited(in, content, n);
         free(content);
     }
 
@@ -976,7 +856,7 @@ static enum history_search_outcome search_history(struct input *in)
         if (read_byte_blocking(&key) <= 0)
             break;
 
-        handle_resize(in);
+        refresh_terminal_size(in);
 
         if (key == 0x12 || key == 0x13) {
             direction = key == 0x12 ? HISTORY_SEARCH_OLDER : HISTORY_SEARCH_NEWER;
@@ -1343,6 +1223,7 @@ char *input_readline(struct input *in, const char *prompt)
             return NULL;
         char *clean = utf8_sanitize(raw, n);
         free(raw);
+        trim_prompt(clean);
         return clean;
     }
 
@@ -1362,11 +1243,8 @@ char *input_readline(struct input *in, const char *prompt)
     in->exit_armed = 0;
     in->last_key_was_tab = 0;
     clear_candidates(in);
-    in->painted_cursor_row = 0;
-    in->painted_rows = 0;
-    in->previous_paint_clipped = 0;
+    live_region_forget(&in->region);
     in->window_top = 0;
-    in->top_indicator_width = 0;
 
     fflush(stdout);
     enable_raw_mode(in);
@@ -1383,9 +1261,7 @@ char *input_readline(struct input *in, const char *prompt)
             break;
         }
 
-        /* Resize recovery needs the buffer state that produced the current screen. */
-        if (handle_resize(in))
-            paint(in);
+        refresh_terminal_size(in);
 
         if (c != 0x03)
             in->exit_armed = 0;
@@ -1445,12 +1321,10 @@ char *input_readline(struct input *in, const char *prompt)
             break;
         case 0x0c: /* Ctrl-L — clear screen + repaint */
             fputs(ANSI_ERASE_SCREEN ANSI_CURSOR_HOME, stdout);
-            in->painted_cursor_row = 0;
-            in->painted_rows = 0;
+            live_region_forget(&in->region);
             break;
-        case 0x0d: /* CR — Enter; empty requires a placeholder */
-            if (in->len > 0 || in->empty_placeholder)
-                submit = 1;
+        case 0x0d: /* CR — Enter */
+            submit = input_core_submit_ready(in);
             break;
         case 0x0e: /* Ctrl-N */
             input_core_history_next(in);
@@ -1459,8 +1333,8 @@ char *input_readline(struct input *in, const char *prompt)
             input_core_history_prev(in);
             break;
         case 0x12: /* Ctrl-R — incremental reverse history search */
-            if (search_history(in) == HISTORY_SEARCH_SUBMIT && in->len > 0)
-                submit = 1;
+            if (search_history(in) == HISTORY_SEARCH_SUBMIT)
+                submit = input_core_submit_ready(in);
             break;
         case 0x15: /* Ctrl-U */
             input_core_kill_to_bol(in);

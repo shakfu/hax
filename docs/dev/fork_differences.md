@@ -10,8 +10,8 @@ it can be dropped. Check this file when merging upstream.
 jansson 2.14.1 defines a global `int utf8_encode(int32_t, char *, size_t *)` in `src/utf.c`.
 Upstream's `size_t utf8_encode(uint32_t, char[4])` has the same name:
 
-- Static jansson (`make wheel`, `scripts/build_static.sh`): the link fails with
-  `multiple definition of 'utf8_encode'`.
+- Static jansson (`make wheel`, `scripts/build_linux.sh`, `scripts/build_macos.sh`): the link
+  fails with `multiple definition of 'utf8_encode'`.
 - Shared jansson from `subprojects/jansson.wrap`: the build exports every symbol, so hax's
   definition replaces jansson's. jansson reads the returned length as an error, and
   `json_loads` aborts at `load.c:417` on any `\uXXXX` escape.

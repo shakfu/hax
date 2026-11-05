@@ -430,6 +430,45 @@ static void test_commit_paste(void)
     input_free(in);
 }
 
+static void test_submit_ready_trims(void)
+{
+    struct input *in = new_with("hi\n\n");
+    in->cursor = 0;
+    EXPECT(input_core_submit_ready(in));
+    EXPECT_STR_EQ(in->buf, "hi");
+    EXPECT(in->len == 2);
+    EXPECT(in->cursor == 2);
+
+    input_core_set_buffer(in, " \n\n");
+    EXPECT(!input_core_submit_ready(in));
+    EXPECT_STR_EQ(in->buf, "");
+    EXPECT(in->cursor == 0);
+
+    input_core_set_buffer(in, " \n");
+    in->empty_placeholder = xstrdup("continue");
+    EXPECT(input_core_submit_ready(in));
+    EXPECT_STR_EQ(in->buf, "");
+
+    input_free(in);
+}
+
+static void test_load_edited(void)
+{
+    struct input *in = new_with("draft");
+    in->cursor = 0;
+
+    input_core_load_edited(in, "\n  a\0b\n\n", 8);
+    EXPECT_STR_EQ(in->buf, "  a b");
+    EXPECT(in->len == 5);
+    EXPECT(in->cursor == 5);
+
+    input_core_load_edited(in, "", 0);
+    EXPECT_STR_EQ(in->buf, "");
+    EXPECT(in->cursor == 0);
+
+    input_free(in);
+}
+
 static void test_motions_ascii(void)
 {
     struct input *in = new_with("hi");
@@ -1222,6 +1261,8 @@ int main(void)
     test_set_buffer_and_insert();
     test_replace_span();
     test_commit_paste();
+    test_submit_ready_trims();
+    test_load_edited();
     test_motions_ascii();
     test_motions_utf8();
     test_motions_malformed_utf8();

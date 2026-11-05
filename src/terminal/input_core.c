@@ -6,8 +6,11 @@
 #include <string.h>
 
 #include "xalloc.h"
+#include "terminal/escape.h"
 #include "terminal/input.h"
+#include "terminal/live_region.h"
 #include "text/display_safe.h"
+#include "text/trim.h"
 #include "text/utf8.h"
 
 /* ---------------- public API: alloc / free ---------------- */
@@ -34,6 +37,7 @@ void input_free(struct input *in)
     free(in->preseed);
     free(in->empty_placeholder);
     free(in->candidates);
+    live_region_free(&in->region);
     free(in);
 }
 
@@ -71,12 +75,8 @@ int input_core_prompt_width(const char *prompt)
         unsigned char byte = (unsigned char)prompt[offset];
         if (byte == '\n')
             break;
-        if (byte == 0x1b && offset + 1 < len && prompt[offset + 1] == '[') {
-            offset += 2;
-            while (offset < len && (unsigned char)prompt[offset] < 0x40)
-                offset++;
-            if (offset < len)
-                offset++;
+        if (byte == 0x1b) {
+            offset += escape_sequence_len(prompt + offset, len - offset);
             continue;
         }
 
@@ -139,6 +139,23 @@ void input_core_commit_paste(struct input *in, const char *body, size_t len)
         }
     }
     input_core_insert(in, body, len);
+}
+
+int input_core_submit_ready(struct input *in)
+{
+    in->len = trim_prompt(in->buf);
+    in->cursor = in->len;
+    return in->len > 0 || in->empty_placeholder;
+}
+
+void input_core_load_edited(struct input *in, const char *text, size_t len)
+{
+    ensure_buffer_capacity(in, len + 1);
+    for (size_t i = 0; i < len; i++)
+        in->buf[i] = text[i] ? text[i] : ' ';
+    in->buf[len] = '\0';
+    in->len = trim_prompt(in->buf);
+    in->cursor = in->len;
 }
 
 void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text)

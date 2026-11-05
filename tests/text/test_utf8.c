@@ -62,6 +62,16 @@ static void test_sequence_valid_four_byte(void)
     EXPECT(utf8_sequence_is_valid("\xF4\x8F\xBF\xBF", 4) == 1); /* U+10FFFF */
 }
 
+static void test_decode_codepoint(void)
+{
+    uint32_t codepoint = 0;
+    EXPECT(utf8_decode_codepoint("a", 1, &codepoint) && codepoint == 'a');
+    EXPECT(utf8_decode_codepoint("\xC3\xA9", 2, &codepoint) && codepoint == 0xE9);
+    EXPECT(utf8_decode_codepoint("\xEF\xB8\x8F", 3, &codepoint) && codepoint == 0xFE0F);
+    EXPECT(utf8_decode_codepoint("\xF0\x9F\x8F\xBD", 4, &codepoint) && codepoint == 0x1F3FD);
+    EXPECT(!utf8_decode_codepoint("\xED\xA0\x80", 3, &codepoint)); /* surrogate */
+}
+
 static void test_sequence_valid_rejects_overlong(void)
 {
     /* C0 80 would encode U+0000 as 2 bytes — overlong, must reject. */
@@ -482,6 +492,7 @@ int main(void)
     test_sequence_valid_two_byte();
     test_sequence_valid_three_byte();
     test_sequence_valid_four_byte();
+    test_decode_codepoint();
     test_sequence_valid_rejects_overlong();
     test_sequence_valid_rejects_surrogate();
     test_sequence_valid_rejects_above_max();

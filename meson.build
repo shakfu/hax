@@ -1,5 +1,5 @@
 project('hax', 'c',
-    version: '0.5.0',
+    version: '0.6.1',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -91,7 +91,6 @@ sources = files(
     'src/file_mention.c',
     'src/hax_embed.c',
     'src/history.c',
-    'src/login.c',
     'src/model_meta.c',
     'src/model_sort.c',
     'src/oneshot.c',
@@ -107,6 +106,10 @@ sources = files(
     'src/transcript.c',
     'src/turn.c',
     'src/xalloc.c',
+
+    'src/commands/login.c',
+    'src/commands/session_cmd.c',
+    'src/commands/tasks.c',
 
     'src/providers/anthropic_body.c',
     'src/providers/anthropic_events.c',
@@ -136,6 +139,7 @@ sources = files(
     'src/render/ctrl_strip.c',
     'src/render/diff_color.c',
     'src/render/disp.c',
+    'src/render/footer.c',
     'src/render/markdown.c',
     'src/render/markdown_scan.c',
     'src/render/markdown_table.c',
@@ -161,12 +165,15 @@ sources = files(
     'src/system/tempfiles.c',
 
     'src/terminal/clipboard.c',
+    'src/terminal/escape.c',
     'src/terminal/input.c',
     'src/terminal/input_core.c',
     'src/terminal/interrupt.c',
+    'src/terminal/live_region.c',
     'src/terminal/notify.c',
     'src/terminal/picker.c',
     'src/terminal/picker_core.c',
+    'src/terminal/sgr.c',
     'src/terminal/theme.c',
     'src/terminal/ui.c',
     'src/terminal/vt_resolve.c',
@@ -182,6 +189,7 @@ sources = files(
     'src/text/placeholder.c',
     'src/text/sha256.c',
     'src/text/shell_quote.c',
+    'src/text/trim.c',
     'src/text/url.c',
     'src/text/utf8.c',
     'src/text/utf8_sanitize.c',
@@ -262,6 +270,32 @@ hax_exe = executable('hax',
     'src/main.c',
     dependencies: [hax_dep],
     install: true,
+)
+
+python = import('python').find_installation()
+
+# Man pages rendered from docs/ by scripts/md2man.py, which owns the page list and checks this
+# output list against it. meson itself runs on Python, so the pages cost no extra dependency.
+custom_target('man',
+    input: 'scripts/md2man.py',
+    output: ['hax.1', 'hax-config.5', 'hax-sessions.5', 'hax-providers.7'],
+    depend_files: files(
+        'CHANGELOG.md',
+        'docs/configuration.md',
+        'docs/man/hax.1.md',
+        'docs/providers.md',
+        'docs/sessions.md',
+        'docs/usage.md',
+    ),
+    command: [python, '@INPUT@', meson.project_version(), '@OUTPUT@'],
+    build_by_default: true,
+    install: true,
+    install_dir: [
+        get_option('mandir') / 'man1',
+        get_option('mandir') / 'man5',
+        get_option('mandir') / 'man5',
+        get_option('mandir') / 'man7',
+    ],
 )
 
 subdir('tests')

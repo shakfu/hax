@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include <stdlib.h>
 
+#include "buf.h"
 #include "harness.h"
+#include "system/locale.h"
 #include "terminal/width.h"
 
 static void test_auto_display_width(void)
@@ -70,12 +72,38 @@ static void test_reflow_physical_rows(void)
     EXPECT(reflow_physical_rows(NULL, 0, 80) == 0);
 }
 
+static void test_clip_styled_row(void)
+{
+    struct buf out;
+    buf_init(&out);
+
+    /* Escapes pass through at zero width; a fitting row comes back whole. */
+    EXPECT(clip_styled_row(&out, "\x1b[2mab\x1b[0m", 10, 4, 1) == 2);
+    EXPECT_STR_EQ(out.data, "\x1b[2mab\x1b[0m");
+
+    /* A clipped row ends in a reset, as the cut may leave styling open. */
+    buf_reset(&out);
+    EXPECT(clip_styled_row(&out, "\x1b[2mabcdef", 10, 4, 1) == 4);
+    EXPECT_STR_EQ(out.data, "\x1b[2mabcd\x1b[0m");
+
+    /* A wide character that would straddle the limit leaves an ellipsis in its place. */
+    buf_reset(&out);
+    EXPECT(clip_styled_row(&out, "a\xe6\xbc\xa2\xe6\xbc\xa2", 7, 4, 1) == 4);
+    EXPECT_STR_EQ(out.data, "a\xe6\xbc\xa2\xe2\x80\xa6\x1b[0m");
+    buf_reset(&out);
+    EXPECT(clip_styled_row(&out, "a\xe6\xbc\xa2\xe6\xbc\xa2", 7, 4, 0) == 4);
+    EXPECT_STR_EQ(out.data, "a\xe6\xbc\xa2.\x1b[0m");
+    buf_free(&out);
+}
+
 int main(void)
 {
+    locale_init_utf8();
     test_auto_display_width();
     test_display_width_auto();
     test_display_width_env_override();
     test_reflow_physical_rows();
+    test_clip_styled_row();
 
     T_REPORT();
 }
