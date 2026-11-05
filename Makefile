@@ -4,13 +4,15 @@
 
 BUILD_DIR ?= build
 
-.PHONY: all tests lint bindings wheel install symlink clean
+.PHONY: all test tests lint bindings wheel install symlink clean
 
 all:
 	@BUILD_DIR=$(BUILD_DIR) scripts/check.sh build
 
 tests:
 	@BUILD_DIR=$(BUILD_DIR) scripts/check.sh test
+
+test: tests
 
 lint:
 	@scripts/check.sh lint
