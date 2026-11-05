@@ -33,7 +33,10 @@ wheel: export MACOSX_DEPLOYMENT_TARGET := $(MACOSX_DEPLOYMENT_TARGET)
 wheel:
 	uv build --wheel
 
+# Meson fixes the prefix at setup, so set it on the existing build dir before installing.
+PREFIX ?= $(HOME)/.local
 install: all
+	@meson configure -Dprefix="$(PREFIX)" $(BUILD_DIR) >/dev/null
 	meson install -C $(BUILD_DIR)
 
 # hax resolves subagent `hax` invocations through PATH, so development is nicest

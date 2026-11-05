@@ -47,6 +47,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Changed
 
+- `make install` installs into `~/.local` instead of `/usr/local`, so it needs no sudo. Set
+  `PREFIX` to install elsewhere.
 - The wheel is now installable on a machine other than the one that built it. It previously
   linked the packager's own jansson by absolute path -- `/opt/homebrew/opt/jansson/...` -- and
   loaded nowhere else, and on macOS it was tagged for the OS version of the build machine rather

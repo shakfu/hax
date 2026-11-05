@@ -66,7 +66,7 @@ git clone https://github.com/OleksandrChekhovskyi/hax.git
 cd hax
 scripts/install_deps.sh   # Debian/Ubuntu, Fedora, Arch, openSUSE, Alpine, macOS, FreeBSD, OpenBSD
 make                      # the binary is now at ./build/hax
-make install              # optional; may prompt for sudo
+make install              # optional; installs into ~/.local (PREFIX=... to override)
 ```
 
 `scripts/install_deps.sh` installs the build dependencies — a C compiler, `libcurl`,
