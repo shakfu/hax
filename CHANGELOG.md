@@ -39,6 +39,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   process rather than one agent; constructing a second `Agent` used to raise. Configuration stays
   process-wide, so each agent copies its provider and model as it is built and `cancel()` remains
   process-wide. See [bindings/python/README.md](bindings/python/README.md).
+- In a [herdr](https://herdr.dev) pane, the REPL reports `working` and `idle` to herdr, plus the
+  command that resumes the conversation, so herdr reopens it after a restart. See
+  [docs/usage.md](docs/usage.md#running-inside-herdr).
 - Man pages for offline reference: `man hax` for usage, plus `hax-config(5)`, `hax-sessions(5)`,
   and `hax-providers(7)`. Packages and source builds install them; the prebuilt binaries do not.
 

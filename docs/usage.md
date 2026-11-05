@@ -225,6 +225,14 @@ error naming what the session recorded, while the REPL warns and resumes without
 `--no-session` (or `no_session`) prevents new session and prompt-history writes. It does not hide
 existing sessions or disable prompt recall.
 
+## Running inside herdr
+
+In a [herdr](https://herdr.dev) pane, the REPL reports its state to herdr: `working` during a turn
+and `idle` at the prompt. Once the conversation is recorded, hax also reports
+`hax --resume=<id>`, so herdr reopens the conversation after a restart. herdr runs that command
+by name, so it starts the first `hax` on `PATH`. Quitting releases the pane. One-shot runs report
+nothing.
+
 ## Pausing and steering
 
 The first Esc requests a clean pause. Work already in flight normally finishes, including tool calls,

@@ -201,7 +201,10 @@ int spawn_detached(const char *const *argv)
     pid_t pid = spawn_fork();
     if (pid == 0) {
         /* Double-fork: the grandchild is reparented to init, so a child that stays alive
-         * indefinitely is never waited on, killed, or left as a zombie. */
+         * indefinitely is never waited on, killed, or left as a zombie. A new session before the
+         * second fork means the grandchild already holds it when this call returns, so the
+         * terminal's hangup when the caller exits as session leader does not reach it. */
+        setsid();
         pid_t grandchild = spawn_fork();
         if (grandchild != 0)
             _exit(grandchild < 0 ? 127 : 0);

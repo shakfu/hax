@@ -4,8 +4,8 @@ Scenario files are standalone Python scripts, one per user-facing area, register
 `e2e_scenarios` in tests/meson.build. A file defines one test_* function per scenario and ends with
 `harness.main(globals())`, which runs them in order, reports each failure under its function's
 name, and exits 1 if any failed. Each run gets a scratch HOME and working directory (removed at
-process exit) and an environment stripped of inherited HAX_*/XDG_* settings, so scenarios neither
-depend on nor touch the developer's real configuration and sessions.
+process exit) and an environment stripped of inherited HAX_*/XDG_*/HERDR_* settings, so scenarios
+neither depend on nor touch the developer's real configuration, sessions, or herdr pane.
 
 HAX_BIN selects the binary under test; it defaults to build/hax so a file can also be run directly
 from the repo root, optionally naming the scenarios to run: `test_oneshot.py test_json_stream`.
@@ -77,7 +77,7 @@ def hermetic_env(home: Path) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith("HAX_") and not key.startswith("XDG_")
+        if not key.startswith(("HAX_", "XDG_", "HERDR_"))
     }
     env["HOME"] = str(home)
     # Never fork real power-management helpers (caffeinate / systemd-inhibit).

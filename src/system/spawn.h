@@ -21,7 +21,8 @@ int spawn_shell_wait(const char *shell_cmd);
 char *spawn_shell_cmd_force_utf8(char *shell_cmd);
 
 /* Fire-and-forget: run `argv` directly, detached and with stdio redirected to /dev/null. The
- * child is reparented to init, so it is never waited on or killed and may outlive the caller.
+ * child is reparented to init in a session of its own, so it is never waited on or killed, and
+ * outlives the caller even when the caller's exit hangs up its terminal.
  * Returns 0 when the detached child was spawned — which says nothing about the exec or the
  * program succeeding — and -1 when forking failed. */
 int spawn_detached(const char *const *argv);

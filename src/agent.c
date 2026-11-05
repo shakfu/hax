@@ -38,6 +38,7 @@
 #include "system/spawn.h"
 #include "system/tempfiles.h"
 #include "terminal/ansi.h"
+#include "terminal/herdr.h"
 #include "terminal/input.h"
 #include "terminal/input_core.h"
 #include "terminal/interrupt.h"
@@ -1117,6 +1118,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
          * the editor keeps swallowing bare Enter. */
         input_set_empty_submit(input, resume_placeholder(state.resume_reason));
         cursor_show();
+        herdr_report(HERDR_IDLE, session_log_resume_hint(state.session_log));
         /* Rebuilt each iteration so a runtime theme change (/config theme …)
          * recolors the prompt instead of keeping the startup theme's bytes. */
         char *line = input_readline(input, build_prompt(prompt_buffer, sizeof(prompt_buffer)));
@@ -1161,6 +1163,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             free(line);
             continue;
         }
+
+        herdr_report(HERDR_WORKING, session_log_resume_hint(state.session_log));
 
         /* Settle deferred compaction before appending steering input or sending another oversized
          * request. */
@@ -1304,6 +1308,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     }
 
     finalize_tasks(&state);
+    herdr_release();
 
     const char *resume_hint = session_log_resume_hint(state.session_log);
     if (resume_hint)

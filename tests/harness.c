@@ -14,7 +14,8 @@
 int t_failures;
 int t_skips;
 
-/* A hax parent or the user's shell would otherwise configure every test through the registry. */
+/* A hax parent or the user's shell would otherwise configure every test through the registry, and
+ * a herdr pane's HERDR_* would aim state reports at that pane. */
 __attribute__((constructor)) static void t_clear_hax_environment(void)
 {
     extern char **environ;
@@ -28,7 +29,8 @@ __attribute__((constructor)) static void t_clear_hax_environment(void)
     size_t name_count = 0;
     for (size_t i = 0; i < count; i++) {
         const char *equals = strchr(environ[i], '=');
-        if (strncmp(environ[i], "HAX_", 4) == 0 && equals)
+        if ((strncmp(environ[i], "HAX_", 4) == 0 || strncmp(environ[i], "HERDR_", 6) == 0) &&
+            equals)
             names[name_count++] = strndup(environ[i], (size_t)(equals - environ[i]));
     }
     for (size_t i = 0; i < name_count; i++) {

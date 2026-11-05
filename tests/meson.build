@@ -113,6 +113,7 @@ test_sources = [
 
     'terminal/test_clipboard.c',
     'terminal/test_escape.c',
+    'terminal/test_herdr.c',
     'terminal/test_input.c',
     'terminal/test_input_core.c',
     'terminal/test_interrupt.c',
@@ -184,6 +185,7 @@ endforeach
 e2e_scenarios = [
     'oneshot',
     'repl_complete',
+    'repl_herdr',
     'repl_interrupt',
     'repl_resize',
     'repl_smoke',
