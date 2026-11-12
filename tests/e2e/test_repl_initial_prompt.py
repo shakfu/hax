@@ -7,9 +7,19 @@ import subprocess
 import harness
 
 
+# One reply per user turn; the first run sends two.
+SCRIPT = """
+    text Hello from mock
+    end-turn
+
+    text Hello again
+    end-turn
+    """
+
+
 def run_repl(args: list[str], stdin: str) -> harness.Result:
     home, workdir = harness.make_home()
-    env = harness.mock_env(home, "hello.txt", {"HAX_TRANSCRIPT": str(workdir / "transcript.txt")})
+    env = harness.mock_env(home, SCRIPT, {"HAX_TRANSCRIPT": str(workdir / "transcript.txt")})
     proc = subprocess.run(
         [str(harness.hax_binary()), *args],
         cwd=workdir,

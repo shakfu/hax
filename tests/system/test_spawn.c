@@ -320,6 +320,44 @@ static void test_detached_runs_helper(void)
     free(content);
 }
 
+/* A caller that leads its terminal's session hangs up its process group on exit. The helper
+ * sleeps so the hangup lands while it still runs, and must survive it to publish its file. */
+static void test_detached_survives_group_hangup(void)
+{
+    const char *out_path = tmp_path("hangup.txt");
+    pid_t pid = fork();
+    if (pid == 0) {
+        setpgid(0, 0);
+        char *command = xasprintf("sleep 1; printf survived > '%s.tmp' && mv '%s.tmp' '%s'",
+                                  out_path, out_path, out_path);
+        const char *argv[] = {"/bin/sh", "-c", command, NULL};
+        int spawned = spawn_detached(argv);
+        signal(SIGHUP, SIG_DFL);
+        kill(0, SIGHUP);
+        _exit(spawned == 0 ? 0 : 1);
+    }
+    if (pid < 0) {
+        EXPECT(0); /* fork failed: never use pid */
+        return;
+    }
+    int status = spawn_wait_child(pid);
+    EXPECT(WIFSIGNALED(status) && WTERMSIG(status) == SIGHUP);
+
+    /* Bounded on the clock: detached spawns slow down under a parallel suite. */
+    char *content = NULL;
+    for (time_t started = time(NULL); !content && time(NULL) - started < 20;) {
+        content = read_file(out_path);
+        if (!content) {
+            struct timespec pause_ts = {.tv_nsec = 10 * 1000 * 1000};
+            nanosleep(&pause_ts, NULL);
+        }
+    }
+    EXPECT(content != NULL);
+    if (content)
+        EXPECT_STR_EQ(content, "survived");
+    free(content);
+}
+
 /* An exited child gets reaped. Poll (bounded) because the child may
  * not have been scheduled to exit the instant we return from fork. */
 static void test_reap_exited_child(void)
@@ -375,6 +413,37 @@ static void test_die_with_parent_alive_does_not_exit(void)
     }
     int status = spawn_wait_child(pid);
     EXPECT(WIFEXITED(status) && WEXITSTATUS(status) == 7);
+}
+
+static void ignore_signal(int signal_number)
+{
+    (void)signal_number;
+}
+
+static void test_fork_child_starts_with_default_handlers(void)
+{
+    struct sigaction caught = {0}, ignored = {0}, saved_term, saved_hup;
+    caught.sa_handler = ignore_signal;
+    sigemptyset(&caught.sa_mask);
+    ignored.sa_handler = SIG_IGN;
+    sigemptyset(&ignored.sa_mask);
+    sigaction(SIGTERM, &caught, &saved_term);
+    sigaction(SIGHUP, &ignored, &saved_hup);
+
+    pid_t pid = spawn_fork();
+    if (pid == 0) {
+        raise(SIGHUP);
+        raise(SIGTERM);
+        _exit(0);
+    }
+    sigaction(SIGTERM, &saved_term, NULL);
+    sigaction(SIGHUP, &saved_hup, NULL);
+    if (pid < 0) {
+        EXPECT(0); /* fork failed: bail before spawn_wait_child(-1) */
+        return;
+    }
+    int status = spawn_wait_child(pid);
+    EXPECT(WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
 }
 
 static void test_force_utf8_leaves_a_capable_environment_alone(void)
@@ -500,6 +569,7 @@ int main(void)
 
     test_reap_non_child_is_exited();
     test_detached_runs_helper();
+    test_detached_survives_group_hangup();
 
     test_reap_live_child();
     test_reap_exited_child();
@@ -507,6 +577,7 @@ int main(void)
     test_redirect_null_stdin_is_eof();
 
     test_die_with_parent_alive_does_not_exit();
+    test_fork_child_starts_with_default_handlers();
 
     T_REPORT();
 }

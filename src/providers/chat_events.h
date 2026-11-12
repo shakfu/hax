@@ -34,6 +34,7 @@ struct chat_events {
     int finish_received;
     char *finish_reason;
     char *finish_error;
+    const char *finish_code; /* static; finish_error's native code, or NULL */
     /* finish_error holds a transient upstream failure: withheld past [DONE] so the stream reads
      * as incomplete and is retried; emitted by finalize once the attempts are spent. */
     int finish_transient;
@@ -48,6 +49,10 @@ struct chat_events {
     const char *length_hint; /* borrowed; appended to "length" errors */
     int cache_write_1h;
 };
+
+/* The static-storage copy of `name` if deltas carry reasoning text under it, else NULL.
+ * NULL-safe. */
+const char *chat_reasoning_member(const char *name);
 
 void chat_events_init(struct chat_events *parser, stream_cb callback, void *callback_user);
 void chat_events_free(struct chat_events *parser);

@@ -6,6 +6,7 @@
 #include "agent_core.h"
 #include "harness.h"
 #include "provider.h"
+#include "session.h"
 #include "tool.h"
 #include "turn.h"
 #include "xalloc.h"
@@ -704,7 +705,7 @@ static void test_turn_usage_provenance_omits_redundant_labels(void)
     struct provider provider = {.name = "llamacpp"};
     struct stream_usage usage = reported_usage();
     struct stream_response response = {.model = "/models/qwen3.gguf", .route = NULL};
-    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response);
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response, ITEM_ORIGIN_NONE);
 
     const struct turn_provenance *provenance = &session.items[0].usage->provenance;
     EXPECT(!provenance->provider_label);
@@ -724,7 +725,7 @@ static void test_turn_usage_provenance_records_distinct_identity(void)
     struct stream_usage usage = reported_usage();
     struct stream_response response = {
         .id = "gen-abc", .model = "deepseek/deepseek-v4", .route = "Wafer"};
-    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response);
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response, ITEM_ORIGIN_NONE);
 
     const struct turn_provenance *provenance = &session.items[0].usage->provenance;
     EXPECT_STR_EQ(provenance->provider_label, "llama.cpp");
@@ -736,13 +737,13 @@ static void test_turn_usage_provenance_records_distinct_identity(void)
     agent_session_free(&session);
 }
 
-/* Compaction footers stand in for no single stream. */
+/* Compaction usage records stand in for no single stream. */
 static void test_turn_usage_provenance_without_response(void)
 {
     struct agent_session session = {.provider_id = "openrouter", .model = xstrdup("m1")};
     struct provider provider = {.name = "openrouter"};
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, &provider, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
 
     const struct turn_provenance *provenance = &session.items[0].usage->provenance;
     EXPECT(!provenance->served_model);
@@ -761,7 +762,7 @@ static void test_mark_interrupt_skips_interrupted_result(void)
                                        .output = xstrdup("partial output\n" INTERRUPT_MARKER),
                                        .origin = ITEM_ORIGIN_INTERRUPTED});
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
 
     size_t before = session.n_items;
     agent_session_mark_interrupt(&session);
@@ -808,7 +809,7 @@ static void test_mark_interrupt_marks_clean_result(void)
                                                  .call_id = xstrdup("c2"),
                                                  .output = xstrdup("clean result")});
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     agent_session_mark_interrupt(&session);
 
     EXPECT(session.n_items == 3);
@@ -828,7 +829,7 @@ static void test_mark_interrupt_empty_session(void)
 
 /* The classification follows the tail as the conversation evolves through an unanswered
  * prompt, a finished seam, an abort marker, and a continuation, skipping inert trailing
- * usage footers and boundaries at every step. */
+ * usage records and boundaries at every step. */
 static void test_resume_tail_classification(void)
 {
     struct agent_session session = {0};
@@ -840,14 +841,14 @@ static void test_resume_tail_classification(void)
     agent_session_append(&session,
                          (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("done")});
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_CLEAN);
 
     agent_session_append(&session, (struct item){.kind = ITEM_TOOL_RESULT,
                                                  .call_id = xstrdup("c1"),
                                                  .output = xstrdup(INTERRUPT_MARKER),
                                                  .origin = ITEM_ORIGIN_SKIPPED});
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_MARKED);
 
     /* A continuation that itself went unanswered re-sends rather than stacking another one. */
@@ -868,7 +869,7 @@ static void test_resume_tail_classification(void)
     agent_session_free(&session);
 }
 
-/* The newest reporting footer wins, unreported footers are skipped, and a compaction seed
+/* The newest reporting usage record wins, unreported ones are skipped, and a compaction seed
  * floors the scan: pre-compaction usage must not describe the summarized window. */
 static void test_last_context_tokens(void)
 {
@@ -877,37 +878,182 @@ static void test_last_context_tokens(void)
 
     agent_session_add_user(&session, "hello");
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 110);
 
     usage.input_tokens = 600;
     usage.output_tokens = 40;
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 640);
 
     struct stream_usage unreported = {-1, -1, -1, -1, -1, -1};
-    agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 640);
 
-    /* Production order: the accepted summarization footer follows the seed and reports the
+    /* Production order: the accepted summarization usage record follows the seed and reports the
      * summarized request, so the fresh window still has no snapshot. */
     agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
                                                  .text = xstrdup("summary"),
                                                  .origin = ITEM_ORIGIN_COMPACT_SEED});
     usage.input_tokens = 900;
     usage.output_tokens = 100;
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == -1);
 
-    /* A continued turn's footer after the seed is the window snapshot again. */
+    /* A continued turn's usage record after the seed is the window snapshot again. */
     agent_session_add_boundary(&session);
     agent_session_append(&session,
                          (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("onward")});
     usage.input_tokens = 120;
     usage.output_tokens = 30;
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 150);
 
+    /* A compaction that produced no seed still left its usage records; they describe the summary
+     * request, so the agent turn before them stays the snapshot. */
+    usage.input_tokens = 5000;
+    usage.output_tokens = 10;
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_COMPACTION);
+    EXPECT(agent_session_last_context_tokens(&session) == 150);
+
+    agent_session_free(&session);
+}
+
+static void append_tool_turn(struct agent_session *session, const char *call_id, const char *output)
+{
+    agent_session_append(session, (struct item){.kind = ITEM_TOOL_CALL,
+                                                .call_id = xstrdup(call_id),
+                                                .tool_name = xstrdup("read"),
+                                                .tool_arguments_json = xstrdup("{}")});
+    agent_session_append(session, (struct item){.kind = ITEM_TOOL_RESULT,
+                                                .call_id = xstrdup(call_id),
+                                                .output = xstrdup(output)});
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+}
+
+/* The newest usage record's total plus what its request could not include: the results of the
+ * calls it returned, recorded before the usage record, and everything after it. Results of
+ * earlier turns were input to that request and are not counted again. */
+static void test_context_estimate(void)
+{
+    struct agent_session session = {0};
+    agent_session_add_user(&session, "hello");
+    EXPECT(agent_session_context_estimate(&session) == -1);
+
+    append_tool_turn(&session, "c1", "earlier result, already sent as input");
+    agent_session_add_boundary(&session);
+    append_tool_turn(&session, "c2", "0123456789abcdefghij"); /* 20 bytes */
+    EXPECT(agent_session_last_context_tokens(&session) == 110);
+    EXPECT(agent_session_context_estimate(&session) == 115);
+
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .text = xstrdup("12345678"),
+                                                 .origin = ITEM_ORIGIN_TASK_NOTE});
+    EXPECT(agent_session_context_estimate(&session) == 117);
+
+    agent_session_free(&session);
+}
+
+/* A new configuration or conversation lets automatic compaction retry. */
+static void test_compact_failures_clear(void)
+{
+    unsetenv("HAX_MODEL");
+    setenv("HAX_SYSTEM_PROMPT", "", 1);
+    struct provider provider = {.name = "test"};
+    struct hax_opts opts = {0};
+    struct agent_session session;
+    agent_session_init(&session, &provider, &opts);
+
+    session.compact_failures = 3;
+    agent_session_reconfigure(&session, &provider);
+    EXPECT(session.compact_failures == 0);
+
+    session.compact_failures = 3;
+    agent_session_reset(&session);
+    EXPECT(session.compact_failures == 0);
+
+    agent_session_free(&session);
+    unsetenv("HAX_SYSTEM_PROMPT");
+}
+
+static void test_has_reported_usage(void)
+{
+    struct agent_session session = {0};
+    EXPECT(!agent_session_has_reported_usage(&session));
+
+    agent_session_add_user(&session, "hello");
+    EXPECT(!agent_session_has_reported_usage(&session));
+
+    /* A duration-only usage record neither prices nor bounds anything. */
+    struct stream_usage unreported = {-1, -1, -1, -1, -1, -1};
+    agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL, ITEM_ORIGIN_NONE);
+    EXPECT(!agent_session_has_reported_usage(&session));
+
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+    EXPECT(agent_session_has_reported_usage(&session));
+
+    /* An undone turn's usage record still prices the session. */
+    agent_session_retire(&session, 1);
+    EXPECT(session.n_items == 1);
+    EXPECT(agent_session_has_reported_usage(&session));
+    agent_session_free(&session);
+
+    /* A fork's inherited usage record bounds the live window but, once undone, neither prices nor
+     * bounds anything. */
+    struct agent_session fork = {0};
+    agent_session_add_user(&fork, "hello");
+    agent_session_add_turn_usage(&fork, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+    for (size_t i = 0; i < fork.n_items; i++)
+        fork.items[i].inherited = 1;
+    EXPECT(agent_session_has_reported_usage(&fork));
+    agent_session_retire(&fork, 0);
+    EXPECT(fork.n_items == 0);
+    EXPECT(!agent_session_has_reported_usage(&fork));
+    agent_session_free(&fork);
+}
+
+/* Binding a record reads what its tail owes the run and reopens its file only when recording. */
+static void test_prepare_resumed(void)
+{
+    struct provider mock = {.name = "mock"};
+    struct session_meta recorded = {.provider = "mock", .model = "mock-model"};
+    struct agent_session session = {0};
+    session.model = xstrdup("mock-model");
+    unsetenv("HAX_PROVIDER");
+    setenv("HAX_NO_SESSION", "1", 1);
+
+    struct agent_resumed resumed;
+    agent_session_add_user(&session, "hello");
+    agent_session_prepare_resumed(&session, &mock, "/nonexistent/session.jsonl", &recorded, NULL,
+                                  &resumed);
+    EXPECT(resumed.session_log == NULL);
+    EXPECT(resumed.tail == AGENT_RESUME_TAIL_USER);
+
+    agent_session_append(&session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("done")});
+    struct stream_usage usage = reported_usage();
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+    agent_session_prepare_resumed(&session, &mock, "/nonexistent/session.jsonl", &recorded, NULL,
+                                  &resumed);
+    EXPECT(resumed.tail == AGENT_RESUME_TAIL_CLEAN);
+
+    /* Recording on: the record's own file is reopened for appending. */
+    setenv("HAX_NO_SESSION", "0", 1);
+    char *dir = t_tempdir();
+    char *path = xasprintf("%s/session.jsonl", dir);
+    /* Append never creates a file: a removed session must not come back headerless. */
+    FILE *file = fopen(path, "w");
+    EXPECT(file != NULL);
+    if (file)
+        fclose(file);
+    agent_session_prepare_resumed(&session, &mock, path, &recorded, NULL, &resumed);
+    EXPECT(resumed.session_log != NULL);
+    session_log_close(resumed.session_log);
+    free(path);
+
+    unsetenv("HAX_NO_SESSION");
     agent_session_free(&session);
 }
 
@@ -948,5 +1094,9 @@ int main(void)
     test_mark_interrupt_empty_session();
     test_resume_tail_classification();
     test_last_context_tokens();
+    test_context_estimate();
+    test_compact_failures_clear();
+    test_has_reported_usage();
+    test_prepare_resumed();
     T_REPORT();
 }

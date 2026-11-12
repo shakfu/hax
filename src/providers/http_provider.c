@@ -24,6 +24,7 @@
 #include "providers/wire.h"
 #include "text/placeholder.h"
 #include "text/url.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 #define MESSAGES_DEFAULT_VERSION    "2023-06-01"
@@ -50,6 +51,13 @@ struct thinking_setting {
     enum anthropic_thinking_mode mode;
 };
 
+/* Whether every assistant message carries the replay member, empty when there is no reasoning. */
+enum reasoning_requirement {
+    REASONING_OPTIONAL,
+    REASONING_PER_MODEL, /* required where the catalog names the model's member */
+    REASONING_REQUIRED,
+};
+
 struct http_provider {
     struct provider base;
     char *base_url;
@@ -68,13 +76,17 @@ struct http_provider {
     int request_cost;
     enum chat_cache_mode cache_mode; /* chat only */
     char *cache_ttl;
-    char *reasoning_field;
-    int reasoning_field_pinned; /* configured explicitly; no catalog hint may override it */
+    /* The replay before per-model catalog hints, which yield only to a pinned (configured) one. */
+    struct chat_reasoning_replay reasoning_replay;
+    int reasoning_replay_pinned;
+    enum reasoning_requirement reasoning_required;
+    char *reasoning_field; /* owns reasoning_replay.field */
     enum chat_reasoning_format reasoning_format;
     struct thinking_setting thinking; /* the def's; providers.<id>.thinking_mode overrides */
     int strict_signatures;
     char **extra_headers; /* "Name: value" templates; {session_id} expands per request */
     json_t *extra_body;
+    char **overflow_phrases;      /* NULL-terminated, or NULL */
     struct http_auth_source auth; /* zeroed ops: the api_key authenticates requests */
     /* A probe skipped on stale credentials, relaunched after the next authenticated stream. */
     int probe_deferred;
@@ -225,7 +237,9 @@ struct http_stream {
     const char *session_id;  /* the request's affinity id, never NULL */
     struct chat_cache_plan cache;
     union wire_events events;
-    int auth_retried; /* per-stream guard for the auth source's unauthorized recovery */
+    int auth_retried;   /* per-stream guard for the auth source's unauthorized recovery */
+    stream_cb callback; /* the caller's; receives errors classified */
+    void *callback_user;
 };
 
 static char **stream_build_headers(void *ctx)
@@ -277,6 +291,21 @@ static const struct stream_usage *stream_parser_usage(void *ctx)
     return stream->wire->events_usage(&stream->events);
 }
 
+/* Rejections from the transport and failures inside the stream both pass here. What the wording
+ * means is provider policy, which the wires and the transport do not carry. */
+static int classify_stream_error(const struct stream_event *event, void *user)
+{
+    struct http_stream *stream = user;
+    if (event->kind != EV_ERROR)
+        return stream->callback(event, stream->callback_user);
+
+    struct stream_event classified = *event;
+    classified.u.error.kind =
+        api_error_classify(event->u.error.http_status, event->u.error.code, event->u.error.detail,
+                           (const char *const *)stream->provider->overflow_phrases);
+    return stream->callback(&classified, stream->callback_user);
+}
+
 static int stream_auth_recover(void *ctx, long http_status, http_tick_cb tick, void *tick_user)
 {
     struct http_stream *stream = ctx;
@@ -313,18 +342,30 @@ static const struct wire *resolve_model_wire(struct http_provider *provider, con
     return provider->wire;
 }
 
-/* The member `model`'s reasoning replays under: an explicit reasoning_roundtrip pins one for
- * every model, else the catalog's per-model hint, else the def default. The result is
- * borrowed from static storage or from the provider, so it outlives the request. */
-static const char *resolve_model_reasoning_field(const struct http_provider *provider,
-                                                 const char *model)
+/* Precedence: a pinned setting, the catalog's per-model hint, the def default, then each item's
+ * recorded member. The field is borrowed from static storage or the provider.
+ *
+ * Unless configured otherwise, a hint naming the member also makes it required. Such a model's
+ * chat template renders an empty member exactly like a missing one, so the empty member costs
+ * nothing, while some of these endpoints reject a tool loop whose messages lack it. */
+static struct chat_reasoning_replay
+resolve_model_reasoning_replay(const struct http_provider *provider, const char *model)
 {
-    if (provider->reasoning_field_pinned)
-        return provider->reasoning_field;
-
+    struct chat_reasoning_replay replay = provider->reasoning_replay;
     struct catalog_entry entry;
     catalog_lookup(provider_stable_id(&provider->base), provider->catalog_id, model, &entry);
-    return entry.interleaved_field ? entry.interleaved_field : provider->reasoning_field;
+    if (!provider->reasoning_replay_pinned) {
+        /* A per-model hint against replay cannot waive what the endpoint requires. */
+        if (entry.interleaved_field)
+            replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_FIELD,
+                                                    .field = entry.interleaved_field};
+        else if (entry.interleaved_declared && provider->reasoning_required != REASONING_REQUIRED)
+            replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_OFF};
+    }
+    replay.required =
+        provider->reasoning_required == REASONING_REQUIRED ||
+        (provider->reasoning_required == REASONING_PER_MODEL && entry.interleaved_field != NULL);
+    return replay;
 }
 
 /* Whether a request consults metadata before it is sent: wire routing on a catalog-routed
@@ -344,7 +385,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
     /* Bounded: a router-autoload probe can take minutes, and the request waits for that model
      * anyway. */
     if (request_reads_metadata(provider))
-        model_meta_wait_ms(base, MODEL_META_WAIT_MS);
+        model_meta_wait_ms(base, MODEL_META_WAIT_MS, NULL, NULL);
     const struct wire *wire = resolve_model_wire(provider, model);
     if (!wire) {
         char *message = xasprintf("model %s needs a protocol hax does not support", model);
@@ -398,7 +439,7 @@ static int http_provider_stream(struct provider *base, const struct context *con
         stream.cache = chat_plan_cache(&rates, provider->cache_mode, provider->cache_ttl);
         opts.cache_markers = stream.cache.send_breakpoints;
         opts.session_cache_key = provider->send_cache_key ? stream.session_id : NULL;
-        opts.reasoning_field = resolve_model_reasoning_field(provider, model);
+        opts.reasoning_replay = resolve_model_reasoning_replay(provider, model);
         opts.reasoning_format = provider->reasoning_format;
         opts.request_cost = provider->request_cost;
     }
@@ -426,7 +467,9 @@ static int http_provider_stream(struct provider *base, const struct context *con
         request.recover = stream_auth_recover;
         request.error_message = stream_auth_error_message;
     }
-    int result = stream_retry_run(&request, callback, callback_user, tick, tick_user);
+    stream.callback = callback;
+    stream.callback_user = callback_user;
+    int result = stream_retry_run(&request, classify_stream_error, &stream, tick, tick_user);
     free(endpoint);
     free(body);
     return result;
@@ -455,6 +498,7 @@ static void http_provider_destroy(struct provider *base)
     free(provider->reasoning_field);
     string_array_free(provider->extra_headers);
     json_decref(provider->extra_body);
+    string_array_free(provider->overflow_phrases);
     free(provider);
 }
 
@@ -491,12 +535,9 @@ static const struct wire *resolve_wire(const struct provider_def *def, const cha
 
 static enum chat_cache_mode resolve_cache_mode(const char *prefix, const char *def_default)
 {
-    /* Different fallbacks distinguish a parsed boolean from auto, unset, or invalid input. */
-    int with_false_fallback = config_scoped_bool_or(prefix, "cache", 0);
-    int with_true_fallback = config_scoped_bool_or(prefix, "cache", 1);
-
-    if (with_false_fallback == with_true_fallback)
-        return with_true_fallback ? CHAT_CACHE_ON : CHAT_CACHE_OFF;
+    int configured = config_scoped_tristate(prefix, "cache");
+    if (configured >= 0)
+        return configured ? CHAT_CACHE_ON : CHAT_CACHE_OFF;
     if (def_default && strcasecmp(def_default, "auto") == 0)
         return CHAT_CACHE_AUTO;
     if (def_default && strcasecmp(def_default, "on") == 0)
@@ -504,27 +545,57 @@ static enum chat_cache_mode resolve_cache_mode(const char *prefix, const char *d
     return CHAT_CACHE_OFF;
 }
 
-/* `*pinned` reports an explicit setting, including an "off" that must survive a catalog hint.
- * "auto" asks for the default resolution, like the other tri-state settings, rather than naming
- * a member; anything else is a member name. */
-static char *resolve_configured_reasoning_field(const char *prefix, const char *def_default,
-                                                int *pinned)
+/* An explicit setting pins the replay, so even "off" survives a catalog hint. "auto" and "on"
+ * (the default always replays) ask for default resolution; anything else names a member. */
+static void resolve_configured_reasoning_replay(struct http_provider *provider, const char *prefix,
+                                                const char *def_default)
 {
     const char *configured = config_scoped_str(prefix, "reasoning_roundtrip");
-    if (configured && strcmp(configured, "auto") == 0)
+    if (configured && (strcmp(configured, "auto") == 0 || strcmp(configured, "on") == 0 ||
+                       strcmp(configured, "1") == 0))
         configured = NULL;
 
-    const char *field = def_default;
-    *pinned = configured != NULL;
-    if (configured) {
-        if (!*configured || strcmp(configured, "off") == 0 || strcmp(configured, "0") == 0)
-            field = NULL;
-        else if (strcmp(configured, "on") == 0 || strcmp(configured, "1") == 0)
-            field = "reasoning_content";
-        else
-            field = configured;
+    provider->reasoning_replay_pinned = configured != NULL;
+    if (configured &&
+        (!*configured || strcmp(configured, "off") == 0 || strcmp(configured, "0") == 0)) {
+        provider->reasoning_replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_OFF};
+        return;
     }
-    return field ? xstrdup(field) : NULL;
+    const char *field = configured ? configured : def_default;
+    if (!field) {
+        provider->reasoning_replay = (struct chat_reasoning_replay){.mode = CHAT_REPLAY_RECORDED};
+        return;
+    }
+    provider->reasoning_field = xstrdup(field);
+    provider->reasoning_replay = (struct chat_reasoning_replay){
+        .mode = CHAT_REPLAY_FIELD,
+        .field = provider->reasoning_field,
+    };
+}
+
+static enum reasoning_requirement resolve_reasoning_requirement(const char *prefix,
+                                                                int def_required)
+{
+    int configured = config_scoped_tristate(prefix, "reasoning_required");
+    if (configured >= 0)
+        return configured ? REASONING_REQUIRED : REASONING_OPTIONAL;
+    return def_required ? REASONING_REQUIRED : REASONING_PER_MODEL;
+}
+
+/* The required member can be sent only under a known name. A message without reasoning records
+ * none, so a recorded replay leaves the requirement unmet unless a catalog hint names it. */
+static void warn_unmet_reasoning_requirement(const struct http_provider *provider, const char *name)
+{
+    if (provider->reasoning_required != REASONING_REQUIRED)
+        return;
+    if (provider->reasoning_replay_pinned && provider->reasoning_replay.mode == CHAT_REPLAY_OFF)
+        hax_warn("provider '%s': reasoning_roundtrip is off, so the reasoning the endpoint "
+                 "requires is not sent",
+                 name);
+    else if (provider->reasoning_replay.mode == CHAT_REPLAY_RECORDED && !provider->catalog_id)
+        hax_warn("provider '%s': reasoning_required needs the reasoning field's name — set "
+                 "reasoning_roundtrip (e.g. reasoning_content) or catalog_id",
+                 name);
 }
 
 static size_t http_provider_list_efforts(struct provider *base, const char *const **efforts)
@@ -732,16 +803,6 @@ static void resolve_wire_rules(struct http_provider *provider, const char *prefi
     free(key);
 }
 
-static char *resolve_catalog_id(const struct provider_def *def, const char *prefix)
-{
-    char *key = xasprintf("%s.catalog_id", prefix);
-    const char *configured = config_str(key);
-    free(key);
-    /* An explicit value wins, including an empty opt-out; only silence takes the def's. */
-    const char *catalog_id = configured ? (*configured ? configured : NULL) : def->catalog_id;
-    return catalog_id ? xstrdup(catalog_id) : NULL;
-}
-
 /* "openai" or "anthropic" to the enum; -1 for anything else (unset, "auto", a typo). */
 static int metadata_api_parse(const char *value)
 {
@@ -905,7 +966,8 @@ struct provider *http_provider_new(const struct provider_def *def)
         provider->api_key = api_key ? xstrdup(api_key) : NULL;
     }
     provider->name = xstrdup(resolve_display_name(def, prefix));
-    provider->catalog_id = resolve_catalog_id(def, prefix);
+    const char *catalog_id = provider_catalog_id(def);
+    provider->catalog_id = catalog_id ? xstrdup(catalog_id) : NULL;
     provider->wire = wire;
     provider->endpoint = xasprintf("%s%s", provider->base_url, provider->wire->path);
     /* On the OpenAI side any OpenAI-family wire carries the same Bearer scheme; only a Messages
@@ -932,8 +994,9 @@ struct provider *http_provider_new(const struct provider_def *def)
     provider->request_cost = config_scoped_bool_or(prefix, "request_cost", def->request_cost);
     provider->cache_mode = resolve_cache_mode(prefix, def->cache);
     provider->cache_ttl = xstrdup(provider_cache_ttl(prefix));
-    provider->reasoning_field = resolve_configured_reasoning_field(
-        prefix, def->reasoning_roundtrip, &provider->reasoning_field_pinned);
+    resolve_configured_reasoning_replay(provider, prefix, def->reasoning_roundtrip);
+    provider->reasoning_required = resolve_reasoning_requirement(prefix, def->reasoning_required);
+    warn_unmet_reasoning_requirement(provider, name);
     provider->reasoning_format = chat_reasoning_format_parse(
         config_scoped_str(prefix, "reasoning_format"),
         chat_reasoning_format_parse(def->reasoning_format, CHAT_REASONING_FLAT));
@@ -956,6 +1019,7 @@ struct provider *http_provider_new(const struct provider_def *def)
             provider->extra_body = merged;
         }
     }
+    provider->overflow_phrases = provider_overflow_phrases(prefix);
 
     provider->length_hint = def->length_hint;
     /* Efforts are advisory offers narrowed by per-model metadata, so they default on; defs opt
@@ -982,6 +1046,7 @@ struct provider *http_provider_new(const struct provider_def *def)
         provider->base.probe_model = anthropic_probe_model;
     } else {
         provider->base.list_models = openai_list_models;
+        provider->base.probe_model = openai_probe_model;
     }
     /* Like parse_model (which only the def's own listing consults), the probe and listing hooks
      * refine the def's metadata dialect: a configured metadata_api that moves the provider to

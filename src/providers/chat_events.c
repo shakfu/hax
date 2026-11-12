@@ -37,6 +37,7 @@ void chat_events_free(struct chat_events *parser)
     parser->finish_reason = NULL;
     free(parser->finish_error);
     parser->finish_error = NULL;
+    parser->finish_code = NULL;
     free(parser->response_id);
     parser->response_id = NULL;
     free(parser->served_model);
@@ -148,17 +149,32 @@ static void handle_text_delta(struct chat_events *parser, const char *text)
     emit_event(parser, &event);
 }
 
+/* In preference order: a server that streams both carries the same text in each. */
+static const char *const REASONING_MEMBERS[] = {"reasoning", "reasoning_content"};
+#define N_REASONING_MEMBERS (sizeof(REASONING_MEMBERS) / sizeof(REASONING_MEMBERS[0]))
+
+const char *chat_reasoning_member(const char *name)
+{
+    for (size_t i = 0; name && i < N_REASONING_MEMBERS; i++)
+        if (strcmp(name, REASONING_MEMBERS[i]) == 0)
+            return REASONING_MEMBERS[i];
+    return NULL;
+}
+
 static void handle_reasoning_delta(struct chat_events *parser, json_t *delta)
 {
-    const char *text = json_string_value(json_object_get(delta, "reasoning"));
-    if (!text)
-        text = json_string_value(json_object_get(delta, "reasoning_content"));
+    const char *text = NULL;
+    const char *field = NULL;
+    for (size_t i = 0; !text && i < N_REASONING_MEMBERS; i++) {
+        field = REASONING_MEMBERS[i];
+        text = json_string_value(json_object_get(delta, field));
+    }
     if (!text || !*text)
         return;
 
     struct stream_event event = {
         .kind = EV_REASONING_DELTA,
-        .u.reasoning_delta = {.text = text},
+        .u.reasoning_delta = {.text = text, .field = field},
     };
     emit_event(parser, &event);
 }
@@ -325,6 +341,10 @@ static void capture_usage(struct chat_events *parser, json_t *root)
                 parser->usage.cache_write_1h_tokens = parser->usage.cache_write_tokens;
         }
     }
+    /* DeepSeek documents only its own hit count, though it mirrors it into the details. */
+    value = json_object_get(usage, "prompt_cache_hit_tokens");
+    if (parser->usage.cached_tokens < 0 && json_is_integer(value))
+        parser->usage.cached_tokens = (long)json_integer_value(value);
 
     value = json_object_get(usage, "cost");
     if (json_is_number(value) && json_number_value(value) >= 0)
@@ -362,6 +382,7 @@ static void emit_terminal_event(struct chat_events *parser)
             .u.error =
                 {
                     .message = parser->finish_error,
+                    .code = parser->finish_code,
                     .http_status = 0,
                     .usage = &parser->usage,
                     .response = &response,
@@ -413,8 +434,11 @@ static void handle_finish_reason(struct chat_events *parser, const char *reason,
         parser->finish_error = xasprintf(
             "upstream error: %s", finish_reason_is_error(native_reason) ? native_reason : reason);
         parser->finish_transient = 1;
-    } else if (strcmp(reason, "length") == 0 && parser->length_hint) {
-        parser->finish_error = xasprintf("response incomplete: length — %s", parser->length_hint);
+    } else if (strcmp(reason, "length") == 0) {
+        parser->finish_code = "length";
+        parser->finish_error =
+            parser->length_hint ? xasprintf("response incomplete: length — %s", parser->length_hint)
+                                : xstrdup("response incomplete: length");
     } else {
         parser->finish_error = xasprintf("response incomplete: %s", reason);
     }
@@ -443,6 +467,10 @@ static void handle_error(struct chat_events *parser, json_t *error)
 
     parser->terminal_emitted = 1;
     const char *message = json_string_value(json_object_get(error, "message"));
+    /* llama.cpp echoes the HTTP status as a numeric code and names the error in its type. */
+    const char *code = json_string_value(json_object_get(error, "code"));
+    if (!code)
+        code = json_string_value(json_object_get(error, "type"));
     struct stream_response response = response_of(parser);
     struct stream_event event = {
         .kind = EV_ERROR,
@@ -450,6 +478,8 @@ static void handle_error(struct chat_events *parser, json_t *error)
             {
                 .message = message ? message : "provider error",
                 .http_status = 0,
+                .code = code,
+                .detail = message,
                 .usage = &parser->usage,
                 .response = &response,
             },

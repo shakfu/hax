@@ -1,20 +1,29 @@
-# Each entry is just the test's source path; everything else is derived. The
-# registered test name is the path with the `test_` prefix and `.c` suffix
-# stripped, keeping the subdirectory (so `tools/test_read.c` -> `tools/read`,
-# `transport/test_sse.c` -> `transport/sse`, top-level `test_buf.c` -> `buf`).
-# That makes this list a direct mirror of the `sources` list in the top-level
-# meson.build — keep it grouped by subdirectory and sorted within each group.
+# Fixtures shared across tests, each a header with its implementation beside it.
+test_support = static_library('test_support',
+    'harness.c',
+    'loopback.c',
+    'output.c',
+    'tools/bash_fixtures.c',
+    dependencies: [hax_dep],
+)
+test_support_dep = declare_dependency(link_with: test_support, dependencies: [hax_dep])
+
+# Each entry is just the test's source path; everything else is derived. The registered name is
+# the path without the `test_` prefix and `.c` suffix, keeping the subdirectory:
+# `tools/test_read.c` -> `tools/read`, top-level `test_buf.c` -> `buf`. The list mirrors the
+# production `sources` in the top-level meson.build: grouped by subdirectory, sorted within each.
 #
-# Every test is a single .c file linked against `hax_dep`: lazy static-archive
-# linking pulls in only the production objects it transitively references, and
-# the dependency carries the libcurl/jansson/threads include dirs and link
-# flags — so a test needs nothing here but its source path.
+# A test is a single .c file linked against `test_support_dep`, which carries the fixtures,
+# `hax_lib`, and the libcurl/jansson/threads flags; lazy archive linking pulls in only the objects
+# the test references.
 test_sources = [
     'test_agent.c',
     'test_agent_core.c',
     'test_agent_dispatch.c',
     'test_agent_env.c',
     'test_agent_loop.c',
+    'test_agent_stats.c',
+    'test_agent_stream.c',
     'test_agent_tool.c',
     'test_agent_usage.c',
     'test_banner.c',
@@ -23,6 +32,7 @@ test_sources = [
     'test_catalog_fetch.c',
     'test_cli.c',
     'test_compact.c',
+    'test_compact_text.c',
     'test_config.c',
     'test_cred_store.c',
     'test_diag.c',
@@ -49,6 +59,10 @@ test_sources = [
     'test_turn.c',
     'test_xalloc.c',
 
+    'commands/test_login.c',
+    'commands/test_session_cmd.c',
+    'commands/test_tasks.c',
+
     'providers/test_anthropic_body.c',
     'providers/test_anthropic_events.c',
     'providers/test_anthropic_models.c',
@@ -58,6 +72,7 @@ test_sources = [
     'providers/test_codex_auth.c',
     'providers/test_codex_login.c',
     'providers/test_codex_settings.c',
+    'providers/test_deepseek.c',
     'providers/test_provider_config.c',
     'providers/test_http_provider.c',
     'providers/test_llamacpp.c',
@@ -74,6 +89,7 @@ test_sources = [
     'render/test_ctrl_strip.c',
     'render/test_diff_color.c',
     'render/test_disp.c',
+    'render/test_footer.c',
     'render/test_markdown.c',
     'render/test_markdown_scan.c',
     'render/test_markdown_table.c',
@@ -98,20 +114,29 @@ test_sources = [
     'system/test_tempfiles.c',
 
     'terminal/test_clipboard.c',
+    'terminal/test_escape.c',
+    'terminal/test_herdr.c',
     'terminal/test_input.c',
     'terminal/test_input_core.c',
     'terminal/test_interrupt.c',
+    'terminal/test_live_region.c',
     'terminal/test_picker_core.c',
+    'terminal/test_sgr.c',
     'terminal/test_theme.c',
     'terminal/test_vt_resolve.c',
     'terminal/test_width.c',
 
     'text/test_base64.c',
+    'text/test_completion.c',
     'text/test_diff.c',
+    'text/test_display_safe.c',
     'text/test_fmt.c',
+    'text/test_frontmatter.c',
+    'text/test_json_scan.c',
     'text/test_placeholder.c',
     'text/test_sha256.c',
     'text/test_shell_quote.c',
+    'text/test_trim.c',
     'text/test_url.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
@@ -120,6 +145,7 @@ test_sources = [
     'tools/test_bash.c',
     'tools/test_bash_cd_strip.c',
     'tools/test_bash_classify.c',
+    'tools/test_bash_output.c',
     'tools/test_edit.c',
     'tools/test_image_sniff.c',
     'tools/test_output_cap.c',
@@ -138,36 +164,50 @@ test_sources = [
 ]
 
 fs = import('fs')
+# TSan sleeps at every process exit by default (atexit_sleep_ms, 1s) to catch races with exiting
+# threads; tests spawn and exit processes constantly, so that sleep would dominate the suite.
+# Prepended so a caller's own TSAN_OPTIONS wins.
+test_env = environment()
+test_env.prepend('TSAN_OPTIONS', 'atexit_sleep_ms=0', separator: ':')
+
 foreach src : test_sources
     stem = fs.stem(src).substring(5)  # drop the leading 'test_'
     parent = fs.parent(src)
     name = parent == '.' ? stem : parent / stem
     exe = executable('test_' + name.underscorify(),
         src,
-        dependencies: [hax_dep],
+        dependencies: [test_support_dep],
     )
-    test(name, exe)
+    test(name, exe, env: test_env)
 endforeach
 
-# End-to-end scenarios: Python scripts under e2e/ that drive the built binary
-# through the mock provider (see e2e/harness.py). Naming mirrors the C tests:
-# e2e/test_oneshot_text.py registers as e2e/oneshot_text, so the name prefix
-# selects the group (`meson test 'e2e/*'`).
+# End-to-end scenarios: Python scripts under e2e/, one per user-facing area, driving the built
+# binary through the mock provider (see e2e/harness.py). Names mirror the C tests:
+# e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
-    'oneshot_json',
-    'oneshot_signal_interrupt',
-    'oneshot_text',
-    'oneshot_tool',
+    'oneshot',
+    'repl_compact',
+    'repl_complete',
+    'repl_herdr',
     'repl_initial_prompt',
+    'repl_interrupt',
+    'repl_resize',
+    'repl_smoke',
+    'repl_status',
+    'repl_status_label',
+    'repl_status_tools',
 ]
 
-python = find_program('python3')
+e2e_env = environment({'HAX_BIN': hax_exe.full_path()})
+e2e_env.prepend('TSAN_OPTIONS', 'atexit_sleep_ms=0', separator: ':')
 foreach name : e2e_scenarios
     test('e2e' / name,
         python,
         args: [files('e2e/test_' + name + '.py')],
-        env: {'HAX_BIN': hax_exe.full_path()},
+        env: e2e_env,
         depends: hax_exe,
+        # The slowest tests, scheduled first so they don't bound the run from its tail.
+        priority: 1,
         timeout: 60,
     )
 endforeach

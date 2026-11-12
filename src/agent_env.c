@@ -15,15 +15,18 @@
 #include "xalloc.h"
 #include "providers/registry.h"
 #include "system/fs.h"
+#include "system/git.h"
 #include "system/os.h"
 #include "system/path.h"
+#include "text/frontmatter.h"
+#include "text/utf8.h"
 #include "text/utf8_sanitize.h"
 #include "tools/bash_shell.h"
 
 /* Truncate oversized project instructions rather than letting one file dominate the prompt. */
 #define AGENTS_MD_MAX_BYTES (64u * 1024u)
 
-/* Bound upward discovery even on an unusually deep tree without a project marker. */
+/* Bound the upward walks toward the project root even on an unusually deep tree. */
 #define PROJECT_MAX_DEPTH 64
 
 /* Skill discovery needs only YAML metadata, never the full SKILL.md body. */
@@ -51,39 +54,6 @@ static int command_is_available(const char *name)
         return 0;
     free(path);
     return 1;
-}
-
-/* Replace absolute `dir` with its parent; return 0 at the root without changing it. */
-static int climb_to_parent(char *dir)
-{
-    char *slash = strrchr(dir, '/');
-    if (!slash)
-        return 0;
-    if (slash == dir) {
-        if (dir[1] == '\0')
-            return 0;
-        dir[1] = '\0';
-        return 1;
-    }
-    *slash = '\0';
-    return 1;
-}
-
-static char *find_project_root(const char *cwd)
-{
-    char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s", cwd);
-    for (int depth = 0; depth < PROJECT_MAX_DEPTH; depth++) {
-        char marker[PATH_MAX + 16];
-        snprintf(marker, sizeof(marker), "%s/.git", dir);
-        struct stat marker_stat;
-        if (stat(marker, &marker_stat) == 0)
-            return xstrdup(dir);
-
-        if (!climb_to_parent(dir))
-            break;
-    }
-    return NULL;
 }
 
 static char *sanitize_display_path(const char *path)
@@ -144,7 +114,7 @@ static void append_environment(struct buf *prompt, const char *model)
     const char *home = getenv("HOME");
     char *shell = bash_resolve_shell();
     char *os = os_description();
-    char *project_root = find_project_root(cwd);
+    char *project_root = git_find_worktree_root(cwd);
 
     char *cwd_clean = sanitize_display_path(cwd);
     char *home_clean = (home && *home) ? utf8_sanitize(home, strlen(home)) : NULL;
@@ -222,7 +192,7 @@ static void append_project_agents_files(struct buf *prompt, int *has_project_con
     if (!getcwd(cwd, sizeof(cwd)))
         return;
 
-    char *project_root = find_project_root(cwd);
+    char *project_root = git_find_worktree_root(cwd);
     if (!project_root) {
         /* Outside a repository, parent instructions may belong to an unrelated project. */
         char *path = path_join(cwd, "AGENTS.md");
@@ -245,7 +215,7 @@ static void append_project_agents_files(struct buf *prompt, int *has_project_con
         display_paths[path_count] = path_collapse_home(paths[path_count]);
         path_count++;
 
-        if (strcmp(dir, project_root) == 0 || !climb_to_parent(dir))
+        if (strcmp(dir, project_root) == 0 || !path_climb_to_parent(dir))
             break;
     }
     free(project_root);
@@ -258,59 +228,24 @@ static void append_project_agents_files(struct buf *prompt, int *has_project_con
     }
 }
 
-/* Parse one-line, optionally quoted YAML descriptions. Return metadata only after a closing fence
- * confirms that the frontmatter is complete. */
-static char *parse_skill_description(const char *content, size_t content_len)
+static char *read_skill_description(const char *frontmatter, size_t frontmatter_len)
 {
-    const char *cursor;
-    if (content_len >= 4 && memcmp(content, "---\n", 4) == 0)
-        cursor = content + 4;
-    else if (content_len >= 5 && memcmp(content, "---\r\n", 5) == 0)
-        cursor = content + 5;
-    else
+    char *description = frontmatter_scalar_line(frontmatter, frontmatter_len, "description");
+    if (!description)
         return NULL;
-
-    char *description = NULL;
-    const char *content_end = content + content_len;
-    while (cursor < content_end) {
-        const char *line_end = memchr(cursor, '\n', content_end - cursor);
-        if (!line_end)
-            line_end = content_end;
-        size_t line_len = line_end - cursor;
-
-        if ((line_len == 3 && memcmp(cursor, "---", 3) == 0) ||
-            (line_len == 4 && memcmp(cursor, "---\r", 4) == 0))
-            return description;
-
-        if (!description && line_len > 12 && memcmp(cursor, "description:", 12) == 0) {
-            const char *value = cursor + 12;
-            const char *value_end = line_end;
-            while (value < value_end && (*value == ' ' || *value == '\t'))
-                value++;
-            while (value_end > value &&
-                   (value_end[-1] == ' ' || value_end[-1] == '\t' || value_end[-1] == '\r'))
-                value_end--;
-            int quoted = value_end - value >= 2 && ((*value == '"' && value_end[-1] == '"') ||
-                                                    (*value == '\'' && value_end[-1] == '\''));
-            if (quoted) {
-                value++;
-                value_end--;
-            }
-            size_t value_len = value_end > value ? (size_t)(value_end - value) : 0;
-            if (!quoted && value_len > 0 && (*value == '|' || *value == '>'))
-                value_len = 0;
-            if (value_len > SKILL_DESCRIPTION_MAX_BYTES)
-                value_len = SKILL_DESCRIPTION_MAX_BYTES;
-            if (value_len > 0)
-                description = utf8_sanitize(value, value_len);
+    size_t description_len = strlen(description);
+    if (description_len > SKILL_DESCRIPTION_MAX_BYTES) {
+        /* Keep whole codepoints only: cut at the last boundary within the limit. */
+        size_t cut = 0;
+        for (;;) {
+            size_t next = utf8_next(description, description_len, cut);
+            if (next > SKILL_DESCRIPTION_MAX_BYTES)
+                break;
+            cut = next;
         }
-        if (line_end == content_end)
-            break;
-        cursor = line_end + 1;
+        description[cut] = '\0';
     }
-
-    free(description);
-    return NULL;
+    return description;
 }
 
 struct skill_entry {
@@ -395,7 +330,7 @@ static void collect_skills(struct skill_list *skills, const char *root)
         struct skill_entry skill = {
             .name = name,
             .display_path = sanitize_display_path(skill_path),
-            .description = parse_skill_description(frontmatter, frontmatter_len),
+            .description = read_skill_description(frontmatter, frontmatter_len),
         };
         skill_list_add(skills, skill);
         free(frontmatter);
@@ -416,7 +351,7 @@ static void collect_project_skills(struct skill_list *skills, const char *exclud
     struct stat excluded_stat;
     int have_excluded_root = excluded_root && stat(excluded_root, &excluded_stat) == 0;
 
-    char *project_root = find_project_root(cwd);
+    char *project_root = git_find_worktree_root(cwd);
     char dir[PATH_MAX];
     snprintf(dir, sizeof(dir), "%s", cwd);
     for (int depth = 0; depth < PROJECT_MAX_DEPTH; depth++) {
@@ -429,7 +364,7 @@ static void collect_project_skills(struct skill_list *skills, const char *exclud
             collect_skills(skills, skills_dir);
         free(skills_dir);
 
-        if (!project_root || strcmp(dir, project_root) == 0 || !climb_to_parent(dir))
+        if (!project_root || strcmp(dir, project_root) == 0 || !path_climb_to_parent(dir))
             break;
     }
     free(project_root);
@@ -482,13 +417,14 @@ static void append_skills(struct buf *prompt)
 static const char SUBAGENTS_PROMPT[] =
     "# Subagents\n"
     "\n"
-    "`hax -p \"<task>\"` (via the bash tool) runs a fresh hax instance with clean context in "
-    "this directory and prints its final answer to stdout. Delegate to subagents only when "
-    "the user asks for it. The child inherits this session's provider, model, and effort. "
-    "Launch each subagent with `background: true` and collect answers with task_wait — that "
-    "is also how several run in parallel. The child prints its session id to stderr at "
-    "startup (captured in the task log); follow up on a finished (or killed) run with "
-    "`hax --resume=<id> -p \"<follow-up>\"`.\n";
+    "`hax -p \"<task>\"` (via the bash tool) runs a fresh hax instance with clean context in this "
+    "directory and prints its final answer to stdout. Delegate to subagents only when the user "
+    "asks for it. The child inherits this session's provider, model, and effort unless "
+    "`--preset <name>` selects a preset from the user's config. For concurrent work, launch "
+    "subagents with `background: true` and collect answers with task_wait; a synchronous call "
+    "is simpler when you would otherwise wait immediately. The child prints its session id to "
+    "stderr at startup; follow up on a finished (or killed) run with `hax --resume=<id> -p "
+    "\"<follow-up>\"`.\n";
 
 /* Task-less variant: synchronous calls need a wide timeout to survive a slow child. */
 static const char SUBAGENTS_PROMPT_NO_TASKS[] =
@@ -496,8 +432,9 @@ static const char SUBAGENTS_PROMPT_NO_TASKS[] =
     "\n"
     "`hax -p \"<task>\"` (via the bash tool) runs a fresh hax instance with clean context in "
     "this directory and prints its final answer to stdout. Delegate to subagents only when "
-    "the user asks for it. The child inherits this session's provider, model, and effort. "
-    "Subagents are slow: pass a generous timeout_seconds (e.g. 1800). The child prints its "
+    "the user asks for it. The child inherits this session's provider, model, and effort "
+    "unless `--preset <name>` selects a preset from the user's config. Subagents are slow: pass a "
+    "generous timeout_seconds (e.g. 1800). The child prints its "
     "session id to stderr at startup; follow up on a finished (or timed-out) run with "
     "`hax --resume=<id> -p \"<follow-up>\"`.\n";
 
@@ -536,7 +473,7 @@ static void append_subagent_presets(struct buf *prompt)
     if (name_count > 1)
         qsort(names, name_count, sizeof(*names), compare_strings);
 
-    /* Build the list first so an empty result does not advertise --preset without choices. */
+    /* Build the list first so an empty result does not leave a heading without entries. */
     struct buf list;
     buf_init(&list);
     for (size_t i = 0; i < name_count; i++) {
@@ -566,7 +503,7 @@ static void append_subagent_presets(struct buf *prompt)
         free(clean_name);
     }
     if (list.len > 0) {
-        buf_append_str(prompt, "\nPresets (select with `--preset <name>`):\n");
+        buf_append_str(prompt, "\nPresets:\n");
         buf_append(prompt, list.data, list.len);
     }
 

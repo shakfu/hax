@@ -20,7 +20,8 @@ void model_meta_release(struct provider *provider);
 
 /* Ensure fresh metadata for `model`: unless the stored report is complete or a probe for `model`
  * is already running, cancel any previous probe and asynchronously probe `model`. A stored report
- * for the same model is retained. NULL-safe. */
+ * for the same model is retained. A NULL or empty `model` probes only the listing, for its ids.
+ * NULL-safe. */
 void model_meta_refresh(struct provider *provider, const char *model);
 
 /* Start the background catalog refresh, if one is due, for a provider with a catalog identity.
@@ -34,16 +35,17 @@ void model_meta_prefetch(const struct provider *provider);
 void model_meta_wait_catalog(const struct provider *provider, long timeout_ms, http_tick_cb tick,
                              void *tick_user);
 
-/* Wait for the metadata sources to settle: an active probe, without cancelling it, and, bounded
- * by MODEL_META_WAIT_MS, the catalog refresh, started here if due (model_meta_wait_catalog).
- * NULL-safe. */
+/* Wait for the metadata sources to settle: an active probe for a model, without cancelling it,
+ * and, bounded by MODEL_META_WAIT_MS, the catalog refresh, started here if due
+ * (model_meta_wait_catalog). A probe for the listing alone is not waited for. NULL-safe. */
 void model_meta_wait(struct provider *provider);
 
 /* Bounded model_meta_wait for callers that must stay responsive. `timeout_ms` is measured from
  * each source's start, not per call, so callers stacked on one request path share the budget.
- * On timeout the work keeps running in the background and lands whenever it completes.
- * NULL-safe. */
-void model_meta_wait_ms(struct provider *provider, long timeout_ms);
+ * A non-NULL `tick` returning non-zero abandons the wait early. On timeout or abandonment the work
+ * keeps running in the background and lands whenever it completes. NULL-safe. */
+void model_meta_wait_ms(struct provider *provider, long timeout_ms, http_tick_cb tick,
+                        void *tick_user);
 
 /* Covers metadata-endpoint probes and the catalog refresh; probes that also load a model
  * (llama.cpp router autoload) exceed it and finish in the background. */
@@ -54,6 +56,12 @@ void model_meta_wait_ms(struct provider *provider, long timeout_ms);
  * the report and cancels the probe. Reports without a model ID or any metadata fields are
  * ignored. */
 void model_meta_store(struct provider *provider, const struct model_info *info);
+
+/* Replace the remembered listing ids with a copy of NULL-terminated `ids`. NULL-safe. */
+void model_meta_store_ids(struct provider *provider, const char *const *ids);
+
+/* Return a copy of the remembered listing ids for string_array_free, or NULL when none is known. */
+char **model_meta_listed_ids(const struct provider *provider);
 
 /* Copy the stored report into initialized `out`. Returns 1 when a report exists and 0 otherwise.
  * The caller must pass `out` to model_info_clear(). */

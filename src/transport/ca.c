@@ -170,9 +170,9 @@ enum ca_store_source ca_resolve(const char *root, const char *env_bundle, const 
     if (native_trust(ssl_version, features))
         return CA_STORE_DEFAULT;
     enum capath_rule rule = backend_capath_rule(ssl_version);
-    char *found = probe_file(root, curl_file);
-    if (!found)
-        found = probe_dir(root, curl_dir, rule);
+    /* TLS backends fail the handshake on an unreadable CAINFO whatever CAPATH holds, so a
+     * default file decides alone; the default directory counts only without one. */
+    char *found = curl_file ? probe_file(root, curl_file) : probe_dir(root, curl_dir, rule);
     if (found) {
         free(found);
         return CA_STORE_DEFAULT;

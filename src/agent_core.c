@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "agent_env.h"
+#include "agent_stream.h"
 #include "agent_usage.h"
 #include "buf.h"
 #include "config.h"
@@ -18,6 +19,7 @@
 #include "turn.h"
 #include "xalloc.h"
 #include "providers/registry.h"
+#include "system/cancel.h"
 #include "tools/bash_env.h"
 #include "tools/task_registry.h"
 
@@ -25,36 +27,36 @@
 static const char DEFAULT_SYSTEM_PROMPT[] =
     "You are hax, a minimalist coding assistant running in the user's terminal.\n"
     "\n"
-    "Prefer action over explanation: when a question can be answered by running a "
-    "command or reading a file, do so. Be concise: no filler, no trailing "
-    "summaries. Reference code as path:line. Before substantial work, say in one "
-    "sentence what you're about to do; while working, mention only meaningful "
-    "developments (a root cause, a change of direction, a blocker worth a "
-    "decision), not routine steps.\n"
+    "Prefer action over explanation: when a question can be answered by running a command or "
+    "reading a file, do so. Be concise: no filler, no trailing summaries. Reference code as "
+    "path:line. Before substantial work, say in one sentence what you're about to do; while "
+    "working, mention only meaningful developments (a root cause, a change of direction, a blocker "
+    "worth a decision), not routine steps.\n"
     "\n"
-    "When something is ambiguous, infer from the code and pick a sensible default "
-    "rather than stopping. Ask only when genuinely blocked: the choice materially "
-    "changes the result, an action is destructive or affects shared state, or you "
-    "need a value you can't obtain. To ask, end your turn with one targeted "
-    "question and a recommended default.\n"
+    "When something is ambiguous, infer from the code and pick a sensible default rather than "
+    "stopping. Ask only when genuinely blocked: the choice materially changes the result, an "
+    "action is destructive or affects shared state, or you need a value you can't obtain. To ask, "
+    "end your turn with one targeted question and a recommended default.\n"
+    "\n"
+    "Prefer read/edit/write for ordinary file operations. Bash remains useful for searches, "
+    "pipelines, formatters, and bulk transformations.\n"
     "\n"
     "When changing code:\n"
     "- Make the smallest correct change that fits the existing style.\n"
     "- Fix root causes, not symptoms. Don't fix unrelated bugs unless asked.\n"
-    "- Don't introduce new abstractions, helpers, or compatibility shims unless "
-    "the task genuinely needs them.\n"
+    "- Don't introduce new abstractions, helpers, or compatibility shims unless the task genuinely "
+    "needs them.\n"
     "- Add a comment only when the *why* is non-obvious.\n"
     "- If the project has a build, tests, or linter, run them before reporting done.\n"
     "\n"
-    "Git: never commit, push, amend, branch, or run destructive commands "
-    "(`reset --hard`, `checkout --`, `branch -D`) unless the user explicitly asks. "
-    "Never revert changes you didn't make. If a hook or check fails, fix the cause; "
-    "don't bypass with `--no-verify`.\n"
+    "Git: never commit, push, amend, branch, or run destructive commands (`reset --hard`, "
+    "`checkout --`, `branch -D`) unless the user explicitly asks. Never revert changes you didn't "
+    "make. If a hook or check fails, fix the cause; don't bypass with `--no-verify`.\n"
     "\n"
-    "If asked for a \"review\": lead with bugs, risks, and missing tests for the "
-    "*proposed change*, not a summary. A finding should be one the author would "
-    "fix if they knew. Skip pre-existing issues and trivial style. Calibrate "
-    "severity honestly; no flattery. Empty findings is a valid result.";
+    "If asked for a \"review\": lead with bugs, risks, and missing tests for the *proposed "
+    "change*, not a summary. A finding should be one the author would fix if they knew. Skip "
+    "pre-existing issues and trivial style. Calibrate severity honestly; no flattery. Empty "
+    "findings is a valid result.";
 
 static const struct tool *const TOOLS[] = {
     &TOOL_READ, &TOOL_EDIT, &TOOL_WRITE, &TOOL_BASH, &TOOL_TASK_WAIT,
@@ -174,6 +176,15 @@ static char *resolve_model_label(struct provider *provider, const char *model)
                                                : xstrdup(model);
 }
 
+/* The configured model, else the provider's default; NULL when neither names one. */
+static char *selected_model(const struct provider *provider)
+{
+    const char *model = config_str("model");
+    if ((!model || !*model) && provider)
+        model = provider->default_model;
+    return (model && *model) ? xstrdup(model) : NULL;
+}
+
 const char *agent_provider_id(const struct provider *provider)
 {
     const char *id = config_str("provider");
@@ -206,11 +217,9 @@ void agent_session_init(struct agent_session *session, struct provider *provider
                         const struct hax_opts *opts)
 {
     memset(session, 0, sizeof(*session));
+    session->last_user_turn_ms = -1;
 
-    const char *model = config_str("model");
-    if ((!model || !*model) && provider)
-        model = provider->default_model;
-    session->model = model ? xstrdup(model) : NULL;
+    session->model = selected_model(provider);
     session->model_label = resolve_model_label(provider, session->model);
     session->provider_id = provider ? provider_stable_id(provider) : NULL;
 
@@ -233,17 +242,9 @@ void agent_session_init(struct agent_session *session, struct provider *provider
     export_selection(provider, session);
 }
 
-int agent_session_reconfigure(struct agent_session *session, struct provider *provider)
+void agent_session_reconfigure(struct agent_session *session, struct provider *provider)
 {
-    const char *model = config_str("model");
-    if (!model || !*model)
-        model = provider->default_model;
-    if (!model || !*model) {
-        hax_err("no model available for provider '%s' (set one with /model)",
-                provider->name ? provider->name : "?");
-        return -1;
-    }
-    char *new_model = xstrdup(model);
+    char *new_model = selected_model(provider);
     char *new_model_label = resolve_model_label(provider, new_model);
     free(session->model);
     free(session->model_label);
@@ -256,8 +257,8 @@ int agent_session_reconfigure(struct agent_session *session, struct provider *pr
     char *effort = resolve_effort(provider, session->model);
     free(session->effort);
     session->effort = effort;
+    session->compact_failures = 0;
     export_selection(provider, session);
-    return 0;
 }
 
 int agent_session_resync_effort(struct agent_session *session, struct provider *provider,
@@ -269,7 +270,7 @@ int agent_session_resync_effort(struct agent_session *session, struct provider *
         return 0;
     /* Bounded: this runs on the interactive foreground thread, and a router-autoload probe can
      * take minutes. A late report refines effort before the next prompt instead. */
-    model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
+    model_meta_wait_ms(provider, MODEL_META_WAIT_MS, NULL, NULL);
     char *effort = resolve_effort(provider, session->model);
     int unchanged = (!effort && !session->effort) ||
                     (effort && session->effort && strcmp(effort, session->effort) == 0);
@@ -384,6 +385,9 @@ void agent_session_free(struct agent_session *session)
             tool_def_free(&session->tools[i]);
     }
     free(session->tools_owned);
+    for (size_t i = 0; i < session->n_retired; i++)
+        item_free(&session->retired[i]);
+    free(session->retired);
     free(session->tools);
     free(session->system_prompt);
     free(session->model);
@@ -398,6 +402,57 @@ void agent_session_reset(struct agent_session *session)
     for (size_t i = 0; i < session->n_items; i++)
         item_free(&session->items[i]);
     session->n_items = 0;
+    for (size_t i = 0; i < session->n_retired; i++)
+        item_free(&session->retired[i]);
+    session->n_retired = 0;
+    session->worked_ms = 0;
+    session->last_user_turn_ms = -1;
+    session->compact_failures = 0;
+}
+
+void agent_session_retire(struct agent_session *session, size_t from)
+{
+    if (from >= session->n_items)
+        return;
+    size_t count = session->n_items - from;
+    if (session->n_retired + count > session->cap_retired) {
+        session->cap_retired = session->n_retired + count;
+        session->retired =
+            xrealloc(session->retired, session->cap_retired * sizeof(*session->retired));
+    }
+    memcpy(session->retired + session->n_retired, session->items + from,
+           count * sizeof(*session->items));
+    session->n_retired += count;
+    session->n_items = from;
+    /* The newest completed turn is gone; its duration must not describe the kept tail. */
+    session->last_user_turn_ms = -1;
+}
+
+void agent_session_adopt(struct agent_session *session, struct session_loaded *loaded)
+{
+    agent_session_reset(session);
+    free(session->items);
+    free(session->retired);
+    session->items = loaded->items;
+    session->n_items = loaded->n_items;
+    session->cap_items = loaded->n_items;
+    session->retired = loaded->retired;
+    session->n_retired = loaded->n_retired;
+    session->cap_retired = loaded->n_retired;
+    session->worked_ms = loaded->worked_ms;
+    session->last_user_turn_ms = loaded->last_user_turn_ms;
+    loaded->items = NULL;
+    loaded->n_items = 0;
+    loaded->retired = NULL;
+    loaded->n_retired = 0;
+}
+
+void agent_session_add_worked(struct agent_session *session, long elapsed_ms)
+{
+    if (elapsed_ms < 0)
+        return;
+    session->worked_ms += elapsed_ms;
+    session->last_user_turn_ms = elapsed_ms;
 }
 
 struct context agent_session_context(const struct agent_session *session)
@@ -444,8 +499,8 @@ void agent_session_add_boundary(struct agent_session *session)
 
 void agent_session_mark_interrupt(struct agent_session *session)
 {
-    /* Look past inert trailing items (usage footers, boundaries) to the
-     * last *content* item — footer emission between the tool batch and
+    /* Look past inert trailing items (usage records, boundaries) to the
+     * last *content* item — a usage record between the tool batch and
      * this check must not hide an already-marked result and provoke a
      * duplicate marker. */
     size_t i = session->n_items;
@@ -481,27 +536,105 @@ enum agent_resume_tail agent_session_resume_tail(const struct agent_session *ses
     return AGENT_RESUME_TAIL_EMPTY;
 }
 
+/* Window use the newest usage record in `window` reports, or -1 when none does. `at`, when
+ * non-NULL, receives the record's index. */
+static long last_context_tokens(const struct context *window, size_t *at)
+{
+    /* A summarization request reports the window it summarized, not the conversation's: reading
+     * it after a successful compaction would immediately recompact the seed, and after a failed
+     * one it would stand in for the last agent turn. Usage records written before origins were
+     * stamped are recognized by position, right after the seed. */
+    size_t floor = 0;
+    if (window->n_items > 0 && window->items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
+        floor = 1;
+        while (floor < window->n_items && window->items[floor].kind == ITEM_TURN_USAGE)
+            floor++;
+    }
+    for (size_t i = window->n_items; i-- > floor;) {
+        const struct item *item = &window->items[i];
+        if (item->kind != ITEM_TURN_USAGE || !item->usage || item->origin == ITEM_ORIGIN_COMPACTION)
+            continue;
+        const struct stream_usage *usage = &item->usage->usage;
+        if (usage->input_tokens >= 0 && usage->output_tokens >= 0) {
+            if (at)
+                *at = i;
+            return usage->input_tokens + usage->output_tokens;
+        }
+    }
+    return -1;
+}
+
 long agent_session_last_context_tokens(const struct agent_session *session)
 {
     struct context window = agent_session_context(session);
-    /* Compaction appends its accepted attempt's footer right after the seed. It reports the
-     * summarized request, not the fresh window — reading it would immediately recompact the
-     * seed — so the scan stops before that run of footers. */
-    size_t floor = 0;
-    if (window.n_items > 0 && window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
-        floor = 1;
-        while (floor < window.n_items && window.items[floor].kind == ITEM_TURN_USAGE)
-            floor++;
+    return last_context_tokens(&window, NULL);
+}
+
+long agent_session_context_estimate(const struct agent_session *session)
+{
+    struct context window = agent_session_context(session);
+    size_t at;
+    long tokens = last_context_tokens(&window, &at);
+    if (tokens < 0)
+        return -1;
+
+    /* A turn's usage record follows the tool results that answer its response, so results
+     * between the turn's boundary and the record were not part of the request it measures. */
+    size_t turn_start = at;
+    while (turn_start > 0 && window.items[turn_start - 1].kind != ITEM_TURN_BOUNDARY)
+        turn_start--;
+    for (size_t i = turn_start; i < at; i++)
+        if (window.items[i].kind == ITEM_TOOL_RESULT)
+            tokens += items_token_estimate(&window.items[i], 1);
+    return tokens + items_token_estimate(window.items + at + 1, window.n_items - at - 1);
+}
+
+static int usage_reports_tokens(const struct item *item)
+{
+    if (item->kind != ITEM_TURN_USAGE || !item->usage)
+        return 0;
+    const struct stream_usage *usage = &item->usage->usage;
+    return usage->input_tokens >= 0 || usage->output_tokens >= 0;
+}
+
+int agent_session_has_reported_usage(const struct agent_session *session)
+{
+    for (size_t i = 0; i < session->n_items; i++) {
+        if (usage_reports_tokens(&session->items[i]))
+            return 1;
     }
-    for (size_t i = window.n_items; i-- > floor;) {
-        const struct item *item = &window.items[i];
-        if (item->kind != ITEM_TURN_USAGE || !item->usage)
-            continue;
-        const struct stream_usage *usage = &item->usage->usage;
-        if (usage->input_tokens >= 0 && usage->output_tokens >= 0)
-            return usage->input_tokens + usage->output_tokens;
+    /* A retired inherited usage record is neither this session's context nor its bill. */
+    for (size_t i = 0; i < session->n_retired; i++) {
+        if (!session->retired[i].inherited && usage_reports_tokens(&session->retired[i]))
+            return 1;
     }
-    return -1;
+    return 0;
+}
+
+/* The live path reads the context limit and rates only after the pre-request wait has let the
+ * model probe land; a resumed record reads them before any request. Without reported tokens
+ * nothing consults metadata, so there is nothing to wait for. */
+static void settle_resumed_metadata(struct provider *provider, const struct agent_session *session)
+{
+    if (provider && agent_session_has_reported_usage(session))
+        model_meta_wait_ms(provider, MODEL_META_WAIT_MS, NULL, NULL);
+}
+
+void agent_session_prepare_resumed(struct agent_session *session, struct provider *provider,
+                                   const char *path, const struct session_meta *recorded,
+                                   struct transcript_log *transcript, struct agent_resumed *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (agent_recording_enabled(provider))
+        out->session_log = session_log_resume(path, recorded->provider, recorded->model,
+                                              recorded->effort, recorded->preset, session->n_items);
+    /* Staged until the next append, so an unused override leaves the file as recorded. */
+    session_log_set_meta(out->session_log, agent_provider_log_name(provider), session->model,
+                         session->model_label, session->effort, config_str("preset"));
+    transcript_log_append(transcript, session->items, session->n_items);
+
+    settle_resumed_metadata(provider, session);
+    out->tail = agent_session_resume_tail(session);
 }
 
 /* An ordinary session then stores nothing extra, while a renamed provider or a gguf path still
@@ -530,7 +663,7 @@ static void fill_provenance(struct turn_provenance *provenance, struct agent_ses
 
 void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
                                   const struct stream_usage *usage, long elapsed_ms,
-                                  const struct stream_response *response)
+                                  const struct stream_response *response, enum item_origin origin)
 {
     struct turn_usage *turn_usage =
         agent_turn_usage_new(usage, elapsed_ms, provider, session->model);
@@ -541,6 +674,7 @@ void agent_session_add_turn_usage(struct agent_session *session, const struct pr
         session, (struct item){
                      .kind = ITEM_TURN_USAGE,
                      .usage = turn_usage,
+                     .origin = origin,
                      .provider = session->provider_id ? xstrdup(session->provider_id) : NULL,
                      .model = session->model && *session->model ? xstrdup(session->model) : NULL,
                  });
@@ -567,6 +701,18 @@ struct agent_absorb_result agent_session_absorb(struct agent_session *session, s
     return result;
 }
 
+void agent_session_add_attempt_usage(struct agent_session *session, const struct provider *provider,
+                                     const struct attempt *attempt, enum item_origin origin)
+{
+    struct stream_response response = {
+        .id = attempt->response_id,
+        .model = attempt->served_model,
+        .route = attempt->route,
+    };
+    agent_session_add_turn_usage(session, provider, &attempt->usage, attempt->elapsed_ms, &response,
+                                 origin);
+}
+
 void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
                       const struct item *items, size_t n_items)
 {
@@ -590,4 +736,14 @@ void agent_finalize_tasks(struct agent_session *session, struct transcript_log *
     session_log_discard_selection(slog);
     agent_flush_logs(tlog, slog, session->items, session->n_items);
     task_registry_shutdown();
+}
+
+enum agent_signal agent_interrupt_signal(void)
+{
+    /* An abort latches a pause too, so read it first. */
+    if (cancel_abort_requested())
+        return AGENT_SIGNAL_ABORT;
+    if (cancel_pause_requested())
+        return AGENT_SIGNAL_PAUSE;
+    return AGENT_SIGNAL_NONE;
 }

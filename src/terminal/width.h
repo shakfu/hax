@@ -2,9 +2,14 @@
 #ifndef HAX_TERMINAL_WIDTH_H
 #define HAX_TERMINAL_WIDTH_H
 
+#include <stddef.h>
+
 /* Physical terminal width on stdout, or 100 (matching DISPLAY_WIDTH_CAP) when stdout is not a
  * terminal or the size query fails. */
 int term_width(void);
+
+/* Physical terminal height on stdout, or 24 when stdout is not a terminal or the query fails. */
+int term_height(void);
 
 #define DISPLAY_WIDTH_CAP       100
 #define DISPLAY_WIDTH_TOLERANCE 10
@@ -21,5 +26,14 @@ int display_width(void);
  * reflow to terminal_cols. Empty rows still occupy one physical row. terminal_cols must be
  * positive. */
 int reflow_physical_rows(const int *row_widths, int count, int terminal_cols);
+
+struct buf;
+
+/* Append row, trusted styled text without line endings, clipped to max_cells terminal cells so it
+ * paints on one physical row. Escape sequences pass through at zero width, and unsafe codepoints
+ * become '?'. A wide character that would straddle the limit leaves an ellipsis ('.' without
+ * use_utf8) in its place, and a clipped row ends with a reset, as the cut may leave styling open.
+ * Returns the cells appended, for reflow-aware repaints. */
+int clip_styled_row(struct buf *out, const char *row, size_t len, int max_cells, int use_utf8);
 
 #endif /* HAX_TERMINAL_WIDTH_H */

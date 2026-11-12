@@ -197,8 +197,8 @@ def hax_py_diag(level, message, user) -> None:
 
 
 @ffi.def_extern()
-def hax_py_checkpoint(user) -> int:
-    """Report what should happen at the next seam, from every producer of that answer.
+def hax_py_signal(user) -> int:
+    """Report this agent's stop request; serves every poll and checkpoint hook.
 
     The flags are this agent's own, so a cancel() aimed at one agent leaves its siblings running.
     Any thread may set them, so a host calling cancel() while send() blocks is answered here.
@@ -206,29 +206,15 @@ def hax_py_checkpoint(user) -> int:
     """
     agent = ffi.from_handle(user)
     if agent._pending_exc or lib.cancel_state_abort_requested(agent._cancel):
-        return lib.AGENT_LOOP_SIG_ABORT
+        return lib.AGENT_SIGNAL_ABORT
     if lib.cancel_state_pause_requested(agent._cancel):
-        return lib.AGENT_LOOP_SIG_PAUSE
-    return lib.AGENT_LOOP_SIG_NONE
+        return lib.AGENT_SIGNAL_PAUSE
+    return lib.AGENT_SIGNAL_NONE
 
 
 @ffi.def_extern()
-def hax_py_tick(user) -> int:
-    """Stop an in-flight transfer. Without this a cancel would wait out the whole response.
-
-    Also serves compaction's is_cancelled hook, which asks the same question at a different
-    moment: a summary streamed through a cancel must not be kept. The loop passes the hooks'
-    user here, so this aborts only the transfer belonging to the cancelled agent.
-    """
-    agent = ffi.from_handle(user)
-    state = agent._cancel
-    return 1 if lib.cancel_state_abort_requested(state) or lib.cancel_state_pause_requested(
-        state) else 0
-
-
-@ffi.def_extern()
-def hax_py_compact(user) -> None:
-    ffi.from_handle(user).compact()
+def hax_py_compact(reason, user) -> int:
+    return 1 if ffi.from_handle(user)._compact(reason) else 0
 
 
 @ffi.def_extern()
@@ -685,12 +671,14 @@ class Agent:
         """Summarize the conversation in place and return whether a summary was appended.
 
         Compaction appends a seed rather than deleting history, so items still reports every
-        turn; the model-visible window is what shrinks. The loop calls this on its own once the
-        context crosses hax's configured threshold.
+        turn; the model-visible window is what shrinks. send() also compacts on its own when
+        the context nears the model's window, or when the provider rejects a request as too large.
         """
         if self._closed:
             raise HaxError("this Agent is closed")
+        return self._compact(lib.COMPACT_MANUAL)
 
+    def _compact(self, reason: int) -> bool:
         params = ffi.new(
             "struct compact_params *",
             {
@@ -699,10 +687,11 @@ class Agent:
                 "session_log": ffi.NULL,
                 "transcript_log": ffi.NULL,
                 "instructions": ffi.NULL,
+                "reason": reason,
                 "hooks": {
                     "user": self._handle,
-                    "tick": lib.hax_py_tick,
-                    "is_cancelled": lib.hax_py_tick,
+                    "poll": lib.hax_py_signal,
+                    "checkpoint": lib.hax_py_signal,
                 },
             },
         )
@@ -710,8 +699,13 @@ class Agent:
         lib.compact_run(params, result)
         outcome = result.outcome
         error = _text(result.error_message)
+        suspended = result.auto_suspended
         lib.compact_result_destroy(result)
 
+        if suspended:
+            _Runtime.record(
+                lib.HAX_DIAG_WARN, "automatic compaction off after repeated failures"
+            )
         if outcome == lib.COMPACT_COMPLETE:
             self._compactions += 1
             return True
@@ -729,8 +723,16 @@ class Agent:
         lib.cancel_state_clear(self._cancel)
         self._pending_exc = None
         before = self._session.n_items
+        encoded = prompt.encode()
 
-        lib.agent_session_add_user(self._session, prompt.encode())
+        # The loop compacts only at seams it reaches itself; the frontend owns the one before a
+        # send. A cancel during it stops the send, so the prompt is not appended.
+        if lib.compact_due(self._session, self._provider, encoded):
+            self._compact(lib.COMPACT_THRESHOLD)
+            if lib.cancel_state_abort_requested(self._cancel):
+                raise HaxCancelled("the send was cancelled during compaction")
+
+        lib.agent_session_add_user(self._session, encoded)
 
         params = ffi.new(
             "struct agent_loop_params *",
@@ -744,8 +746,8 @@ class Agent:
                 "continued": 0,
                 "hooks": {
                     "user": self._handle,
-                    "tick": lib.hax_py_tick,
-                    "checkpoint": lib.hax_py_checkpoint,
+                    "poll": lib.hax_py_signal,
+                    "checkpoint": lib.hax_py_signal,
                     "tool_call": lib.hax_py_tool_call,
                     "compact": lib.hax_py_compact,
                 },

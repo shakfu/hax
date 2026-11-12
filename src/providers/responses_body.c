@@ -96,15 +96,18 @@ json_t *responses_build_input_items(const struct item *items, size_t n_items, co
     return input;
 }
 
+/* Without an explicit strict:false, Responses normalizes schemas into strict mode, which makes
+ * every optional parameter required and non-nullable: the model must invent values for them and
+ * can derail while writing the arguments. */
 json_t *responses_build_tools(const struct tool_def *tools, size_t n_tools)
 {
     json_t *definitions = json_array();
     for (size_t i = 0; i < n_tools; i++) {
         json_t *parameters = tool_schema_build(&tools[i]);
         json_array_append_new(definitions,
-                              json_pack("{s:s, s:s, s:s, s:o}", "type", "function", "name",
+                              json_pack("{s:s, s:s, s:s, s:o, s:b}", "type", "function", "name",
                                         tools[i].name, "description", tools[i].description,
-                                        "parameters", parameters));
+                                        "parameters", parameters, "strict", 0));
     }
     return definitions;
 }

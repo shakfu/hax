@@ -13,8 +13,9 @@ struct input;
 struct input *input_new(void);
 void input_free(struct input *in);
 
-/* Return a malloc'd message, which may contain '\n'; return NULL on EOF or a
- * double Ctrl-C quit. Ctrl-C with text clears the buffer and editing continues. */
+/* Return a malloc'd message, which may contain '\n'; return NULL on EOF or a double Ctrl-C quit,
+ * after erasing the prompt so the cursor rests where it began. Ctrl-C with text clears the buffer
+ * and editing continues. */
 char *input_readline(struct input *in, const char *prompt);
 
 /* Add a non-empty line with erasedups semantics. When persistence is open, append it to
@@ -43,10 +44,18 @@ void input_history_load(struct input *in, const char *path);
  * Return -1 for printable keys or when all slots are occupied. */
 int input_bind_modal_key(struct input *in, unsigned char key, void (*fn)(void *user), void *user);
 
-/* Register a modal Tab completer. The editor borrows `completer`, which must outlive it.
- * NULL unregisters the completer and makes Tab insert a literal tab. */
-struct input_modal_completer;
-void input_set_modal_completer(struct input *in, const struct input_modal_completer *completer);
+/* Register a Tab completer. The editor borrows `completer`, which must outlive it. Tab tries
+ * completers in registration order and does nothing when none matches; it never inserts a
+ * literal tab. A second Tab that still has nothing to add shows the completer's candidates as
+ * ghost text. Ghost text is painted dim after the buffer, so only while the cursor is at its end,
+ * and lasts until the next key. Return -1 when all slots are occupied. */
+struct input_completer;
+int input_add_completer(struct input *in, const struct input_completer *completer);
+
+/* Register the ghost-text hint: after each edit `fn` receives the buffer and returns a malloc'd
+ * string, or NULL for no hint. A hint appears once typing pauses and then follows edits at once
+ * until none applies. The hook must not touch the tty; NULL `fn` disables it. */
+void input_set_hint(struct input *in, char *(*fn)(const char *buf, void *user), void *user);
 
 /* Register the Ctrl-V paste hook. Ctrl-V or an empty bracketed paste calls
  * `fn(user)` and inserts the returned malloc'd string at the cursor, freeing it.
@@ -66,12 +75,14 @@ void input_set_paste_filter(struct input *in, char *(*fn)(const char *text, void
  * One-shot; NULL or "" clears it, and non-tty reads discard it. */
 void input_set_preseed(struct input *in, const char *text);
 
-/* When enabled, Enter on an empty buffer returns "" instead of doing nothing. */
-void input_set_empty_submit(struct input *in, int enabled);
+/* A non-NULL `placeholder` makes Enter on an empty buffer return "" instead of doing nothing,
+ * and the empty buffer shows it as ghost text. An empty submit erases the prompt row and leaves
+ * the cursor at its start, as before the call. NULL restores the default; the text is copied. */
+void input_set_empty_submit(struct input *in, const char *placeholder);
 
-/* Load the conventional XDG history file only for tty sessions. `persist` controls whether
- * later entries are appended; scripted input is never retained. */
-void input_history_open_default(struct input *in, int persist);
+/* Load `path` only for tty sessions; `persist` controls whether later entries are appended
+ * there. Scripted input is never retained, so non-tty sessions leave `path` untouched. */
+void input_history_open_tty(struct input *in, const char *path, int persist);
 
 /* Write a committed user message with an accent stripe on each row, wrapped to
  * `display_columns`. Leave the cursor at column 0 of a fresh row without erasing prior content. */

@@ -6,20 +6,20 @@
 
 #include "agent_core.h"
 #include "xalloc.h"
-#include "render/spinner.h"
+#include "render/footer.h"
 #include "system/cancel.h"
 #include "terminal/ansi.h"
 #include "terminal/interrupt.h"
 
 struct busy {
-    struct spinner *sp;
+    struct footer *footer;
 };
 
 struct busy *busy_begin(const char *label)
 {
     struct busy *b = xmalloc(sizeof(*b));
-    b->sp = spinner_new(label);
-    spinner_show(b->sp);
+    b->footer = footer_new(label);
+    footer_show_deferred(b->footer);
     cancel_clear_requests();
     interrupt_arm();
     return b;
@@ -36,8 +36,8 @@ int busy_end(struct busy *b)
     interrupt_resolve_pending_escape();
     int cancelled = cancel_abort_requested();
     interrupt_disarm();
-    spinner_hide(b->sp);
-    spinner_free(b->sp);
+    footer_hide(b->footer);
+    footer_free(b->footer);
     free(b);
     /* A cancelled window would otherwise vanish without a trace — the
      * spinner is erased and the caller prints nothing. Leave the same

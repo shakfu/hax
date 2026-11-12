@@ -2,6 +2,7 @@
 #ifndef HAX_COMPACT_H
 #define HAX_COMPACT_H
 
+#include "agent_stream.h"
 #include "provider.h"
 
 struct agent_session;
@@ -21,13 +22,22 @@ enum compact_outcome {
     COMPACT_NO_SUMMARY,
 };
 
-/* `on_event` is for frontend accounting; its return value is ignored. `is_cancelled` is sampled
- * after streaming and may reject an otherwise complete summary. All callbacks are optional. */
+/* The user's stop request while compacting. `poll` is sampled while a summary streams, and a
+ * signal cuts it when agent_signal_stops() says so. `checkpoint` settles the request once
+ * streaming ends: an abort then rejects even a complete summary, a pause only a request it cut.
+ * Both are optional. */
 struct compact_hooks {
     void *user;
-    stream_cb on_event;
-    http_tick_cb tick;
-    int (*is_cancelled)(void *user);
+    agent_signal_cb poll;
+    agent_signal_cb checkpoint;
+};
+
+/* What started a compaction. Every reason but COMPACT_MANUAL is automatic and counts toward
+ * COMPACT_MAX_AUTO_FAILURES. */
+enum compact_reason {
+    COMPACT_MANUAL,
+    COMPACT_THRESHOLD, /* compact_due() held before a request */
+    COMPACT_OVERFLOW,  /* the provider rejected a request as too large */
 };
 
 /* All pointers are borrowed for the duration of compact_run. `session` must be non-NULL;
@@ -38,29 +48,46 @@ struct compact_params {
     struct session_log *session_log;
     struct transcript_log *transcript_log;
     const char *instructions;
+    enum compact_reason reason;
     struct compact_hooks hooks;
 };
+
+/* Automatic compactions that may fail without one succeeding before compact_due() stops asking.
+ * Ordinary turns between them do not reset the count: a successful reply never makes a summary
+ * fit. A manual compaction still runs, and its success re-enables automatic ones. */
+#define COMPACT_MAX_AUTO_FAILURES 3
 
 struct compact_result {
     enum compact_outcome outcome;
     int attempts;
     char *error_message;
+    /* This failure reached COMPACT_MAX_AUTO_FAILURES. */
+    int auto_suspended;
 };
 
-/* Summarize the current model-visible context and append a seed on success. Every attempt's
- * reported usage is appended to the session and both logs are flushed. The result owns
- * `error_message`. */
+/* Summarize the current model-visible context and append a seed on success. A window the provider
+ * rejects as too large, or a reply that keeps calling tools, falls back to a shortened text form of
+ * the window; COMPACT_OVERFLOW starts from that form, since the window is known not to fit. Every
+ * attempt's reported usage is appended to the session and both logs are flushed. A success clears
+ * the session's compact_failures, and an automatic run that fails without being cancelled adds
+ * one. The result owns `error_message`, which is NULL unless the provider reported one. */
 void compact_run(const struct compact_params *params, struct compact_result *result);
 void compact_result_destroy(struct compact_result *result);
 
-/* Read the compact.auto setting. Manual compaction does not consult it. */
-int compact_auto_enabled(void);
-
-/* Return whether `context_tokens` is at least `threshold_percent` of `context_limit`. Invalid token
- * counts, a non-positive limit, or a percentage outside 1..100 do not trigger compaction. */
+/* Return whether `context_tokens` reaches the lower of `threshold_percent` of `context_limit` and
+ * the limit minus a reserve for the summary and the next reply. The reserve is at most a quarter
+ * of the limit, so a small window keeps most of its room. Invalid token counts, a non-positive
+ * limit, or a percentage outside 1..100 do not trigger compaction. */
 int compact_over_threshold(long context_tokens, long context_limit, int threshold_percent);
 
-/* Apply compact.auto and compact.threshold to the latest context usage. */
-int compact_should_auto(long context_tokens, long context_limit);
+/* Whether automatic compaction may run: compact.auto is on and the session's compact_failures has
+ * not reached COMPACT_MAX_AUTO_FAILURES. */
+int compact_auto_enabled(const struct agent_session *session);
+
+/* Whether the next request should be preceded by compaction: compact.threshold applied to
+ * agent_session_context_estimate() plus `pending_prompt` against the current model's context
+ * limit, while compact_auto_enabled() holds. `provider` and `pending_prompt` may be NULL. */
+int compact_due(const struct agent_session *session, struct provider *provider,
+                const char *pending_prompt);
 
 #endif /* HAX_COMPACT_H */

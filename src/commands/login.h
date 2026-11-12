@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-#ifndef HAX_LOGIN_H
-#define HAX_LOGIN_H
+#ifndef HAX_COMMANDS_LOGIN_H
+#define HAX_COMMANDS_LOGIN_H
 
 struct agent_state;
 
@@ -12,4 +12,11 @@ void login_command(struct agent_state *state, const char *argument);
  * (the codex CLI's file) are never touched. */
 void logout_command(struct agent_state *state, const char *argument);
 
-#endif /* HAX_LOGIN_H */
+/* Add the provider ids /login and /logout take, for Tab completion, in their picker order: every
+ * provider with a login flow, and only those holding a hax-managed login. Reads the local
+ * credential store but never waits on the network. */
+struct completion;
+void login_choices(struct completion *choices);
+void logout_choices(struct completion *choices);
+
+#endif /* HAX_COMMANDS_LOGIN_H */

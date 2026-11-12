@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <stdint.h>
 #include <string.h>
 
 #include "harness.h"
@@ -61,6 +62,16 @@ static void test_sequence_valid_four_byte(void)
     EXPECT(utf8_sequence_is_valid("\xF4\x8F\xBF\xBF", 4) == 1); /* U+10FFFF */
 }
 
+static void test_decode_codepoint(void)
+{
+    uint32_t codepoint = 0;
+    EXPECT(utf8_decode_codepoint("a", 1, &codepoint) && codepoint == 'a');
+    EXPECT(utf8_decode_codepoint("\xC3\xA9", 2, &codepoint) && codepoint == 0xE9);
+    EXPECT(utf8_decode_codepoint("\xEF\xB8\x8F", 3, &codepoint) && codepoint == 0xFE0F);
+    EXPECT(utf8_decode_codepoint("\xF0\x9F\x8F\xBD", 4, &codepoint) && codepoint == 0x1F3FD);
+    EXPECT(!utf8_decode_codepoint("\xED\xA0\x80", 3, &codepoint)); /* surrogate */
+}
+
 static void test_sequence_valid_rejects_overlong(void)
 {
     /* C0 80 would encode U+0000 as 2 bytes — overlong, must reject. */
@@ -117,6 +128,33 @@ static void test_buffer_validity(void)
     EXPECT(!utf8_is_valid("\xED\xA0\x80", 3));
 }
 
+static void expect_encoded(uint32_t codepoint, const char *want, size_t want_len)
+{
+    char out[4];
+    size_t len = utf8_encode_codepoint(codepoint, out);
+    EXPECT_MEM_EQ(out, len, want, want_len);
+}
+
+static void test_encode(void)
+{
+    expect_encoded(0x00, "\x00", 1);
+    expect_encoded(0x7F, "\x7F", 1);
+    expect_encoded(0x80, "\xC2\x80", 2);
+    expect_encoded(0x7FF, "\xDF\xBF", 2);
+    expect_encoded(0x800, "\xE0\xA0\x80", 3);
+    expect_encoded(0xFFFF, "\xEF\xBF\xBF", 3);
+    expect_encoded(0x10000, "\xF0\x90\x80\x80", 4);
+    expect_encoded(0x10FFFF, "\xF4\x8F\xBF\xBF", 4);
+}
+
+static void test_encode_rejects_non_scalar(void)
+{
+    char out[4];
+    EXPECT(utf8_encode_codepoint(0xD800, out) == 0);
+    EXPECT(utf8_encode_codepoint(0xDFFF, out) == 0);
+    EXPECT(utf8_encode_codepoint(0x110000, out) == 0);
+}
+
 static void test_next_ascii(void)
 {
     const char *s = "abc";
@@ -164,6 +202,20 @@ static void test_next_overlong_steps_one(void)
      * byte" policy: utf8_next returns +1, not +2. */
     const char *s = "\xC0\x80";
     EXPECT(utf8_next(s, 2, 0) == 1);
+}
+
+/* "a", then U+20AC (three bytes), then "b". */
+static void test_char_start(void)
+{
+    const char text[] = "a\xE2\x82\xAC"
+                        "b";
+    EXPECT(utf8_char_start(text, 0) == 0);
+    EXPECT(utf8_char_start(text, 1) == 1);
+    EXPECT(utf8_char_start(text, 2) == 1);
+    EXPECT(utf8_char_start(text, 3) == 1);
+    EXPECT(utf8_char_start(text, 4) == 4);
+    /* Continuation bytes alone back up to the start. */
+    EXPECT(utf8_char_start("\x80\x80", 1) == 0);
 }
 
 static void test_prev_ascii(void)
@@ -454,6 +506,7 @@ int main(void)
     test_sequence_valid_two_byte();
     test_sequence_valid_three_byte();
     test_sequence_valid_four_byte();
+    test_decode_codepoint();
     test_sequence_valid_rejects_overlong();
     test_sequence_valid_rejects_surrogate();
     test_sequence_valid_rejects_above_max();
@@ -461,6 +514,8 @@ int main(void)
     test_sequence_valid_rejects_continuation_leader();
     test_sequence_valid_rejects_length_mismatch();
     test_buffer_validity();
+    test_encode();
+    test_encode_rejects_non_scalar();
 
     test_next_ascii();
     test_next_multibyte();
@@ -476,6 +531,7 @@ int main(void)
     test_prev_lone_continuation();
     test_prev_overlong_steps_one();
     test_prev_leader_length_mismatch();
+    test_char_start();
 
     test_cells_ascii();
     test_cells_at_end();

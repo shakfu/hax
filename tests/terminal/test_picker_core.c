@@ -150,49 +150,31 @@ static void test_update_matches_resets_selection(void)
     buf_free(&fixture.core.query);
 }
 
-static void test_sanitize_replaces_escape_sequences(void)
+static void test_truncate_query_refilters(void)
 {
-    const char *unsafe = "safe\x1b[2J\x1b[Hgone";
-    struct buf output;
-    buf_init(&output);
+    struct navigation_fixture fixture;
+    init_navigation_fixture(&fixture, 3, 10);
+    fixture.items[0].label = "openai";
+    fixture.items[1].label = "openrouter";
+    fixture.items[2].label = "anthropic";
 
-    picker_core_append_sanitized(&output, unsafe, strlen(unsafe));
-    buf_append(&output, "", 1);
-    EXPECT(strchr(output.data, 0x1b) == NULL);
-    EXPECT_STR_EQ(output.data, "safe?[2J?[Hgone");
-    buf_free(&output);
-}
+    buf_init(&fixture.core.query);
+    buf_append_str(&fixture.core.query, "openai");
+    picker_core_update_matches(&fixture.core);
+    EXPECT(fixture.core.match_count == 1);
 
-static void test_sanitize_replaces_controls_and_keeps_utf8(void)
-{
-    const char *controls = "a\rb\ac";
-    struct buf output;
-    buf_init(&output);
+    picker_core_truncate_query(&fixture.core, 4);
+    EXPECT_STR_EQ(fixture.core.query.data, "open");
+    EXPECT(fixture.core.match_count == 2);
 
-    picker_core_append_sanitized(&output, controls, strlen(controls));
-    buf_append(&output, "", 1);
-    EXPECT_STR_EQ(output.data, "a?b?c");
-    buf_free(&output);
+    fixture.core.selection = 1;
+    picker_core_truncate_query(&fixture.core, 4);
+    EXPECT(fixture.core.selection == 1);
 
-    if (!locale_have_utf8())
-        return;
-
-    buf_init(&output);
-    picker_core_append_sanitized(&output, "c – ü", strlen("c – ü"));
-    buf_append(&output, "", 1);
-    EXPECT_STR_EQ(output.data, "c – ü");
-    buf_free(&output);
-}
-
-static void test_sanitize_accepts_counted_text(void)
-{
-    struct buf output;
-    buf_init(&output);
-
-    picker_core_append_sanitized(&output, "abcdef", 3);
-    buf_append(&output, "", 1);
-    EXPECT_STR_EQ(output.data, "abc");
-    buf_free(&output);
+    picker_core_truncate_query(&fixture.core, 0);
+    EXPECT(fixture.core.query.len == 0);
+    EXPECT(fixture.core.match_count == 3);
+    buf_free(&fixture.core.query);
 }
 
 static void test_text_cells_accounts_for_line_break(void)
@@ -279,9 +261,6 @@ int main(void)
     test_dim_label_accounts_for_wider_separator();
     test_label_cells_narrow_terminal();
     test_text_cells_accounts_for_line_break();
-    test_sanitize_replaces_escape_sequences();
-    test_sanitize_replaces_controls_and_keeps_utf8();
-    test_sanitize_accepts_counted_text();
     test_empty_query_matches_all();
     test_substring_ignores_ascii_case();
     test_all_terms_must_match();
@@ -292,5 +271,6 @@ int main(void)
     test_zero_viewport_still_clamps_view();
     test_select_item_centers();
     test_update_matches_resets_selection();
+    test_truncate_query_refilters();
     T_REPORT();
 }

@@ -22,6 +22,7 @@
 #include "system/cancel.h"
 #include "system/clock.h"
 #include "system/fd.h"
+#include "text/display_safe.h"
 #include "text/fmt.h"
 #include "text/utf8_sanitize.h"
 #include "text/width.h"
@@ -405,8 +406,8 @@ static void append_capped_range(struct task *t, size_t from, size_t to, struct b
 {
     size_t range = to - from;
     size_t cap = output_cap_bytes();
-    size_t head_cap = cap / BASH_OUTPUT_HEAD_DIVISOR;
-    size_t head_lines_cap = OUTPUT_CAP_LINES / BASH_OUTPUT_HEAD_DIVISOR;
+    size_t head_cap = cap / OUTPUT_CAP_HEAD_DIVISOR;
+    size_t head_lines_cap = OUTPUT_CAP_LINES / OUTPUT_CAP_HEAD_DIVISOR;
 
     struct buf tail;
     buf_init(&tail);
@@ -909,6 +910,11 @@ size_t task_running_count(void)
 
 void task_registry_shutdown(void)
 {
+    /* Kill every tree before stopping any drainer, so each pipe closes and its drainer ends at EOF
+     * rather than at its next poll timeout. Nothing is reaped yet, so signaling stays safe. */
+    for (struct task *t = tasks; t; t = t->next)
+        if (!t->done)
+            bash_signal_process_tree(t->pid, SIGKILL);
     while (tasks) {
         struct task *t = tasks;
         tasks = t->next;

@@ -6,69 +6,7 @@
 #include "system/locale.h"
 #include "text/width.h"
 
-/* ---------- flatten_for_display ---------- */
-
-static void test_flatten_null(void)
-{
-    char *out = flatten_for_display(NULL);
-    EXPECT_STR_EQ(out, "");
-    free(out);
-}
-
-static void test_flatten_empty(void)
-{
-    char *out = flatten_for_display("");
-    EXPECT_STR_EQ(out, "");
-    free(out);
-}
-
-static void test_flatten_plain(void)
-{
-    char *out = flatten_for_display("ls -la");
-    EXPECT_STR_EQ(out, "ls -la");
-    free(out);
-}
-
-static void test_flatten_newline(void)
-{
-    char *out = flatten_for_display("ls\npwd");
-    EXPECT_STR_EQ(out, "ls pwd");
-    free(out);
-}
-
-static void test_flatten_collapses_runs(void)
-{
-    /* Multiple newlines/tabs/spaces collapse to a single space. */
-    char *out = flatten_for_display("a\n\n\tb  \r\n c");
-    EXPECT_STR_EQ(out, "a b c");
-    free(out);
-}
-
-static void test_flatten_strips_edges(void)
-{
-    char *out = flatten_for_display("\n  hello world\n\n");
-    EXPECT_STR_EQ(out, "hello world");
-    free(out);
-}
-
-static void test_flatten_all_whitespace(void)
-{
-    /* All-whitespace input collapses to empty — leading-trim drops the
-     * first run, trailing-trim drops everything that came after. */
-    char *out = flatten_for_display("  \n\t\r  ");
-    EXPECT_STR_EQ(out, "");
-    free(out);
-}
-
-static void test_flatten_control_bytes(void)
-{
-    /* All ASCII control bytes (incl. DEL 0x7f) collapse to spaces. */
-    char *out = flatten_for_display("a\x01\x02\x03"
-                                    "b\x7f"
-                                    "c");
-    EXPECT_STR_EQ(out, "a b c");
-    free(out);
-}
+/* ---------- display_cells ---------- */
 
 static void test_display_cells(void)
 {
@@ -82,72 +20,6 @@ static void test_display_cells(void)
     EXPECT(display_cells("a\xE4\xB8\xAD") == 3);
     /* Combining mark rides on the base glyph (zero cells). */
     EXPECT(display_cells("e\xCC\x81") == 1);
-}
-
-static void test_flatten_preserves_high_bytes(void)
-{
-    /* Printable UTF-8 passes through. */
-    char *out = flatten_for_display("café\nlatte");
-    EXPECT_STR_EQ(out, "café latte");
-    free(out);
-}
-
-static void test_flatten_substitutes_bidi_override(void)
-{
-    /* Trojan Source: U+202E RIGHT-TO-LEFT OVERRIDE encoded as
-     * E2 80 AE. Flatten substitutes with '?' so a model-supplied
-     * tool arg can't bidi-reorder the rendered header. */
-    char *out = flatten_for_display("ab\xE2\x80\xAE"
-                                    "cd");
-    EXPECT_STR_EQ(out, "ab?cd");
-    free(out);
-}
-
-static void test_flatten_substitutes_zwj(void)
-{
-    /* U+200D ZERO WIDTH JOINER (E2 80 8D). Width-zero invisible —
-     * substituted so the displayed string matches the cell budget. */
-    char *out = flatten_for_display("ab\xE2\x80\x8D"
-                                    "cd");
-    EXPECT_STR_EQ(out, "ab?cd");
-    free(out);
-}
-
-static void test_flatten_substitutes_malformed_utf8(void)
-{
-    /* Lone continuation byte: malformed UTF-8 → '?'. */
-    char *out = flatten_for_display("ab\x80"
-                                    "cd");
-    EXPECT_STR_EQ(out, "ab?cd");
-    free(out);
-}
-
-static void test_flatten_caps_zero_width_run(void)
-{
-    /* Bound bytes consumed by a visually zero-width run. */
-    char input[1 + 2 * 100 + 1];
-    input[0] = 'a';
-    for (int k = 0; k < 100; k++) {
-        input[1 + 2 * k] = (char)0xCC;
-        input[2 + 2 * k] = (char)0x81;
-    }
-    input[1 + 2 * 100] = '\0';
-    char *out = flatten_for_display(input);
-    /* "a" + 8 combining marks = 1 + 16 = 17 bytes. */
-    EXPECT(strlen(out) == 17);
-    EXPECT(out[0] == 'a');
-    free(out);
-}
-
-static void test_flatten_preserves_legit_combining_run(void)
-{
-    /* Below the cap, combining marks pass through unchanged so
-     * legitimate decomposed forms (e.g. macOS HFS+ NFD paths,
-     * Devanagari with multiple marks per base) render correctly.
-     * "a" + 3 combining marks = 1 + 6 = 7 bytes, unchanged. */
-    char *out = flatten_for_display("a\xCC\x81\xCC\x81\xCC\x81");
-    EXPECT_STR_EQ(out, "a\xCC\x81\xCC\x81\xCC\x81");
-    free(out);
 }
 
 /* ---------- truncate_for_display ---------- */
@@ -546,6 +418,108 @@ static void test_reflow_last_row_reserve(void)
     free(out);
 }
 
+static void test_reflow_last_row_breaks_after_mark_in_token(void)
+{
+    /* A collapsed header row on a 106-column terminal. */
+    const char *cmd = "rg -n 'hello\\.txt|interrupt_stall\\.txt|tool_roundtrip\\.txt|"
+                      "test_oneshot_(json|signal_interrupt|text|tool)' --glob '!build/**' .";
+    char *out = reflow_for_display(cmd, 98, 98, 1, 0);
+    EXPECT_STR_EQ(out, "rg -n 'hello\\.txt|interrupt_stall\\.txt|tool_roundtrip\\.txt|"
+                       "test_oneshot_(json|signal_interrupt|...");
+    free(out);
+}
+
+static void test_reflow_last_row_cuts_token_without_marks(void)
+{
+    char *out = reflow_for_display("rg -n abcdefghijklmnopqrstuvwxyz0123456789", 30, 30, 1, 0);
+    EXPECT_STR_EQ(out, "rg -n abcdefghijklmnopqrstu...");
+    free(out);
+}
+
+static void test_reflow_first_row_cuts_token_without_marks(void)
+{
+    /* Moving the token to the next row would leave it truncated there; splitting it fits. */
+    char *out = reflow_for_display("rg -n abcdefghijklmnopqrstuvwxyz0123", 20, 20, 2, 0);
+    EXPECT_STR_EQ(out, "rg -n abcdefghijklmn\nopqrstuvwxyz0123");
+    free(out);
+}
+
+static void test_reflow_space_break_up_to_slack_limit(void)
+{
+    /* 21 a's, a space, then a token that cannot fit: the word break leaves 16 of 37 cells
+     * unused, which is the most a wide row gives up. */
+    char input[53];
+    memset(input, 'a', 21);
+    input[21] = ' ';
+    memset(input + 22, 'b', 30);
+    input[52] = '\0';
+    char *out = reflow_for_display(input, 40, 40, 1, 0);
+    EXPECT_STR_EQ(out, "aaaaaaaaaaaaaaaaaaaaa...");
+    free(out);
+}
+
+static void test_reflow_cuts_token_past_slack_limit(void)
+{
+    /* One cell shorter than above: the word break would leave 17 cells unused. */
+    char input[52];
+    memset(input, 'a', 20);
+    input[20] = ' ';
+    memset(input + 21, 'b', 30);
+    input[51] = '\0';
+    char *out = reflow_for_display(input, 40, 40, 1, 0);
+    EXPECT_STR_EQ(out, "aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb...");
+    free(out);
+}
+
+static void test_reflow_breaks_after_mark(void)
+{
+    char *out = reflow_for_display("cat src/render/tool_render.c", 20, 20, 2, 0);
+    EXPECT_STR_EQ(out, "cat src/render/\ntool_render.c");
+    free(out);
+}
+
+static void test_reflow_prefers_space_over_later_mark(void)
+{
+    char *out = reflow_for_display("echo one/two three/four", 20, 20, 2, 0);
+    EXPECT_STR_EQ(out, "echo one/two\nthree/four");
+    free(out);
+}
+
+static void test_reflow_keeps_mark_runs_whole(void)
+{
+    char *out = reflow_for_display("cd build/out&&ls -la", 13, 13, 2, 0);
+    EXPECT_STR_EQ(out, "cd build/\nout&&ls -la");
+    free(out);
+}
+
+static void test_reflow_mark_break_keeps_combining_mark(void)
+{
+    /* U+0338 overlays the '=' and must stay on its row. */
+    char *out = reflow_for_display("abc=\xCC\xB8"
+                                   "defghijklmnop",
+                                   8, 8, 3, 0);
+    EXPECT_STR_EQ(out, "abc=\xCC\xB8\ndefghijk\nlmnop");
+    free(out);
+}
+
+static void test_reflow_last_row_mark_break_keeps_combining_mark(void)
+{
+    char *out = reflow_for_display("abc=\xCC\xB8"
+                                   "defghijklmnop",
+                                   11, 11, 1, 0);
+    EXPECT_STR_EQ(out, "abc=\xCC\xB8...");
+    free(out);
+}
+
+static void test_reflow_oversized_codepoint_takes_own_row(void)
+{
+    char *out = reflow_for_display("\xE7\x95\x8C"
+                                   "ab",
+                                   1, 1, 3, 0);
+    EXPECT_STR_EQ(out, "\xE7\x95\x8C\na\nb");
+    free(out);
+}
+
 static void test_reflow_null_input(void)
 {
     char *out = reflow_for_display(NULL, 80, 80, 3, 0);
@@ -630,21 +604,7 @@ int main(void)
      * width — they need a UTF-8 LC_CTYPE. */
     locale_init_utf8();
 
-    test_flatten_null();
-    test_flatten_empty();
-    test_flatten_plain();
-    test_flatten_newline();
-    test_flatten_collapses_runs();
-    test_flatten_strips_edges();
-    test_flatten_all_whitespace();
-    test_flatten_control_bytes();
     test_display_cells();
-    test_flatten_preserves_high_bytes();
-    test_flatten_substitutes_bidi_override();
-    test_flatten_substitutes_zwj();
-    test_flatten_substitutes_malformed_utf8();
-    test_flatten_caps_zero_width_run();
-    test_flatten_preserves_legit_combining_run();
 
     test_truncate_under_cap();
     test_truncate_exact_cap();
@@ -684,6 +644,17 @@ int main(void)
     test_reflow_last_row_strict_for_wide_codepoint();
     test_reflow_reserve_applies_when_tail_fits_early();
     test_reflow_last_row_reserve();
+    test_reflow_last_row_breaks_after_mark_in_token();
+    test_reflow_last_row_cuts_token_without_marks();
+    test_reflow_first_row_cuts_token_without_marks();
+    test_reflow_space_break_up_to_slack_limit();
+    test_reflow_cuts_token_past_slack_limit();
+    test_reflow_breaks_after_mark();
+    test_reflow_prefers_space_over_later_mark();
+    test_reflow_keeps_mark_runs_whole();
+    test_reflow_mark_break_keeps_combining_mark();
+    test_reflow_last_row_mark_break_keeps_combining_mark();
+    test_reflow_oversized_codepoint_takes_own_row();
     test_reflow_null_input();
     test_reflow_empty_input();
     test_reflow_long_bash_command();

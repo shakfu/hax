@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "agent_core.h"
+#include "agent_stream.h"
 #include "agent_tool.h"
 #include "agent_usage.h"
 #include "compact.h"
@@ -15,104 +16,19 @@
 #include "transcript.h"
 #include "turn.h"
 #include "xalloc.h"
-#include "system/clock.h"
 #include "system/keepawake.h"
 #include "tools/task_registry.h"
-#include "transport/http.h"
 
-struct loop_turn_sink {
-    struct agent_loop_turn *loop_turn;
-    stream_cb observer;
-    void *observer_user;
-};
-
-static void capture_response(struct agent_loop_turn *loop_turn,
-                             const struct stream_response *response)
-{
-    if (!response)
-        return;
-    if (!loop_turn->response_id && response->id)
-        loop_turn->response_id = xstrdup(response->id);
-    if (!loop_turn->served_model && response->model)
-        loop_turn->served_model = xstrdup(response->model);
-    if (!loop_turn->route && response->route)
-        loop_turn->route = xstrdup(response->route);
-}
-
-/* Borrowed view of the identity captured above, for the turn's usage footer. */
-static struct stream_response turn_response(const struct agent_loop_turn *loop_turn)
-{
-    return (struct stream_response){
-        .id = loop_turn->response_id,
-        .model = loop_turn->served_model,
-        .route = loop_turn->route,
-    };
-}
-
-static int loop_turn_on_event(const struct stream_event *ev, void *user)
-{
-    struct loop_turn_sink *sink = user;
-    struct agent_loop_turn *loop_turn = sink->loop_turn;
-
-    if (ev->kind == EV_DONE) {
-        loop_turn->usage = ev->u.done.usage;
-        capture_response(loop_turn, &ev->u.done.response);
-    } else if (ev->kind == EV_ERROR) {
-        if (!loop_turn->error_message && ev->u.error.message)
-            loop_turn->error_message = xstrdup(ev->u.error.message);
-        if (ev->u.error.usage)
-            loop_turn->usage = *ev->u.error.usage;
-        capture_response(loop_turn, ev->u.error.response);
-    } else if (ev->kind == EV_RETRY && ev->u.retry.usage) {
-        agent_usage_add(&loop_turn->retry_usage, ev->u.retry.usage);
-    }
-
-    if (sink->observer)
-        sink->observer(ev, sink->observer_user);
-    turn_consume(&loop_turn->assembly, ev);
-    return 0;
-}
-
-void agent_loop_turn_run(struct agent_loop_turn *loop_turn, struct agent_session *session,
+void agent_loop_turn_run(struct agent_stream *loop_turn, struct agent_session *session,
                          struct provider *provider, const char *session_id, stream_cb observer,
-                         void *observer_user, http_tick_cb tick, void *tick_user)
+                         void *observer_user, agent_signal_cb poll, void *poll_user)
 {
-    memset(loop_turn, 0, sizeof(*loop_turn));
-    turn_init(&loop_turn->assembly);
-    loop_turn->usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
-    loop_turn->retry_usage = (struct stream_usage){-1, -1, -1, -1, -1, -1};
-
-    struct loop_turn_sink sink = {
-        .loop_turn = loop_turn,
-        .observer = observer,
-        .observer_user = observer_user,
-    };
+    agent_stream_init(loop_turn);
     struct context ctx = agent_session_context(session);
     ctx.image_input = model_meta_image_input(provider, session->model);
     ctx.session_id = session_id;
-    long started_ms = monotonic_ms();
-    provider->stream(provider, &ctx, session->model, loop_turn_on_event, &sink, tick, tick_user);
-    loop_turn->elapsed_ms = monotonic_ms() - started_ms;
-}
-
-struct stream_usage agent_loop_turn_usage_total(const struct agent_loop_turn *loop_turn)
-{
-    struct stream_usage total = loop_turn->usage;
-    agent_usage_add(&total, &loop_turn->retry_usage);
-    return total;
-}
-
-void agent_loop_turn_destroy(struct agent_loop_turn *loop_turn)
-{
-    turn_reset(&loop_turn->assembly);
-    free(loop_turn->error_message);
-    loop_turn->error_message = NULL;
-    free(loop_turn->response_id);
-    loop_turn->response_id = NULL;
-    free(loop_turn->served_model);
-    loop_turn->served_model = NULL;
-    free(loop_turn->route);
-    loop_turn->route = NULL;
+    agent_stream_request(loop_turn, provider, &ctx, session->model, observer, observer_user, poll,
+                         poll_user);
 }
 
 /* True when the assembly holds assistant text — flushed items or the open buffer. */
@@ -137,7 +53,7 @@ static int assembly_survives_cancel(const struct turn *assembly)
 }
 
 struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *session,
-                                                        struct agent_loop_turn *loop_turn,
+                                                        struct agent_stream *loop_turn,
                                                         enum agent_abort_reason reason)
 {
     struct turn *assembly = &loop_turn->assembly;
@@ -222,9 +138,9 @@ struct agent_abort_outcome agent_loop_turn_absorb_abort(struct agent_session *se
     };
 }
 
-static int loop_checkpoint(const struct agent_loop_hooks *hooks)
+static enum agent_signal loop_checkpoint(const struct agent_loop_hooks *hooks)
 {
-    return hooks->checkpoint ? hooks->checkpoint(hooks->user) : AGENT_LOOP_SIG_NONE;
+    return hooks->checkpoint ? hooks->checkpoint(hooks->user) : AGENT_SIGNAL_NONE;
 }
 
 static struct item loop_run_tool(const struct agent_loop_params *params, const struct item *call,
@@ -276,14 +192,18 @@ static void loop_observe_tools(const struct agent_loop_params *params, size_t fr
             params->hooks.tool_seen(&params->session->items[i], params->hooks.user);
 }
 
+/* One usage record per served attempt. An aborted turn keeps only attempts that reported usage;
+ * a completed one also records a terminal response the provider left unmeasured. */
 static void loop_add_usage(const struct agent_loop_params *params,
-                           const struct agent_loop_turn *loop_turn, int aborted)
+                           const struct agent_stream *loop_turn, int aborted)
 {
-    struct stream_usage usage = agent_loop_turn_usage_total(loop_turn);
-    if (!aborted || agent_usage_is_reported(&usage)) {
-        struct stream_response response = turn_response(loop_turn);
-        agent_session_add_turn_usage(params->session, params->provider, &usage,
-                                     loop_turn->elapsed_ms, &response);
+    const struct attempt_log *log = &loop_turn->attempts;
+    for (size_t i = 0; i < log->count; i++) {
+        const struct attempt *attempt = &log->attempts[i];
+        if (aborted && !agent_usage_is_reported(&attempt->usage))
+            continue;
+        agent_session_add_attempt_usage(params->session, params->provider, attempt,
+                                        ITEM_ORIGIN_NONE);
     }
 }
 
@@ -291,6 +211,42 @@ static void loop_flush(const struct agent_loop_params *params)
 {
     agent_flush_logs(params->tlog, params->slog, params->session->items, params->session->n_items);
 }
+
+enum loop_compaction {
+    LOOP_COMPACT_FAILED,
+    LOOP_COMPACTED,
+    LOOP_COMPACT_STOPPED, /* a stop request ended the run; result->outcome is set */
+};
+
+/* Run the frontend's compaction over flushed history, then settle a stop request raised during
+ * it. */
+static enum loop_compaction loop_compact(const struct agent_loop_params *params,
+                                         struct agent_loop_result *result,
+                                         enum compact_reason reason)
+{
+    const struct agent_loop_hooks *hooks = &params->hooks;
+    int compacted = hooks->compact(reason, hooks->user);
+    if (compacted)
+        result->last_context_tokens = -1;
+    enum agent_signal sig = loop_checkpoint(hooks);
+    if (sig == AGENT_SIGNAL_ABORT) {
+        agent_session_mark_interrupt(params->session);
+        loop_flush(params);
+        result->outcome = AGENT_LOOP_INTERRUPTED;
+        result->abort_marker_placed = 1;
+        return LOOP_COMPACT_STOPPED;
+    }
+    if (sig == AGENT_SIGNAL_PAUSE) {
+        result->outcome = AGENT_LOOP_PAUSED;
+        return LOOP_COMPACT_STOPPED;
+    }
+    return compacted ? LOOP_COMPACTED : LOOP_COMPACT_FAILED;
+}
+
+/* Requests accepted between two compactions that answer rejections: two mean a tool batch's
+ * results fit. With fewer, the compacted window or the first batch after it overflowed, and
+ * compacting again would likely end the same way. */
+#define RECOVERY_MIN_ACCEPTED 2
 
 static void loop_run_active(const struct agent_loop_params *params,
                             struct agent_loop_result *result)
@@ -302,16 +258,15 @@ static void loop_run_active(const struct agent_loop_params *params,
      * returns from its branch below. */
     result->outcome = AGENT_LOOP_MAX_TURNS;
     result->last_context_tokens = -1;
+    int recovered = 0; /* a compaction in this run answered a rejected request */
+    int accepted_since_recovery = 0;
 
-    for (int turn_n = 0; params->max_turns < 0 || turn_n < params->max_turns; turn_n++) {
-        /* The first boundary arrived with the user message — except on a continued run, whose
-         * first turn extends the previous seam. Follow-up turns owe their own. Either way it is
-         * appended lazily — just before this turn's items land in history — so a turn that
-         * leaves nothing behind (a pause pre-empting a still-prefilling request, a provider
-         * failure before any output) doesn't leave a dangling empty turn header in the
-         * transcript. Boundaries are inert to providers, so context built without one is
-         * unaffected. */
-        int owes_boundary = turn_n > 0 || params->continued;
+    for (int turn_n = 0; params->max_turns <= 0 || turn_n < params->max_turns; turn_n++) {
+        /* The user message brought the first boundary, unless the run continues a previous seam;
+         * follow-up turns and a retry after a compaction seed owe their own. It is appended only
+         * when this turn's items land, so a turn that leaves nothing behind leaves no empty turn
+         * header. Providers ignore boundaries, so the request built before it is unaffected. */
+        int owes_boundary = turn_n > 0 || params->continued || recovered;
 
         /* Deliver finished-task notes before building this turn's request, so the model hears
          * about completions at the earliest seam: between tool batches mid-turn, and with the
@@ -333,29 +288,22 @@ static void loop_run_active(const struct agent_loop_params *params,
         if (hooks->turn_begin)
             hooks->turn_begin(hooks->user);
 
-        struct agent_loop_turn loop_turn;
+        struct agent_stream loop_turn;
         agent_loop_turn_run(&loop_turn, session, params->provider, session_log_id(params->slog),
-                            hooks->observe, hooks->user, hooks->tick, hooks->user);
+                            hooks->observe, hooks->user, hooks->poll, hooks->user);
         result->turns++;
-        /* Account the request before branching: errored and interrupted turns still reached the
-         * provider and may carry billable usage. */
-        if (hooks->turn_end)
-            hooks->turn_end(&loop_turn, hooks->user);
 
-        long turn_context = -1;
-        if (loop_turn.usage.input_tokens >= 0 && loop_turn.usage.output_tokens >= 0) {
-            turn_context = loop_turn.usage.input_tokens + loop_turn.usage.output_tokens;
-            result->last_context_tokens = turn_context;
-        }
+        if (loop_turn.usage.input_tokens >= 0 && loop_turn.usage.output_tokens >= 0)
+            result->last_context_tokens =
+                loop_turn.usage.input_tokens + loop_turn.usage.output_tokens;
 
         if (loop_turn.assembly.state == TURN_FAILED) {
             /* Provider failure wins over a simultaneous frontend cancel: it supplies the
              * diagnostic. The boundary is owed exactly when something lands after it — the
-             * partial text repair keeps and/or a billable-usage footer — so it neither dangles
-             * empty nor lets the footer read as part of the preceding turn. */
-            struct stream_usage failed_usage = agent_loop_turn_usage_total(&loop_turn);
+             * partial text repair keeps and/or a billable usage record — so it neither dangles
+             * empty nor lets the record read as part of the preceding turn. */
             if (owes_boundary &&
-                (assembly_has_text(&loop_turn.assembly) || agent_usage_is_reported(&failed_usage)))
+                (assembly_has_text(&loop_turn.assembly) || agent_stream_has_usage(&loop_turn)))
                 agent_session_add_boundary(session);
             struct agent_abort_outcome abort =
                 agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_PROVIDER_ERROR);
@@ -363,27 +311,48 @@ static void loop_run_active(const struct agent_loop_params *params,
             result->final_items_from = abort.items_from;
             result->final_items_to = abort.items_to;
             result->abort_marker_placed = abort.marker_placed;
-            result->error_message =
-                loop_turn.error_message ? xstrdup(loop_turn.error_message) : NULL;
             loop_add_usage(params, &loop_turn, 1);
             loop_flush(params);
-            agent_loop_turn_destroy(&loop_turn);
+            int rejected_for_size = agent_stream_rejected_for_size(
+                &loop_turn, model_meta_context(params->provider, session->model));
+            char *error_message = loop_turn.error_message;
+            loop_turn.error_message = NULL;
+            agent_stream_destroy(&loop_turn);
+
+            /* A partial reply stays, marked, before the seed, outside the window the retry sees. */
+            int may_recover = !recovered || accepted_since_recovery >= RECOVERY_MIN_ACCEPTED;
+            if (rejected_for_size && may_recover && hooks->compact &&
+                compact_auto_enabled(session)) {
+                recovered = 1;
+                accepted_since_recovery = 0;
+                enum loop_compaction compaction = loop_compact(params, result, COMPACT_OVERFLOW);
+                if (compaction != LOOP_COMPACT_FAILED) {
+                    free(error_message);
+                    if (compaction == LOOP_COMPACT_STOPPED)
+                        return;
+                    /* The retry re-issues this turn, outside max_turns. */
+                    result->abort_marker_placed = 0;
+                    turn_n--;
+                    continue;
+                }
+            }
+            result->error_message = error_message;
             result->outcome = AGENT_LOOP_PROVIDER_ERROR;
             return;
         }
+        accepted_since_recovery++;
 
         /* Sample cancellation after a clean stream but before absorption or dispatch, so a late
          * Esc cannot launch tools or another turn. A pause request is only noted: the batch it
          * precedes still runs in full, and the stop lands at this turn's seam. */
         int pause_pending = 0;
-        int sig = loop_checkpoint(hooks);
-        if (sig == AGENT_LOOP_SIG_ABORT) {
+        enum agent_signal sig = loop_checkpoint(hooks);
+        if (sig == AGENT_SIGNAL_ABORT) {
             /* The boundary is owed exactly when the cancel leaves something after it — repaired
-             * items with their marker, or a billable-usage footer. An evaporating turn (nothing
+             * items with their marker, or a billable usage record. An evaporating turn (nothing
              * but truncated thinking) leaves no trace at all. */
-            struct stream_usage cancelled_usage = agent_loop_turn_usage_total(&loop_turn);
             if (owes_boundary && (assembly_survives_cancel(&loop_turn.assembly) ||
-                                  agent_usage_is_reported(&cancelled_usage)))
+                                  agent_stream_has_usage(&loop_turn)))
                 agent_session_add_boundary(session);
             struct agent_abort_outcome abort =
                 agent_loop_turn_absorb_abort(session, &loop_turn, AGENT_ABORT_USER_CANCEL);
@@ -393,26 +362,24 @@ static void loop_run_active(const struct agent_loop_params *params,
             result->abort_marker_placed = abort.marker_placed;
             loop_add_usage(params, &loop_turn, 1);
             loop_flush(params);
-            agent_loop_turn_destroy(&loop_turn);
+            agent_stream_destroy(&loop_turn);
             result->outcome = AGENT_LOOP_INTERRUPTED;
             return;
         }
-        if (sig == AGENT_LOOP_SIG_PAUSE)
+        if (sig == AGENT_SIGNAL_PAUSE)
             pause_pending = 1;
 
-        /* A pre-empted request — the pause-cancelling tick aborted the stream before any
-         * content, so no terminal event and nothing assembled — leaves no trace; the resume
-         * re-sends it. Anything a turn does leave (items, a footer — even just banked usage
-         * from a pause landing mid-retry) owes the boundary. */
-        int paused_empty = pause_pending && loop_turn.assembly.state == TURN_STREAMING &&
-                           loop_turn.assembly.n_items == 0;
-        struct stream_usage banked_usage = agent_loop_turn_usage_total(&loop_turn);
-        if (owes_boundary && (!paused_empty || agent_usage_is_reported(&banked_usage)))
+        /* A pre-empted request — the pause cut the stream before any content, so no terminal
+         * event and nothing assembled — leaves no trace; the resume re-sends it. Anything a
+         * turn does leave (items, a usage record — even just banked usage from a pause landing
+         * mid-retry) owes the boundary. */
+        int paused_empty = pause_pending && agent_stream_cut_by(&loop_turn, AGENT_SIGNAL_PAUSE);
+        if (owes_boundary && (!paused_empty || agent_stream_has_usage(&loop_turn)))
             agent_session_add_boundary(session);
         struct agent_absorb_result absorbed = agent_session_absorb(session, &loop_turn.assembly);
         /* Freeze the streamed slice before appending results: tool results must never be
          * mistaken for more calls, and frontends need the final turn range without its
-         * synthesized results or usage footer. */
+         * synthesized results or usage record. */
         size_t response_to = session->n_items;
         loop_observe_tools(params, absorbed.items_from, response_to);
         result->final_items_from = absorbed.items_from;
@@ -424,7 +391,7 @@ static void loop_run_active(const struct agent_loop_params *params,
              * pause here and let a resume re-send the request. */
             loop_add_usage(params, &loop_turn, paused_empty);
             loop_flush(params);
-            agent_loop_turn_destroy(&loop_turn);
+            agent_stream_destroy(&loop_turn);
             result->outcome = paused_empty ? AGENT_LOOP_PAUSED : AGENT_LOOP_COMPLETE;
             return;
         }
@@ -437,65 +404,52 @@ static void loop_run_active(const struct agent_loop_params *params,
             if (session->items[i].kind != ITEM_TOOL_CALL)
                 continue;
             sig = loop_checkpoint(hooks);
-            if (sig == AGENT_LOOP_SIG_PAUSE)
+            if (sig == AGENT_SIGNAL_PAUSE)
                 pause_pending = 1;
             enum agent_loop_tool_action action = AGENT_LOOP_TOOL_RUN;
             if (session->n_tools == 0)
                 action = AGENT_LOOP_TOOL_REFUSE;
-            else if (sig == AGENT_LOOP_SIG_ABORT)
+            else if (sig == AGENT_SIGNAL_ABORT)
                 action = AGENT_LOOP_TOOL_SKIP;
             struct item tool_result = loop_run_tool(params, &session->items[i], action);
             agent_session_append(session, tool_result);
         }
 
         /* The final checkpoint catches cancellation raised by the last tool, when there is no
-         * next call to sample it. Place the marker before the footer so usage remains the turn's
-         * trailing item. */
+         * next call to sample it. Place the marker before the usage record so it remains the
+         * turn's trailing item. */
         sig = loop_checkpoint(hooks);
-        if (sig == AGENT_LOOP_SIG_ABORT)
+        if (sig == AGENT_SIGNAL_ABORT)
             agent_session_mark_interrupt(session);
         loop_add_usage(params, &loop_turn, 0);
         loop_flush(params);
-        agent_loop_turn_destroy(&loop_turn);
+        agent_stream_destroy(&loop_turn);
 
-        if (sig == AGENT_LOOP_SIG_ABORT) {
+        if (sig == AGENT_SIGNAL_ABORT) {
             result->outcome = AGENT_LOOP_INTERRUPTED;
             result->abort_marker_placed = 1;
             return;
         }
-        if (sig == AGENT_LOOP_SIG_PAUSE)
+        if (sig == AGENT_SIGNAL_PAUSE)
             pause_pending = 1;
 
-        /* The seam is the pause point: calls, results, and footer are durable and no marker is
-         * owed — history reads as a finished provider turn a later run can continue verbatim.
-         * Deliberately before the compact seam: a pause returns control without launching new
-         * work, and an over-threshold seam is instead compacted by the run that continues it,
-         * before its first request (the frontend's re-entry path owns that check). */
+        /* The seam is the pause point: calls, results, and usage record are durable and no
+         * marker is owed — history reads as a finished provider turn a later run can continue
+         * verbatim. Deliberately before the compact seam: a pause returns control without
+         * launching new work, and an over-threshold seam is instead compacted by the run that
+         * continues it, before its first request (the frontend's re-entry path owns that check). */
         if (pause_pending) {
             result->outcome = AGENT_LOOP_PAUSED;
             return;
         }
 
-        /* Compact only at a continuation seam, after calls/results/footer are durable and before
-         * the next boundary. Cancellation during the frontend transaction must stop continuation
-         * against old history. */
-        if (compact_should_auto(turn_context,
-                                model_meta_context(params->provider, session->model)) &&
-            hooks->compact) {
-            hooks->compact(hooks->user);
-            sig = loop_checkpoint(hooks);
-            if (sig == AGENT_LOOP_SIG_ABORT) {
-                agent_session_mark_interrupt(session);
-                loop_flush(params);
-                result->outcome = AGENT_LOOP_INTERRUPTED;
-                result->abort_marker_placed = 1;
-                return;
-            }
-            if (sig == AGENT_LOOP_SIG_PAUSE) {
-                result->outcome = AGENT_LOOP_PAUSED;
-                return;
-            }
-        }
+        /* Only at a seam another turn follows, once the usage record compact_due() reads is
+         * appended; past the last allowed turn, the run that continues compacts before its first
+         * request. */
+        int turns_left = params->max_turns <= 0 || turn_n + 1 < params->max_turns;
+        if (turns_left && hooks->compact && compact_due(session, params->provider, NULL) &&
+            loop_compact(params, result, COMPACT_THRESHOLD) == LOOP_COMPACT_STOPPED)
+            return;
     }
 }
 

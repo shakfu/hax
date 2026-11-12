@@ -36,13 +36,18 @@ instructions well. A convention documented in `AGENTS.md` or a skill usually rep
 
 ## Decisions
 
-### No MCP
+### No MCP in the core
 
 A capability the model needs is a CLI tool with a README. The model already knows how to run
 programs, read their help text, and recover from their errors; a skill (`SKILL.md`) tells it
 when to reach for one. This keeps capabilities usable outside hax too — by you, by scripts, by
 other agents — instead of locking them behind an agent-specific protocol, another long-running
 process, and another config surface.
+
+The same pattern covers services that offer only an MCP server:
+[hax-mcp](https://github.com/OleksandrChekhovskyi/hax-mcp) is a separate CLI with a skill that
+calls their tools from the shell, bringing tool definitions into the context only as a task needs
+them rather than all up front.
 
 ### No hooks or plugins
 
@@ -82,7 +87,7 @@ when working on untrusted input or when the blast radius matters.
 
 What hax provides instead is control and restraint, not enforcement: the default system prompt
 forbids destructive git operations and tells the model to ask before irreversible actions, Esc
-pauses a running turn for steering, and `max_turns` bounds unattended runs.
+pauses a running turn for steering, and `max_turns` can bound unattended runs.
 
 ### No custom slash commands
 
@@ -90,7 +95,7 @@ Reusable prompts are files. Keep them in your repo (or anywhere) and `@`-mention
 prompt — the fzf picker makes them discoverable, and the model reads the file it is pointed at.
 That is an instruction to the model rather than the deterministic text expansion a command
 system performs, but the extra read is cheap and the outcome is the same in practice. Personal
-repetition is already covered by prompt history (Ctrl+R, persisted across sessions), and
+repetition is already covered by prompt history (Ctrl-R, persisted across sessions), and
 project conventions belong in `AGENTS.md`, where they apply without being invoked.
 
 ### Small dependency footprint

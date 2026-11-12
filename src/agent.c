@@ -11,7 +11,8 @@
 #include "agent_core.h"
 #include "agent_dispatch.h"
 #include "agent_loop.h"
-#include "agent_usage.h"
+#include "agent_stats.h"
+#include "agent_stream.h"
 #include "banner.h"
 #include "catalog.h"
 #include "compact.h"
@@ -25,13 +26,12 @@
 #include "select.h"
 #include "session.h"
 #include "slash.h"
-#include "tool.h"
 #include "transcript.h"
 #include "xalloc.h"
 #include "render/disp.h"
+#include "render/footer.h"
 #include "render/markdown.h"
 #include "render/render_ctx.h"
-#include "render/spinner.h"
 #include "system/cancel.h"
 #include "system/clock.h"
 #include "system/fs.h"
@@ -39,7 +39,9 @@
 #include "system/spawn.h"
 #include "system/tempfiles.h"
 #include "terminal/ansi.h"
+#include "terminal/herdr.h"
 #include "terminal/input.h"
+#include "terminal/input_core.h"
 #include "terminal/interrupt.h"
 #include "terminal/notify.h"
 #include "terminal/theme.h"
@@ -60,37 +62,13 @@ static const char *build_prompt(char *buffer, size_t size)
     return buffer;
 }
 
-/* Per-tool slots need static registry names; compaction can free item-owned names.
- * Unknown names count only toward the total. */
-static void stats_count_tool_call(struct session_stats *stats, const char *tool_name)
-{
-    stats->tool_calls++;
-    const struct tool *tool = tool_name ? agent_find_tool(tool_name) : NULL;
-    if (!tool)
-        return;
-    for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS; i++) {
-        if (stats->tools[i].name == tool->def.name) {
-            stats->tools[i].count++;
-            return;
-        }
-        if (!stats->tools[i].name) {
-            stats->tools[i].name = tool->def.name;
-            stats->tools[i].count = 1;
-            return;
-        }
-    }
-}
-
-/* Tables buffer invisibly until layout completes; delay the spinner to avoid flicker on fast
- * tables. */
-#define TABLE_SPINNER_DELAY_MS 1500
-
-/* ANSI must bypass disp bookkeeping or it commits a pending newline before the next separator. */
+/* Raw ANSI goes in as zero-width controls, or it would commit a pending newline before the next
+ * separator. */
 static void md_emit_to_disp(const char *bytes, size_t byte_count, int is_raw, void *user)
 {
     struct disp *disp = user;
     if (is_raw)
-        fwrite(bytes, 1, byte_count, disp_sink(disp));
+        disp_write_raw(disp, bytes, byte_count);
     else
         disp_write(disp, bytes, byte_count);
 }
@@ -121,40 +99,17 @@ void agent_display_refresh(struct agent_state *state)
         render->md = md_new(md_emit_to_disp, &render->disp, md_cols());
 }
 
-double agent_session_spend(const struct session_stats *stats, int *estimated)
-{
-    return agent_spend_total(&stats->spend, estimated);
-}
-
-/* Ordinary turns and compaction account request counts and window snapshots differently. */
-static void stats_account_usage(struct session_stats *stats, const struct stream_usage *usage,
-                                const struct provider *provider, const char *model)
-{
-    if (usage->input_tokens >= 0)
-        stats->input_tokens += usage->input_tokens;
-    if (usage->output_tokens >= 0)
-        stats->output_tokens += usage->output_tokens;
-    if (usage->cached_tokens > 0)
-        stats->cached_tokens += usage->cached_tokens;
-    if (usage->cache_write_tokens > 0)
-        stats->cache_write_tokens += usage->cache_write_tokens;
-    if (usage->input_tokens > 0)
-        stats->uncached_input_tokens += agent_usage_uncached_input(usage, provider, model);
-    agent_spend_account(&stats->spend, usage, provider, model);
-}
-
-/* Show one summary per user turn, using the latest context snapshot and cumulative session
- * spend. Wrap only at segment boundaries to keep values intact. */
+/* Show one summary per user turn: its duration, the latest context snapshot, and cumulative
+ * session spend. Wrap only at segment boundaries to keep values intact. */
 static void display_stats_line(struct render_ctx *render, const struct provider *provider,
-                               const char *model, long context_tokens, long elapsed_ms,
-                               const struct session_stats *stats)
+                               const struct agent_session *session, long elapsed_ms)
 {
-    int estimated = 0;
-    double spend = agent_session_spend(stats, &estimated);
+    struct agent_stats stats;
+    agent_stats_collect(session, 0, 0, provider, &stats);
     char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
-    int segment_count =
-        agent_format_stats_segments(segments, context_tokens, model_meta_context(provider, model),
-                                    elapsed_ms, spend, estimated);
+    int segment_count = agent_format_stats_segments(
+        segments, stats.context_tokens, model_meta_context(provider, session->model), elapsed_ms,
+        stats.total.spend, stats.total.spend_estimated);
     if (segment_count == 0)
         return;
 
@@ -184,28 +139,27 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
     disp_flush(disp);
 }
 
-/* Curl wait/chunk hook for cancellation and timer-driven retry/table labels. Ordinary text
- * stalls intentionally show no spinner. */
-static int agent_stream_tick(void *user)
+/* Read on every paint, so Esc shows at once in every phase of a turn, tool runs included, and no
+ * label change hides it. An abort implies a pause and ends the turn moments later. */
+static const char *pause_label(void *user)
 {
-    struct render_ctx *render = user;
-    /* Confirm a pause immediately; the idempotent update also overrides pending labels. */
-    if (cancel_pause_requested() && !cancel_abort_requested()) {
-        spinner_set_label(render->spinner, "pausing", "pausing... (esc again to interrupt)");
-        /* Before first content, cancel immediately; the loop maps the empty turn to a resumable
-         * pause. */
-        if (!render->stream.content_seen)
-            return 1;
-    }
-    /* Retry countdown owns the label while the model is not streaming. */
-    if (render->retry.deadline_ms) {
-        render_update_retry_label(render);
-    } else if (render->md && md_in_table(render->md)) {
-        if (!render->table.spinner_visible && render->table.started_at_ms &&
-            monotonic_ms() - render->table.started_at_ms >= TABLE_SPINNER_DELAY_MS)
-            render_show_table_spinner(render);
-    }
-    return cancel_abort_requested();
+    (void)user;
+    return cancel_pause_requested() ? "pausing... (esc again to interrupt)" : NULL;
+}
+
+/* Sampled on every transport tick, which also drives the timer-based retry label. */
+static enum agent_signal repl_poll(void *user)
+{
+    struct agent_state *state = user;
+    render_update_retry_label(state->render);
+    return agent_interrupt_signal();
+}
+
+static enum agent_signal repl_checkpoint(void *user)
+{
+    (void)user;
+    interrupt_resolve_pending_escape();
+    return agent_interrupt_signal();
 }
 
 static int render_on_event(const struct stream_event *event, void *user)
@@ -213,102 +167,42 @@ static int render_on_event(const struct stream_event *event, void *user)
     struct render_ctx *render = user;
     struct disp *disp = &render->disp;
 
-    /* Stream completion closes the buffered-table timing window. */
-    if (event->kind == EV_DONE || event->kind == EV_ERROR)
-        render->table.started_at_ms = 0;
-    /* The first post-retry event returns label control to normal rendering. */
-    if (event->kind != EV_RETRY && render->retry.deadline_ms) {
-        render->retry.deadline_ms = 0;
-        spinner_set_label(render->spinner, "working", "working...");
-    }
-
-    /* Once output exists, a pause must preserve it by waiting for a turn seam. */
-    if (event->kind == EV_TEXT_DELTA || event->kind == EV_REASONING_DELTA ||
-        event->kind == EV_REASONING_ITEM || event->kind == EV_TOOL_CALL_START)
-        render->stream.content_seen = 1;
+    if (event->kind != EV_RETRY)
+        render_retry_end(render);
 
     switch (event->kind) {
     case EV_TEXT_DELTA:
         render_text_delta(render, event->u.text_delta.text, strlen(event->u.text_delta.text));
         break;
-    case EV_TOOL_CALL_START: {
-        /* Tool arguments are invisible until dispatch. Supported providers stream calls
-         * sequentially; a shared key prevents label flicker across a batch. */
-        const char *tool_name = event->u.tool_call_start.name;
-        render_stream_boundary(render);
-        if (tool_name && *tool_name) {
-            char label[64];
-            snprintf(label, sizeof(label), "[%s] composing...", tool_name);
-            spinner_request_label(render->spinner, "compose", label);
-        }
+    case EV_TOOL_CALL_START:
+        render_tool_call_start(render, event->u.tool_call_start.name);
         break;
-    }
     case EV_REASONING_ITEM:
-        render_stream_boundary(render);
+        render_reasoning_end(render);
         break;
     case EV_TOOL_CALL_END:
-        /* Clear the composing label after args; settling hides normal dispatch latency. */
-        spinner_request_label(render->spinner, "working", "working...");
-        break;
     case EV_TOOL_CALL_DELTA:
-        /* No live display: tool calls render as a single block during
-         * dispatch so parallel calls don't visually interleave. */
+        /* No live display: tool calls render as a single block during dispatch so parallel calls
+         * don't visually interleave. */
         break;
-    case EV_REASONING_DELTA: {
-        /* Keep the thinking label even when reasoning text is hidden. */
-        spinner_request_label(render->spinner, "thinking", "thinking...");
-        const char *reasoning_text = event->u.reasoning_delta.text;
-        if (!render->show_reasoning || !reasoning_text || !*reasoning_text)
-            break;
-        render_set_mode(render, RENDER_REASONING);
-        render_write_text(render, reasoning_text, strlen(reasoning_text));
+    case EV_REASONING_DELTA:
+        render_reasoning_delta(render, event->u.reasoning_delta.text);
         break;
-    }
-    case EV_RETRY: {
+    case EV_RETRY:
         /* A mid-stream retry abandons any partially rendered output; the next attempt
          * re-streams the whole response. */
-        render_stream_retry(render);
-        render->retry.deadline_ms = monotonic_ms() + event->u.retry.delay_ms;
-        render->retry.next_attempt = event->u.retry.attempt + 1;
-        render->retry.max_attempts = event->u.retry.max_attempts;
-        render_update_retry_label(render);
+        render_stream_retry(render, event->u.retry.attempt, event->u.retry.max_attempts,
+                            event->u.retry.delay_ms);
         break;
-    }
-    case EV_PROGRESS: {
-        /* Report uncached prefill work so progress starts at zero despite cache reuse. A fully
-         * cached prompt has no work to report. */
-        long total_tokens = event->u.progress.total;
-        long cached_tokens = event->u.progress.cache;
-        long processed_tokens = event->u.progress.processed;
-        long uncached_total = total_tokens - cached_tokens;
-        if (uncached_total <= 0)
-            break;
-        long uncached_processed = processed_tokens - cached_tokens;
-        if (uncached_processed < 0)
-            uncached_processed = 0;
-        int percentage = (int)((uncached_processed * 100) / uncached_total);
-        if (percentage < 0)
-            percentage = 0;
-        if (percentage > 100)
-            percentage = 100;
-        char label[32];
-        snprintf(label, sizeof(label), "processing... %d%%", percentage);
-        /* One key preserves the settle clock while percentages refresh. */
-        spinner_request_label(render->spinner, "processing", label);
+    case EV_PROGRESS:
+        render_progress(render, event->u.progress.processed, event->u.progress.total,
+                        event->u.progress.cache);
         break;
-    }
     case EV_DONE:
         disp_flush(disp);
         break;
     case EV_ERROR:
-        /* Closing the render state flushes partial text before the error line. */
-        render_open_block(render);
-        disp_write_ansi(disp, theme_open(THEME_ERROR));
-        disp_printf(disp, "[error: %s]", event->u.error.message);
-        disp_write_ansi(disp, ANSI_RESET);
-        disp_putc(disp, '\n');
-        disp_flush(disp);
-        break;
+        break; /* render_loop_error() draws it if the run ends on it */
     }
 
     return 0;
@@ -449,7 +343,7 @@ static void show_history_cb(void *user)
     size_t prompts = agent_user_turn_count(session);
     struct banner_writer header;
     banner_open(&header, memory_stream);
-    banner_put(&header, "", ANSI_DIM, ANSI_BOLD_OFF, "conversation history");
+    banner_put(&header, "", ANSI_DIM, ANSI_BOLD_OFF, "conversation");
     if (prompts > 0) {
         char count[32];
         snprintf(count, sizeof(count), "%zu prompt%s", prompts, prompts == 1 ? "" : "s");
@@ -472,6 +366,7 @@ static void show_history_cb(void *user)
     render_set_mode(&render, RENDER_IDLE);
     disp_commit_newlines(&render.disp);
     md_free(render.md);
+    disp_free(&render.disp);
     fclose(memory_stream);
 
     struct spawn_pipe pager;
@@ -482,7 +377,8 @@ static void show_history_cb(void *user)
     free(output);
 }
 
-int agent_apply_settings(struct agent_state *state, struct provider *provider, int announce)
+void agent_apply_settings(struct agent_state *state, struct provider *provider,
+                          enum apply_announce announce)
 {
     struct agent_session *session = state->session;
     struct provider *previous_provider = state->provider;
@@ -490,15 +386,9 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     /* Snapshot the model before reconfigure overwrites it, to tell a real
      * /model change from a /provider or /effort apply that left it the same. */
     char *previous_model = session->model ? xstrdup(session->model) : NULL;
-    if (agent_session_reconfigure(session, provider) != 0) {
-        free(previous_model);
-        return -1;
-    }
-
-    /* Refresh only after validation so a rolled-back selection never changes the display. */
+    agent_session_reconfigure(session, provider);
     agent_display_refresh(state);
 
-    /* Provider ownership transfers only after session reconfiguration succeeds. */
     if (provider_changed) {
         state->provider = provider;
         if (previous_provider)
@@ -522,16 +412,15 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     session_log_set_meta(state->session_log, agent_provider_log_name(provider), session->model,
                          session->model_label, session->effort, config_str("preset"));
 
-    if (!announce)
-        return 0;
+    if (announce == APPLY_SILENT)
+        return;
 
-    /* Replace a stale startup banner; mid-conversation a banner would imply a reset. */
-    if (session->n_items == 0) {
+    if (announce == APPLY_BANNER_WHEN_EMPTY && session->n_items == 0) {
         render_open_block(state->render);
         banner_print(provider, session);
         disp_sync_external_line(&state->render->disp); /* banner bypasses disp */
         fflush(stdout);
-        return 0;
+        return;
     }
 
     /* Selection notices are display-only; the model cannot act on them. */
@@ -539,11 +428,15 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     /* Include the stance because a preset can change more than provider and model. */
     const char *preset = config_str("preset");
     char *stance = (preset && *preset) ? xasprintf("[%s] ", preset) : xstrdup("");
-    char *label = session->effort ? xasprintf("switched to %s%s · %s · %s", stance,
-                                              provider->name ? provider->name : "?", model_label,
-                                              session->effort)
-                                  : xasprintf("switched to %s%s · %s", stance,
-                                              provider->name ? provider->name : "?", model_label);
+    const char *provider_name = provider->name ? provider->name : "?";
+    char *label;
+    if (!model_label)
+        label = xasprintf("switched to %s%s · no model — use /model", stance, provider_name);
+    else if (session->effort)
+        label = xasprintf("switched to %s%s · %s · %s", stance, provider_name, model_label,
+                          session->effort);
+    else
+        label = xasprintf("switched to %s%s · %s", stance, provider_name, model_label);
     free(stance);
 
     render_open_block(state->render);
@@ -553,24 +446,22 @@ int agent_apply_settings(struct agent_state *state, struct provider *provider, i
     disp_putc(&state->render->disp, '\n');
     disp_flush(&state->render->disp);
     free(label);
-    return 0;
 }
 
-/* Swapping or cutting history invalidates both resumable state and compaction debt tied to the
- * old tail. */
+/* Swapping or cutting history invalidates resumable state tied to the old tail. */
 static void clear_resume_state(struct agent_state *state)
 {
     state->resume_reason = AGENT_RESUME_NONE;
-    state->compaction_deferred = 0;
 }
 
 /* A resumed record can end mid-story; re-offer the empty-send continue its run lost with the
  * process. A clean tail is indistinguishable from a finished conversation, so only marked or
  * unanswered tails re-arm the affordance. */
-static void derive_resume_state(struct agent_state *state)
+static void apply_resumed(struct agent_state *state, const struct agent_resumed *resumed)
 {
     clear_resume_state(state);
-    switch (agent_session_resume_tail(state->session)) {
+    state->session_log = resumed->session_log;
+    switch (resumed->tail) {
     case AGENT_RESUME_TAIL_MARKED:
     case AGENT_RESUME_TAIL_USER:
         state->resume_reason = AGENT_RESUME_INTERRUPTED;
@@ -579,12 +470,6 @@ static void derive_resume_state(struct agent_state *state)
     case AGENT_RESUME_TAIL_EMPTY:
         break;
     }
-    /* The record may end over the compaction threshold — a pause stops before the loop's
-     * compact seam — so the run that continues it owes the pre-send pass. */
-    if (state->provider && state->session->model)
-        state->compaction_deferred =
-            compact_should_auto(agent_session_last_context_tokens(state->session),
-                                model_meta_context(state->provider, state->session->model));
 }
 
 /* Interactive front for agent_finalize_tasks: announce the stop before the kill. */
@@ -610,43 +495,41 @@ void agent_new_conversation(struct agent_state *state)
     /* Old-turn temporary files are unreachable after history is reset. Must follow the task
      * shutdown: unlinking a live task's advertised spool would leave its log path dangling. */
     tempfiles_cleanup();
-    agent_spend_free(&state->stats.spend);
-    memset(&state->stats, 0, sizeof(state->stats));
     /* finalize_tasks' stop note consumed the dispatcher's separator; restore the blank line
      * before the banner (a no-op when nothing was printed). */
     disp_block_separator(&state->render->disp);
     banner_print(state->provider, state->session);
 }
 
-/* Redraw with every prompt so slash-command output cannot hide the empty-send meaning. */
-static void render_resume_hint(struct render_ctx *render, enum agent_resume_reason reason)
+/* A pause or turn limit leaves no trace in the conversation, so only the prompt names it; an
+ * interruption or provider error is already explained above. The prompt carries the empty-send
+ * meaning, so slash-command output cannot scroll it away. */
+static const char *resume_placeholder(enum agent_resume_reason reason)
 {
-    const char *status;
-    const char *action = "enter to continue";
     switch (reason) {
+    case AGENT_RESUME_NONE:
+        return NULL;
     case AGENT_RESUME_PAUSED:
-        status = "paused";
-        break;
+        return "paused — enter to continue";
     case AGENT_RESUME_MAX_TURNS:
-        status = "max turns reached";
-        break;
+        return "max turns reached — enter to continue";
     case AGENT_RESUME_INTERRUPTED:
-        status = "interrupted";
-        break;
+        return "enter to continue";
     case AGENT_RESUME_ERROR:
-        status = "provider error";
-        action = "enter to retry";
-        break;
-    default:
-        return;
+        return "enter to retry";
     }
+    return NULL;
+}
+
+/* Ends every hard-interrupted user turn: a tool's own marker covers only its call, and collapsed or
+ * undispatched calls draw none. */
+static void render_interrupt_marker(struct render_ctx *render)
+{
+    render_open_block(render);
     disp_write_ansi(&render->disp, ANSI_DIM);
-    disp_printf(&render->disp, "[%s — %s]", status, action);
+    disp_printf(&render->disp, "%s", INTERRUPT_MARKER);
     disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
-    disp_putc(&render->disp, '\n'); /* one blank line between hint and prompt */
-    /* Commit newlines before the editor erases and repaints the prompt row. */
-    disp_commit_newlines(&render->disp);
     disp_flush(&render->disp);
 }
 
@@ -662,9 +545,9 @@ static int is_replay_anchor(const struct item *item)
  * Anchor on its user item rather than a turn boundary because one prompt may span several model
  * turns. Non-interactive runs render no replay. */
 static void replay_user_turn(struct render_ctx *render, const struct agent_session *session,
-                             const char *heading)
+                             const char *heading, const struct provider *provider)
 {
-    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+    if (session->n_items == 0 || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
 
     size_t anchor_index = 0;
@@ -700,6 +583,9 @@ static void replay_user_turn(struct render_ctx *render, const struct agent_sessi
         disp_putc(&render->disp, '\n');
     disp_commit_newlines(&render->disp);
     disp_flush(&render->disp);
+    /* A resumed screen ends as the original did, with the last user turn's stats. */
+    if (provider)
+        display_stats_line(render, provider, session, session->last_user_turn_ms);
 }
 
 void agent_resume_session(struct agent_state *state, const char *path)
@@ -707,13 +593,9 @@ void agent_resume_session(struct agent_state *state, const char *path)
     /* Claim activity before reading; another process may run the daily sweep concurrently. */
     (void)session_touch(path);
     struct agent_session *session = state->session;
-    struct item *loaded_items = NULL;
-    size_t loaded_item_count = 0;
-    struct session_meta metadata;
-    if (session_load(path, &loaded_items, &loaded_item_count, &metadata) != 0 ||
-        loaded_item_count == 0) {
-        free(loaded_items);
-        session_meta_free(&metadata);
+    struct session_loaded loaded;
+    if (session_load_all(path, &loaded) != 0) {
+        session_loaded_free(&loaded);
         ui_error("could not read session");
         /* Replace the picker's stale newline count with the error line's committed newline. */
         disp_sync_external_line(&state->render->disp);
@@ -729,41 +611,19 @@ void agent_resume_session(struct agent_state *state, const char *path)
 
     /* Restore settings before swapping history so announcements are framed against the
      * conversation being left and new logs use the restored system prompt and model. */
-    select_restore_session(state, metadata.provider, metadata.model, metadata.effort,
-                           metadata.preset);
+    select_restore_session(state, loaded.meta.provider, loaded.meta.model, loaded.meta.effort,
+                           loaded.meta.preset);
 
     /* Keep tracked temporary files when replacing history; resumable branches may share paths. */
-    for (size_t i = 0; i < session->n_items; i++)
-        item_free(&session->items[i]);
-    free(session->items);
-    session->items = loaded_items;
-    session->n_items = loaded_item_count;
-    session->cap_items = loaded_item_count;
-
-    /* Re-evaluate recording after provider restoration; the starting provider may have disabled
-     * it. Recorded metadata lets session_log_set_meta stage a failed restore as a switch. */
-    if (agent_recording_enabled(state->provider))
-        state->session_log =
-            session_log_resume(path, metadata.provider, metadata.model, metadata.effort,
-                               metadata.preset, loaded_item_count);
-    /* Stage a failed selection restore without changing the file until a turn is appended. */
-    session_log_set_meta(state->session_log, agent_provider_log_name(state->provider),
-                         session->model, session->model_label, session->effort,
-                         config_str("preset"));
-    session_meta_free(&metadata);
+    agent_session_adopt(session, &loaded);
     transcript_log_reset(state->transcript, session->system_prompt, session->tools,
                          session->n_tools);
-    transcript_log_append(state->transcript, session->items, session->n_items);
-
-    derive_resume_state(state);
-    replay_user_turn(state->render, session, "resumed");
-}
-
-/* This predicate must match session.c's JSONL rule: /undo combines its file offset with this
- * in-memory turn count. */
-static int is_typed_prompt(const struct item *item)
-{
-    return item->kind == ITEM_USER_MESSAGE && item->origin == ITEM_ORIGIN_NONE;
+    struct agent_resumed resumed;
+    agent_session_prepare_resumed(session, state->provider, path, &loaded.meta, state->transcript,
+                                  &resumed);
+    session_loaded_free(&loaded);
+    apply_resumed(state, &resumed);
+    replay_user_turn(state->render, session, "resumed", state->provider);
 }
 
 static int turn_item_index(const struct agent_session *session, size_t turn_index,
@@ -771,7 +631,7 @@ static int turn_item_index(const struct agent_session *session, size_t turn_inde
 {
     size_t turns_seen = 0;
     for (size_t i = 0; i < session->n_items; i++) {
-        if (is_typed_prompt(&session->items[i])) {
+        if (item_is_typed_prompt(&session->items[i])) {
             if (turns_seen == turn_index) {
                 *item_index_out = i;
                 return 0;
@@ -786,7 +646,7 @@ size_t agent_user_turn_count(const struct agent_session *session)
 {
     size_t count = 0;
     for (size_t i = 0; i < session->n_items; i++)
-        if (is_typed_prompt(&session->items[i]))
+        if (item_is_typed_prompt(&session->items[i]))
             count++;
     return count;
 }
@@ -799,10 +659,11 @@ const char *agent_user_turn_text(const struct agent_session *session, size_t tur
     return session->items[item_index].text;
 }
 
-/* Shared tail of /undo and /fork. `cut_index` is the item truncation point;
- * `turn_index` identifies the first discarded prompt to stage for recall. */
+/* Shared tail of /undo and /fork. `cut_index` is the item truncation point; `turn_index`
+ * identifies the first discarded prompt to stage for recall. An undo retires the cut items, whose
+ * requests this session still paid for; a fork leaves them to the source session. */
 static void reshape_after_cut(struct agent_state *state, size_t cut_index, size_t turn_index,
-                              const char *heading)
+                              const char *heading, int retire)
 {
     struct agent_session *session = state->session;
     clear_resume_state(state);
@@ -812,23 +673,20 @@ static void reshape_after_cut(struct agent_state *state, size_t cut_index, size_
     free(state->pending_recall);
     state->pending_recall = recall_text ? xstrdup(recall_text) : NULL;
 
-    size_t old_item_count = session->n_items;
-    for (size_t i = cut_index; i < session->n_items; i++)
-        item_free(&session->items[i]);
-    session->n_items = cut_index;
-
-    /* A destructive cut invalidates the server-reported window snapshot; retained usage items do
-     * not reliably describe the new tail. Cumulative totals remain valid. */
-    if (cut_index < old_item_count) {
-        state->stats.latest_context_tokens = 0;
-        state->stats.context_limit = 0;
+    if (retire) {
+        agent_session_retire(session, cut_index);
+    } else {
+        for (size_t i = cut_index; i < session->n_items; i++)
+            item_free(&session->items[i]);
+        session->n_items = cut_index;
     }
+    session->compact_failures = 0;
 
     transcript_log_reset(state->transcript, session->system_prompt, session->tools,
                          session->n_tools);
     transcript_log_append(state->transcript, session->items, session->n_items);
     /* Cleanup is all-or-nothing, and the retained prefix may still reference tracked files. */
-    replay_user_turn(state->render, session, heading);
+    replay_user_turn(state->render, session, heading, NULL);
 }
 
 void agent_undo(struct agent_state *state, size_t turn_index)
@@ -842,19 +700,18 @@ void agent_undo(struct agent_state *state, size_t turn_index)
 
     size_t removed_turns = agent_user_turn_count(session) - turn_index;
 
-    /* Truncate the on-disk record first; on I/O failure bail with history
-     * intact. The file keeps the old branch and its high-water mark, so
-     * truncating memory too would later append onto that stale branch. */
-    if (session_log_truncate(state->session_log, turn_index, cut_index) != 0) {
-        ui_error("could not truncate the session file; conversation left unchanged");
+    /* Record the cut before applying it; on I/O failure bail with history intact, or the file
+     * would keep the old branch as live and the next append would extend it. */
+    if (session_log_undo(state->session_log, turn_index, cut_index) != 0) {
+        ui_error("could not record the undo in the session file; conversation left unchanged");
         disp_sync_external_line(&state->render->disp);
         return;
     }
 
     char heading[64];
-    snprintf(heading, sizeof(heading), "undid %zu turn%s", removed_turns,
+    snprintf(heading, sizeof(heading), "undid %zu user turn%s", removed_turns,
              removed_turns == 1 ? "" : "s");
-    reshape_after_cut(state, cut_index, turn_index, heading);
+    reshape_after_cut(state, cut_index, turn_index, heading, 1);
 }
 
 void agent_fork(struct agent_state *state, size_t turn_index)
@@ -878,20 +735,24 @@ void agent_fork(struct agent_state *state, size_t turn_index)
     }
 
     const char *source_path = session_log_path(state->session_log);
+    /* The branch continues from the live selection, whatever the copied prefix ran under. */
+    struct session_header selection = {
+        .provider = agent_provider_log_name(state->provider),
+        .model = session->model,
+        .model_label = session->model_label,
+        .effort = session->effort,
+        .preset = config_str("preset"),
+    };
     char *new_path = NULL;
-    if (session_fork_file(source_path, turn_index, &new_path) != 0) {
+    if (session_fork_file(source_path, session->items, cut_index, &selection, &new_path) != 0) {
         ui_error("could not create fork");
         disp_sync_external_line(&state->render->disp);
         return;
     }
-    /* Open the new logger before closing the old one so failure is atomic. It starts with copied
-     * metadata, then stages the live selection for the branch's first new turn. */
-    struct session_meta fork_metadata;
-    session_read_meta(new_path, &fork_metadata);
+    /* Open the new logger before closing the old one so failure is atomic. */
     struct session_log *new_session_log =
-        session_log_resume(new_path, fork_metadata.provider, fork_metadata.model,
-                           fork_metadata.effort, fork_metadata.preset, cut_index);
-    session_meta_free(&fork_metadata);
+        session_log_resume(new_path, selection.provider, selection.model, selection.effort,
+                           selection.preset, cut_index);
     if (!new_session_log) {
         unlink(new_path);
         free(new_path);
@@ -905,45 +766,16 @@ void agent_fork(struct agent_state *state, size_t turn_index)
     session_log_close(state->session_log);
     state->session_log = new_session_log;
 
-    reshape_after_cut(state, cut_index, turn_index, "forked");
-}
-
-struct compact_event_ctx {
-    struct session_stats *stats;
-    struct render_ctx *render;
-    const struct provider *provider;
-    const char *model;
-};
-
-static int compact_on_event(const struct stream_event *event, void *user)
-{
-    struct compact_event_ctx *ctx = user;
-    const struct stream_usage *usage = NULL;
-    if (event->kind == EV_DONE)
-        usage = &event->u.done.usage;
-    else if (event->kind == EV_ERROR)
-        usage = event->u.error.usage;
-    else if (event->kind == EV_RETRY)
-        usage = event->u.retry.usage;
-    if (!usage)
-        return 0;
-
-    stats_account_usage(ctx->stats, usage, ctx->provider, ctx->model);
-    return 0;
-}
-
-/* Compaction has no pause seam, so either interrupt cancels the retriable transaction. */
-static int compact_tick(void *user)
-{
-    struct compact_event_ctx *ctx = user;
-    return agent_stream_tick(ctx->render) || cancel_pause_requested();
-}
-
-static int compact_cancelled(void *user)
-{
-    (void)user;
-    interrupt_resolve_pending_escape();
-    return cancel_abort_requested() || cancel_pause_requested();
+    /* The branch reads the copied prefix but the source paid for it, and what the source undid
+     * or spent is not the branch's record. */
+    for (size_t i = 0; i < cut_index; i++)
+        session->items[i].inherited = 1;
+    for (size_t i = 0; i < session->n_retired; i++)
+        item_free(&session->retired[i]);
+    session->n_retired = 0;
+    session->worked_ms = 0;
+    session->last_user_turn_ms = -1;
+    reshape_after_cut(state, cut_index, turn_index, "forked", 0);
 }
 
 static void compact_notice(struct render_ctx *render, const char *format, ...)
@@ -961,75 +793,60 @@ static void compact_notice(struct render_ctx *render, const char *format, ...)
     disp_flush(&render->disp);
 }
 
-int agent_compact(struct agent_state *state, const char *instructions, int automatic)
+/* Run a compaction under whatever interrupt watch the caller holds, showing the "compacting..."
+ * spinner and an outcome notice. The spinner stays up, relabeled "working...", for the work that
+ * follows. Returns 1 only when a seed was appended. */
+static int compact_conversation(struct agent_state *state, const char *instructions,
+                                enum compact_reason reason)
 {
     struct agent_session *session = state->session;
     struct provider *provider = state->provider;
     struct render_ctx *render = state->render;
+    int manual = reason == COMPACT_MANUAL;
 
     if (!provider) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "no provider selected — use /provider");
         return 0;
     }
     if (!session->model || !*session->model) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "no model selected — use /model (or /provider)");
         return 0;
     }
     if (session->n_items == 0) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "nothing to compact");
         return 0;
     }
 
     render_set_mode(render, RENDER_IDLE);
-
+    /* Before render_stream_begin() shows the spinner, so it never paints another label first. */
+    footer_set_label(render->footer, "compacting", "compacting...");
     render_stream_begin(render);
-    spinner_set_label(render->spinner, "compacting", "compacting...");
-    struct compact_event_ctx event_ctx = {
-        .stats = &state->stats,
-        .render = render,
-        .provider = provider,
-        .model = session->model,
-    };
     struct compact_params params = {
         .session = session,
         .provider = provider,
         .session_log = state->session_log,
         .transcript_log = state->transcript,
         .instructions = instructions,
+        .reason = reason,
         .hooks =
             {
-                .user = &event_ctx,
-                .on_event = compact_on_event,
-                .tick = compact_tick,
-                .is_cancelled = compact_cancelled,
+                .user = state,
+                .poll = repl_poll,
+                .checkpoint = repl_checkpoint,
             },
     };
 
-    cancel_clear_requests();
-    interrupt_arm();
     struct compact_result result;
     compact_run(&params, &result);
-    /* Cancelled attempts emit no terminal event, so the transaction reports
-     * the authoritative request count separately from usage observation. */
-    state->stats.requests += result.attempts;
-    interrupt_disarm();
-    render_set_mode(render, RENDER_IDLE);
+    /* Release the held label. */
+    footer_set_label(render->footer, "working", "working...");
 
     int compacted = result.outcome == COMPACT_COMPLETE;
-    /* The snapshot describes the window the seed replaced; retaining it could immediately
-     * recompact the fresh seed. */
-    if (compacted) {
-        state->stats.latest_context_tokens = 0;
-        state->stats.context_limit = 0;
-        /* Any successful compaction — manual included — settles a deferred
-         * end-of-turn pass: the oversized history it referred to is gone. */
-        state->compaction_deferred = 0;
-    }
     /* Manual compaction moves the model past the resumable tail; retract the empty-send offer. */
-    if (compacted && !automatic)
+    if (compacted && manual)
         clear_resume_state(state);
     switch (result.outcome) {
     case COMPACT_COMPLETE:
@@ -1046,86 +863,45 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
         compact_notice(render, "compaction produced no summary");
         break;
     case COMPACT_NO_PROVIDER:
-        if (!automatic)
-            compact_notice(render, "no provider selected — use /provider");
-        break;
     case COMPACT_NO_MODEL:
-        if (!automatic)
-            compact_notice(render, "no model selected — use /model (or /provider)");
-        break;
     case COMPACT_EMPTY:
-        if (!automatic)
-            compact_notice(render, "nothing to compact");
-        break;
+        break; /* ruled out by the checks above */
     }
+    if (result.auto_suspended)
+        compact_notice(render, "automatic compaction off after %d failures — /compact retries it",
+                       COMPACT_MAX_AUTO_FAILURES);
     compact_result_destroy(&result);
     return compacted;
 }
 
-struct repl_loop_ctx {
-    struct agent_state *state;
-};
+int agent_compact(struct agent_state *state, const char *instructions, enum compact_reason reason)
+{
+    /* Clear before the spinner shows: its pause label would report an Esc left from earlier. */
+    cancel_clear_requests();
+    interrupt_arm();
+    int compacted = compact_conversation(state, instructions, reason);
+    interrupt_disarm();
+    render_finish(state->render);
+    return compacted;
+}
 
 static int repl_loop_on_event(const struct stream_event *event, void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    return render_on_event(event, ctx->state->render);
-}
-
-static int repl_loop_tick(void *user)
-{
-    struct repl_loop_ctx *ctx = user;
-    return agent_stream_tick(ctx->state->render);
+    struct agent_state *state = user;
+    return render_on_event(event, state->render);
 }
 
 static void repl_loop_turn_begin(void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    render_stream_begin(ctx->state->render);
-}
-
-static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *user)
-{
-    struct repl_loop_ctx *ctx = user;
-    struct agent_state *state = ctx->state;
-    struct agent_session *session = state->session;
-    const struct provider *provider = state->provider;
-    struct session_stats *stats = &state->stats;
-    const struct stream_usage *usage = &loop_turn->usage;
-
-    stats->requests++;
-    if (usage->input_tokens >= 0 && usage->output_tokens >= 0) {
-        stats->latest_context_tokens = usage->input_tokens + usage->output_tokens;
-        stats->context_limit = model_meta_context(provider, session->model);
-    }
-    /* Retried attempts are separate spend records: merging could void an exact terminal
-     * charge over their unpriced tokens. The context snapshot above stays terminal-only. */
-    stats_account_usage(stats, usage, provider, session->model);
-    stats_account_usage(stats, &loop_turn->retry_usage, provider, session->model);
-}
-
-static int repl_loop_checkpoint(void *user)
-{
-    (void)user;
-    interrupt_resolve_pending_escape();
-    if (cancel_abort_requested())
-        return AGENT_LOOP_SIG_ABORT;
-    if (cancel_pause_requested())
-        return AGENT_LOOP_SIG_PAUSE;
-    return AGENT_LOOP_SIG_NONE;
-}
-
-static void repl_loop_tool_seen(const struct item *call, void *user)
-{
-    struct repl_loop_ctx *ctx = user;
-    stats_count_tool_call(&ctx->state->stats, call->tool_name);
+    struct agent_state *state = user;
+    render_stream_begin(state->render);
 }
 
 static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_tool_action action,
                                        int image_input, void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    struct render_ctx *render = ctx->state->render;
+    struct agent_state *state = user;
+    struct render_ctx *render = state->render;
     if (action == AGENT_LOOP_TOOL_REFUSE) {
         render_set_mode(render, RENDER_IDLE);
         return dispatch_tool_refused(render, call);
@@ -1134,32 +910,45 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
         render_set_mode(render, RENDER_IDLE);
         return dispatch_tool_skipped(render, call);
     }
-    return dispatch_tool_call(render, call, image_input, &ctx->state->session->env_selection);
+    return dispatch_tool_call(render, call, image_input, &state->session->env_selection);
 }
 
-static void repl_loop_compact(void *user)
+/* Runs under the loop's interrupt watch, so an Esc latched here reaches its next checkpoint. */
+static int repl_loop_compact(enum compact_reason reason, void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    agent_compact(ctx->state, NULL, 1);
-    /* Preserve cancellation for the loop checkpoint; otherwise re-arm after compaction. */
-    if (!cancel_abort_requested() && !cancel_pause_requested()) {
-        cancel_clear_requests();
-        interrupt_arm();
-    }
+    return compact_conversation(user, NULL, reason);
+}
+
+/* Drawn when the run ends rather than as the error streams, so a rejection the loop recovers from
+ * by compacting never shows. Closing the render state flushes partial text before the line. */
+static void render_loop_error(struct render_ctx *render, const struct agent_loop_result *result)
+{
+    struct disp *disp = &render->disp;
+    render_open_block(render);
+    disp_write_ansi(disp, theme_open(THEME_ERROR));
+    disp_printf(disp, "[error: %s]",
+                result->error_message ? result->error_message : "stream failed");
+    disp_write_ansi(disp, ANSI_RESET);
+    disp_putc(disp, '\n');
+    disp_flush(disp);
 }
 
 static void repl_loop_task_note(const char *text, void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    struct render_ctx *render = ctx->state->render;
-    spinner_hide(render->spinner);
-    render_set_mode(render, RENDER_IDLE);
+    struct agent_state *state = user;
+    struct render_ctx *render = state->render;
     render_open_block(render);
     disp_write_ansi(&render->disp, ANSI_DIM);
     disp_write(&render->disp, text, strlen(text));
     disp_write_ansi(&render->disp, ANSI_RESET);
     disp_putc(&render->disp, '\n');
     disp_flush(&render->disp);
+}
+
+static char *slash_hint_cb(const char *buf, void *user)
+{
+    (void)user;
+    return slash_hint(buf);
 }
 
 static int handle_slash_input(struct input *input, struct agent_state *state, const char *line)
@@ -1219,26 +1008,16 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
     int recording_enabled = agent_recording_enabled(current_provider);
 
     /* Load resumed history before initializing dependent views and logs. An unreadable file is
-     * fatal because starting fresh would use the wrong context. */
-    size_t resumed_item_count = 0;
-    /* Preserve recorded metadata until the resumed log is opened; flags may have overridden the
-     * live selection. */
-    struct session_meta resume_metadata;
-    memset(&resume_metadata, 0, sizeof(resume_metadata));
+     * fatal because starting fresh would use the wrong context. The record's own selection
+     * stays loaded until the log is bound; flags may have overridden it. */
+    struct session_loaded loaded = {0};
     if (options->resume_path) {
-        struct item *loaded_items = NULL;
-        size_t loaded_item_count = 0;
-        if (session_load(options->resume_path, &loaded_items, &loaded_item_count,
-                         &resume_metadata) != 0) {
+        if (session_load_all(options->resume_path, &loaded) != 0) {
             hax_err("could not resume session '%s'", options->resume_path);
-            session_meta_free(&resume_metadata);
             agent_session_free(&session);
             return 1;
         }
-        session.items = loaded_items;
-        session.n_items = loaded_item_count;
-        session.cap_items = loaded_item_count;
-        resumed_item_count = loaded_item_count;
+        agent_session_adopt(&session, &loaded);
     }
 
     putchar('\n');
@@ -1247,17 +1026,10 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
      * by this frame. */
     struct render_ctx render = {.disp = {.sink = stdout, .committed_newlines = 1},
                                 .show_reasoning = reasoning_visible()};
-    render.spinner = spinner_new("working...");
+    render.footer = footer_new("working...");
+    footer_attach(render.footer, &render.disp);
+    footer_set_label_override(render.footer, pause_label, NULL);
     render.md = markdown_enabled() ? md_new(md_emit_to_disp, &render.disp, md_cols()) : NULL;
-    /* Replay needs the live renderer initialized first. */
-    if (resumed_item_count > 0)
-        replay_user_turn(&render, &session, "resumed");
-    struct input *input = input_new();
-    /* Prompt recall remains readable when recording is disabled. */
-    input_history_open_default(input, recording_enabled);
-    input_set_modal_completer(input, &file_mention_completer);
-    input_set_paste_hook(input, capture_paste, NULL);
-    input_set_paste_filter(input, filter_paste, NULL);
     /* Transcript logging is optional; its API is NULL-safe. */
     struct transcript_log *transcript =
         transcript_log_open(session.system_prompt, session.tools, session.n_tools);
@@ -1267,29 +1039,35 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
                                 .provider = current_provider,
                                 .transcript = transcript,
                                 .render = &render};
+    if (options->resume_path) {
+        struct agent_resumed resumed;
+        agent_session_prepare_resumed(&session, current_provider, options->resume_path,
+                                      &loaded.meta, transcript, &resumed);
+        session_loaded_free(&loaded);
+        apply_resumed(&state, &resumed);
+        replay_user_turn(&render, &session, "resumed", current_provider);
+    } else if (recording_enabled) {
+        state.session_log =
+            session_log_open(agent_provider_log_name(current_provider), session.model,
+                             session.model_label, session.effort, config_str("preset"));
+    }
+    struct input *input = input_new();
+    /* Prompt recall is scoped like sessions and remains readable when recording is disabled. */
+    char *cwd = getcwd(NULL, 0);
+    char *history_path = session_prompt_history_path(cwd);
+    input_history_open_tty(input, history_path, recording_enabled);
+    free(history_path);
+    free(cwd);
+    struct input_completer slash_completer;
+    slash_completer_init(&slash_completer, &state);
+    input_add_completer(input, &slash_completer);
+    input_add_completer(input, &file_mention_completer);
+    input_set_hint(input, slash_hint_cb, NULL);
+    input_set_paste_hook(input, capture_paste, NULL);
+    input_set_paste_filter(input, filter_paste, NULL);
     /* Raw mode clears IEXTEN, so Ctrl-O does not trigger BSD/macOS VDISCARD. */
     input_bind_modal_key(input, INPUT_KEY_CTRL('O'), show_history_cb, &state);
     input_bind_modal_key(input, INPUT_KEY_CTRL('T'), show_transcript_cb, &state);
-    /* Resume continues the existing log without rewriting restored items; the API is NULL-safe
-     * when recording is disabled. */
-    if (recording_enabled)
-        state.session_log =
-            options->resume_path
-                ? session_log_resume(options->resume_path, resume_metadata.provider,
-                                     resume_metadata.model, resume_metadata.effort,
-                                     resume_metadata.preset, resumed_item_count)
-                : session_log_open(agent_provider_log_name(current_provider), session.model,
-                                   session.model_label, session.effort, config_str("preset"));
-    /* Stage flag-overridden selection metadata; it reaches disk only with the next turn. */
-    if (options->resume_path)
-        session_log_set_meta(state.session_log, agent_provider_log_name(current_provider),
-                             session.model, session.model_label, session.effort,
-                             config_str("preset"));
-    session_meta_free(&resume_metadata);
-    if (resumed_item_count > 0) {
-        transcript_log_append(transcript, session.items, session.n_items);
-        derive_resume_state(&state);
-    }
     /* Capture terminal state before raw input; non-TTY initialization is a no-op. */
     interrupt_init();
     interrupt_set_fatal_signal_hook(bash_shell_pgids_kill);
@@ -1308,30 +1086,28 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
                 cursor_hide();
             }
         } else {
-            /* Redraw the resumable hint so slash output cannot hide the empty-send meaning. */
-            if (state.resume_reason != AGENT_RESUME_NONE)
-                render_resume_hint(&render, state.resume_reason);
             /* Only a resumable turn gives an empty send a meaning; otherwise
              * the editor keeps swallowing bare Enter. */
-            input_set_empty_submit(input, state.resume_reason != AGENT_RESUME_NONE);
+            input_set_empty_submit(input, resume_placeholder(state.resume_reason));
             cursor_show();
+            herdr_report(HERDR_IDLE, session_log_resume_hint(state.session_log));
             /* Rebuilt each iteration so a runtime theme change (/config theme …)
              * recolors the prompt instead of keeping the startup theme's bytes. */
             line = input_readline(input, build_prompt(prompt_buffer, sizeof(prompt_buffer)));
             cursor_hide();
         }
-        if (!line) {
-            putchar('\n');
+        if (!line)
             break;
-        }
         /* Empty input continues only resumable turns. */
         if (!*line && state.resume_reason == AGENT_RESUME_NONE) {
             free(line);
             continue;
         }
 
-        /* Slash handlers may override this when they drive the display themselves. */
-        disp_sync_external_line(&render.disp);
+        /* An empty send erased its prompt row, so the separator above it still stands. Slash
+         * handlers may override this when they drive the display themselves. */
+        if (*line)
+            disp_sync_external_line(&render.disp);
         if (handle_slash_input(input, &state, line)) {
             current_provider = state.provider;
             free(line);
@@ -1359,23 +1135,27 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
             continue;
         }
 
-        /* Settle deferred compaction before appending steering input or sending another oversized
-         * request. */
-        if (state.compaction_deferred) {
-            agent_compact(&state, NULL, 1);
-            /* A newly latched interrupt belongs to compaction and cancels the whole send; retain
-             * the debt for the next attempt. */
-            if (cancel_abort_requested() || cancel_pause_requested()) {
+        herdr_report(HERDR_WORKING, session_log_resume_hint(state.session_log));
+
+        /* Compact before appending the prompt rather than when a user turn ends: only a send
+         * proves the conversation continues. A failed pass lets the send proceed. */
+        if (compact_due(&session, current_provider, line)) {
+            agent_compact(&state, NULL, COMPACT_THRESHOLD);
+            /* An Esc during compaction stops the send as well: nothing launches after it, and
+             * the prompt returns to the editor unsent. A compaction it cut short stays due. */
+            if (agent_interrupt_signal() != AGENT_SIGNAL_NONE) {
+                if (*line) {
+                    disp_block_separator(&render.disp);
+                    ui_note("message not sent — press Enter to send it");
+                    disp_sync_external_line(&render.disp);
+                    input_set_preseed(input, line);
+                }
                 free(line);
                 continue;
             }
-            /* Settled on success (agent_compact clears the flag), attempted
-             * on failure: either way, don't retry ahead of every send. */
-            state.compaction_deferred = 0;
         }
 
         int continued = 0;
-        int typed_prompt = *line != 0;
         /* Boundaries precede fresh prompts. An empty send asks the recorded tail how to
          * continue, so a compaction seed just appended above supersedes an older marker. */
         if (*line) {
@@ -1394,8 +1174,6 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
             }
         }
         free(line);
-        /* input_readline left the cursor at column 0 of a fresh row. */
-        disp_sync_external_line(&render.disp);
 
         /* A background metadata probe may refine effort before the first request; announce the
          * value that will actually be sent. */
@@ -1427,38 +1205,27 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
             disp_sync_external_line(&render.disp);
         }
 
-        /* Each request subsumes the prior prefix, so the latest reported usage is the current
-         * window state. -1 means no request reported it. */
-        long user_turn_context_tokens = -1;
         long user_turn_start_ms = monotonic_ms();
-        int user_turn_errored = 0;
 
-        /* Reset promoted spinner state before timing the new user turn. */
-        spinner_set_label(render.spinner, "working", "working...");
-        spinner_set_timer(render.spinner, user_turn_start_ms);
+        footer_set_timer(render.footer, user_turn_start_ms);
 
         /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. */
         cancel_clear_requests();
         interrupt_arm();
-        /* A positive max_turns pauses at a clean seam; auto (and 0) means unlimited here. */
-        int max_turns = config_int("max_turns");
-        struct repl_loop_ctx loop_ctx = {.state = &state};
         struct agent_loop_params loop_params = {
             .session = &session,
             .provider = current_provider,
             .tlog = state.transcript,
             .slog = state.session_log,
-            .max_turns = max_turns > 0 ? max_turns : -1,
+            .max_turns = config_int("max_turns"),
             .continued = continued,
             .hooks =
                 {
-                    .user = &loop_ctx,
+                    .user = &state,
                     .observe = repl_loop_on_event,
-                    .tick = repl_loop_tick,
+                    .poll = repl_poll,
                     .turn_begin = repl_loop_turn_begin,
-                    .turn_end = repl_loop_turn_end,
-                    .checkpoint = repl_loop_checkpoint,
-                    .tool_seen = repl_loop_tool_seen,
+                    .checkpoint = repl_checkpoint,
                     .tool_call = repl_loop_tool_call,
                     .compact = repl_loop_compact,
                     .task_note = repl_loop_task_note,
@@ -1466,53 +1233,29 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
         };
         struct agent_loop_result loop_result;
         agent_loop_run(&loop_params, &loop_result);
-        user_turn_context_tokens = loop_result.last_context_tokens;
-        user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
-        int user_turn_complete = loop_result.outcome == AGENT_LOOP_COMPLETE;
+        int user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
+        if (user_turn_errored)
+            render_loop_error(&render, &loop_result);
         set_resume_state(&state, &loop_result);
         agent_loop_result_destroy(&loop_result);
         interrupt_disarm();
-        /* Snapshot Esc before auto-compaction clears the interrupt latch. */
         int user_pressed_escape = cancel_pause_requested();
-        spinner_set_timer(render.spinner, 0);
+        footer_set_timer(render.footer, 0);
 
         /* Close active rendering before post-turn output can emit terminal control sequences. */
-        render_set_mode(&render, RENDER_IDLE);
+        render_finish(&render);
 
-        /* History and the resume hint already expose interruptions; another live marker duplicates
-         * them. */
-        if (user_turn_complete && user_pressed_escape) {
-            /* Confirm an Esc that arrived after the last pause point. */
-            render_open_block(&render);
-            disp_write_ansi(&render.disp, ANSI_DIM);
-            disp_printf(&render.disp, "[finished before pause]");
-            disp_write_ansi(&render.disp, ANSI_RESET);
-            disp_putc(&render.disp, '\n');
-            disp_flush(&render.disp);
-        }
+        if (state.resume_reason == AGENT_RESUME_INTERRUPTED)
+            render_interrupt_marker(&render);
 
         /* Time worked counts errored/interrupted turns too — the wall time
          * was spent either way, and /session's total should reflect it. */
         long user_turn_ms = monotonic_ms() - user_turn_start_ms;
-        state.stats.worked_ms += user_turn_ms;
-        if (typed_prompt)
-            state.stats.user_turns++;
+        agent_session_add_worked(&session, user_turn_ms);
+        session_log_user_turn(state.session_log, user_turn_ms);
 
         if (!user_turn_errored)
-            display_stats_line(&render, current_provider, session.model, user_turn_context_tokens,
-                               user_turn_ms, &state.stats);
-
-        /* Auto-compact only completed, Esc-free turns. Clean pauses defer compaction until the
-         * next send; errors and aborts retain partial history for retry or explicit
-         * compaction. */
-        if (compact_should_auto(user_turn_context_tokens,
-                                model_meta_context(current_provider, session.model))) {
-            if (user_turn_complete && !user_pressed_escape)
-                agent_compact(&state, NULL, 1);
-            else if (user_turn_complete || state.resume_reason == AGENT_RESUME_PAUSED ||
-                     state.resume_reason == AGENT_RESUME_MAX_TURNS)
-                state.compaction_deferred = 1;
-        }
+            display_stats_line(&render, current_provider, &session, user_turn_ms);
 
         /* Esc means the user is already present; otherwise notify when the REPL becomes idle,
          * including errors and max-turn pauses. */
@@ -1521,6 +1264,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
     }
 
     finalize_tasks(&state);
+    herdr_release();
 
     const char *resume_hint = session_log_resume_hint(state.session_log);
     if (resume_hint)
@@ -1528,13 +1272,13 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
 
     *provider_io = current_provider;
 
-    spinner_free(render.spinner);
+    footer_free(render.footer);
     input_free(input);
     if (render.md)
         md_free(render.md);
+    disp_free(&render.disp);
     transcript_log_close(transcript);
     session_log_close(state.session_log);
-    agent_spend_free(&state.stats.spend);
     free(state.pending_preseed);
     agent_session_free(&session);
     return 0;

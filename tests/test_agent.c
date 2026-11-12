@@ -3,48 +3,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/stat.h>
 
 #include "agent.h"
 #include "agent_core.h"
-#include "agent_usage.h"
+#include "compact.h"
 #include "config.h"
 #include "effort.h"
 #include "harness.h"
 #include "model_meta.h"
+#include "output.h"
 #include "provider.h"
 #include "session.h"
 #include "xalloc.h"
 #include "render/render_ctx.h"
-
-/* Run `body` with captured stdout, restore stdout, and return owned output. */
-static char *capture_stdout(void (*body)(void *), void *user)
-{
-    fflush(stdout);
-    int saved = dup(STDOUT_FILENO);
-    EXPECT(saved >= 0);
-
-    FILE *tmp = tmpfile();
-    EXPECT(tmp != NULL);
-    int tmpfd = fileno(tmp);
-    EXPECT(dup2(tmpfd, STDOUT_FILENO) >= 0);
-
-    body(user);
-
-    fflush(stdout);
-    EXPECT(dup2(saved, STDOUT_FILENO) >= 0);
-    close(saved);
-
-    EXPECT(fseek(tmp, 0, SEEK_END) == 0);
-    long n = ftell(tmp);
-    EXPECT(n >= 0);
-    EXPECT(fseek(tmp, 0, SEEK_SET) == 0);
-    char *buf = xmalloc((size_t)n + 1);
-    size_t got = fread(buf, 1, (size_t)n, tmp);
-    buf[got] = '\0';
-    fclose(tmp);
-    return buf;
-}
 
 /* ---------- agent_apply_settings: banner / marker split ---------- */
 
@@ -55,7 +26,6 @@ struct fixture {
     struct render_ctx render;
     struct agent_state state;
     struct provider *candidate;
-    int result;
 };
 
 static void fixture_init(struct fixture *f)
@@ -109,7 +79,7 @@ static void fixture_free(struct fixture *f)
 static void do_apply(void *user)
 {
     struct fixture *f = user;
-    f->result = agent_apply_settings(&f->state, f->candidate, 1);
+    agent_apply_settings(&f->state, f->candidate, APPLY_BANNER_WHEN_EMPTY);
 }
 
 static void test_apply_settings_empty_reprints_banner(void)
@@ -118,8 +88,7 @@ static void test_apply_settings_empty_reprints_banner(void)
     fixture_init(&f);
     EXPECT(f.session.n_items == 0);
 
-    char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
+    char *out = t_capture_stdout(do_apply, &f);
     EXPECT(strstr(out, "hax") != NULL);
     EXPECT(strstr(out, "prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") != NULL);
@@ -138,8 +107,7 @@ static void test_apply_settings_nonempty_prints_marker(void)
     agent_session_add_user(&f.session, "hello");
     EXPECT(f.session.n_items > 0);
 
-    char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
+    char *out = t_capture_stdout(do_apply, &f);
     EXPECT(strstr(out, "switched to prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") == NULL);
     /* The marker uses disp, so its trailing newline remains pending. */
@@ -150,16 +118,38 @@ static void test_apply_settings_nonempty_prints_marker(void)
     fixture_free(&f);
 }
 
+static void do_apply_switch_line(void *user)
+{
+    struct fixture *f = user;
+    agent_apply_settings(&f->state, f->candidate, APPLY_SWITCH_LINE);
+}
+
+static void test_apply_settings_switch_line_skips_banner(void)
+{
+    /* A typed /model or /effort changes one thing, so even before the conversation starts it
+     * confirms with a line instead of redrawing the banner. */
+    struct fixture f;
+    fixture_init(&f);
+    EXPECT(f.session.n_items == 0);
+
+    char *out = t_capture_stdout(do_apply_switch_line, &f);
+    EXPECT(strstr(out, "switched to prov-x · model-a") != NULL);
+    EXPECT(strstr(out, "ctrl-d quit") == NULL);
+
+    free(out);
+    fixture_free(&f);
+}
+
 static void do_apply_quiet(void *user)
 {
     struct fixture *f = user;
-    f->result = agent_apply_settings(&f->state, f->candidate, 0);
+    agent_apply_settings(&f->state, f->candidate, APPLY_SILENT);
 }
 
 static void test_apply_settings_quiet_prints_nothing(void)
 {
     /* `/new <preset>` applies before it resets and prints its own banner
-     * afterwards, so announce = 0 must produce no output at all — not the
+     * afterwards, so APPLY_SILENT must produce no output at all — not the
      * mid-conversation marker this history would otherwise earn — while
      * still applying the settings. disp is left exactly as the caller set
      * it, so the banner that follows draws into the same gap. */
@@ -169,8 +159,7 @@ static void test_apply_settings_quiet_prints_nothing(void)
     EXPECT(f.session.n_items > 0);
     setenv("HAX_MODEL", "model-b", 1); /* the change the silent apply resolves */
 
-    char *out = capture_stdout(do_apply_quiet, &f);
-    EXPECT(f.result == 0);
+    char *out = t_capture_stdout(do_apply_quiet, &f);
     EXPECT_STR_EQ(out, "");
     /* Silence is about output, not effect. */
     EXPECT_STR_EQ(f.session.model, "model-b");
@@ -178,34 +167,6 @@ static void test_apply_settings_quiet_prints_nothing(void)
     EXPECT(f.render.disp.pending_newlines == 0);
 
     free(out);
-    fixture_free(&f);
-}
-
-static void test_apply_settings_no_model_fails_intact(void)
-{
-    struct fixture f;
-    fixture_init(&f);
-    agent_session_add_user(&f.session, "hello");
-    size_t items_before = f.session.n_items;
-    char *model_before = xstrdup(f.session.model);
-
-    /* Pull the model out from under the next resolve: no env value and no
-     * provider default. reconfigure must fail without touching history or
-     * the currently-applied model, and print no confirmation. (Its "no
-     * model available" diagnostic goes to stderr and shows in the test
-     * log — expected, not a failure.) */
-    unsetenv("HAX_MODEL");
-    f.provider.default_model = NULL;
-
-    char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == -1);
-    EXPECT(f.session.n_items == items_before);
-    EXPECT_STR_EQ(f.session.model, model_before);
-    EXPECT(strstr(out, "switched to") == NULL);
-    EXPECT(strstr(out, "ctrl-d quit") == NULL);
-
-    free(out);
-    free(model_before);
     fixture_free(&f);
 }
 
@@ -233,22 +194,26 @@ static int counting_probe_model(struct provider *p, const char *model, struct mo
     return -1;
 }
 
-static void test_apply_settings_failed_provider_change_keeps_old(void)
+static void test_apply_settings_switches_without_model(void)
 {
     struct fixture f;
     fixture_init(&f);
+    agent_session_add_user(&f.session, "hello");
+    size_t items_before = f.session.n_items;
+    /* No env value and no provider default: like startup, the switch leaves the model unset. */
     unsetenv("HAX_MODEL");
     f.provider.destroy = counting_provider_destroy;
     struct provider next = {.name = "prov-y"};
     f.candidate = &next;
     provider_destroy_calls = 0;
 
-    char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == -1);
-    EXPECT(f.state.provider == &f.provider);
-    EXPECT(provider_destroy_calls == 0);
-    EXPECT_STR_EQ(f.session.provider_id, "prov-x");
-    EXPECT(out[0] == '\0');
+    char *out = t_capture_stdout(do_apply, &f);
+    EXPECT(f.state.provider == &next);
+    EXPECT(provider_destroy_calls == 1);
+    EXPECT_STR_EQ(f.session.provider_id, "prov-y");
+    EXPECT(f.session.model == NULL);
+    EXPECT(f.session.n_items == items_before);
+    EXPECT(strstr(out, "switched to prov-y · no model — use /model") != NULL);
 
     free(out);
     fixture_free(&f);
@@ -264,15 +229,13 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
     /* Same model re-applied (the /effort-tweak shape): the metadata fetch
      * must not re-run — re-probing on every apply would add a needless
      * network round-trip and cancel/join churn. */
-    char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
+    char *out = t_capture_stdout(do_apply, &f);
     EXPECT(refresh_calls == 0);
     free(out);
 
     /* A real model change re-probes, with the new model. */
     setenv("HAX_MODEL", "model-b", 1);
-    out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
+    out = t_capture_stdout(do_apply, &f);
     EXPECT(refresh_calls == 1);
     EXPECT_STR_EQ(refresh_last_model, "model-b");
     free(out);
@@ -289,8 +252,7 @@ static void test_apply_settings_refreshes_on_model_or_provider_change(void)
     f.candidate = &next;
     refresh_calls = 0;
     provider_destroy_calls = 0;
-    out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
+    out = t_capture_stdout(do_apply, &f);
     EXPECT(f.state.provider == &next);
     EXPECT(provider_destroy_calls == 1);
     EXPECT(refresh_calls == 1);
@@ -352,62 +314,6 @@ static void test_resync_effort_follows_late_metadata(void)
     fixture_free(&f);
 }
 
-/* ---------- agent_apply_settings: spend records survive switches ---------- */
-
-static void test_apply_settings_keeps_stamped_spend(void)
-{
-    struct fixture f;
-    fixture_init(&f);
-
-    /* Catalog fixture that knows only the OUTGOING model: after the
-     * switch, requests recorded under model-a must keep pricing at
-     * model-a's rates — the record's stamp, not the live model, decides. */
-    char *dir = t_tempdir();
-    setenv("XDG_CACHE_HOME", dir, 1);
-    char path[600];
-    snprintf(path, sizeof(path), "%s/hax", dir);
-    mkdir(path, 0755);
-    snprintf(path, sizeof(path), "%s/hax/catalog.json", dir);
-    FILE *cf = fopen(path, "w");
-    EXPECT(cf != NULL);
-    if (cf) {
-        fputs("{\"prov\": {\"models\": {"
-              "\"model-a\": {\"cost\": {\"input\": 2, \"output\": 8}}}}}",
-              cf);
-        fclose(cf);
-    }
-    f.provider.catalog_id = "prov";
-    struct stream_usage u = {.input_tokens = 1000000,
-                             .output_tokens = 1000000,
-                             .cached_tokens = -1,
-                             .cache_write_tokens = -1,
-                             .cache_write_1h_tokens = -1,
-                             .cost = -1};
-    agent_spend_account(&f.state.stats.spend, &u, &f.provider, "model-a");
-
-    setenv("HAX_MODEL", "model-b", 1); /* model-a -> model-b */
-    char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
-    int approx = 0;
-    EXPECT(agent_session_spend(&f.state.stats, &approx) == 10.0); /* 1M*$2 + 1M*$8 per Mtok */
-    EXPECT(approx == 1);
-    free(out);
-
-    /* A record whose stamp resolves nowhere (catalog fetch never landed,
-     * unknown model) leaves the total at the reported subtotal, marked
-     * approximate — it's missing real usage. */
-    struct provider nowhere = {.catalog_id = "no-such-catalog-provider"};
-    agent_spend_account(&f.state.stats.spend, &u, &nowhere, "model-x");
-    struct stream_usage paid = {-1, -1, -1, -1, -1, 0.03};
-    agent_spend_account(&f.state.stats.spend, &paid, &f.provider, "model-a");
-    approx = 0;
-    EXPECT(agent_session_spend(&f.state.stats, &approx) == 10.03);
-    EXPECT(approx == 1);
-
-    agent_spend_free(&f.state.stats.spend);
-    fixture_free(&f);
-}
-
 /* ---------- agent_new_conversation ---------- */
 
 static void do_new_conversation(void *user)
@@ -421,17 +327,17 @@ static void test_new_conversation_resets_everything(void)
     struct fixture f;
     fixture_init(&f);
 
-    /* Seed every per-conversation accumulator /new promises to clear. */
+    /* Seed every per-conversation record /new promises to clear. */
     agent_session_add_user(&f.session, "hello");
-    f.state.stats.user_turns = 3;
-    f.state.stats.requests = 7;
-    f.state.stats.input_tokens = 1000;
-    f.state.stats.tool_calls = 2;
+    agent_session_add_user(&f.session, "again");
+    agent_session_retire(&f.session, 2);
+    agent_session_add_worked(&f.session, 1500);
 
-    char *out = capture_stdout(do_new_conversation, &f);
+    char *out = t_capture_stdout(do_new_conversation, &f);
     EXPECT(f.session.n_items == 0);
-    struct session_stats zero = {0};
-    EXPECT(memcmp(&f.state.stats, &zero, sizeof(zero)) == 0);
+    EXPECT(f.session.n_retired == 0);
+    EXPECT(f.session.worked_ms == 0);
+    EXPECT(f.session.last_user_turn_ms == -1);
     /* The fresh start is announced with the same banner as startup. */
     EXPECT(strstr(out, "prov-x · model-a") != NULL);
     EXPECT(strstr(out, "ctrl-d quit") != NULL);
@@ -523,28 +429,36 @@ static void test_undo_reverts_history_and_file(void)
     add_turn(&f.session, "first", "r1");
     add_turn(&f.session, "second", "r2");
     add_turn(&f.session, "third", "r3");
+    agent_session_add_worked(&f.session, 900);
 
     f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL, NULL);
     EXPECT(f.state.session_log != NULL);
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     char *path = xstrdup(session_log_path(f.state.session_log));
     EXPECT(agent_user_turn_count(&f.session) == 3);
+    f.session.compact_failures = COMPACT_MAX_AUTO_FAILURES;
 
     /* Revert to before turn 1: turn 0 survives, turns 1 and 2 drop. */
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_undo, &c);
+    char *out = t_capture_stdout(do_undo, &c);
+    /* A shorter window may now summarize, so automatic compaction may retry. */
+    EXPECT(f.session.compact_failures == 0);
 
     EXPECT(agent_user_turn_count(&f.session) == 1);
     EXPECT_STR_EQ(agent_user_turn_text(&f.session, 0), "first");
     /* The discarded prompt is staged for editor recall. */
     EXPECT_STR_EQ(f.state.pending_recall, "second");
+    /* The undone user turns stay on the books, but the last completed turn is gone. */
+    EXPECT(count_users(f.session.retired, f.session.n_retired) == 2);
+    EXPECT(f.session.last_user_turn_ms == -1);
 
-    /* The truncation reached disk: reloading shows only turn 0. */
-    struct item *items;
-    size_t n;
-    EXPECT(session_load(path, &items, &n, NULL) == 0);
-    EXPECT(count_users(items, n) == 1);
-    free_items(items, n);
+    /* The undo reached disk as a record: reloading shows only user turn 0 live, with the undone
+     * turns retired rather than lost. */
+    struct session_loaded loaded;
+    EXPECT(session_load_all(path, &loaded) == 0);
+    EXPECT(count_users(loaded.items, loaded.n_items) == 1);
+    EXPECT(count_users(loaded.retired, loaded.n_retired) == 2);
+    session_loaded_free(&loaded);
 
     free(out);
     free(path);
@@ -557,12 +471,12 @@ static void test_undo_reverts_history_and_file(void)
     unsetenv("HAX_NO_AGENTS_MD");
 }
 
-/* The in-memory cut and the on-disk cut have to land on the same turn. /undo
+/* The in-memory cut and the recorded cut have to land on the same user turn. /undo
  * passes a turn number derived from the item scan and an item count derived
- * from it too; if the file scan counts a continuation marker as a turn, it
- * cuts a turn earlier, and the item count then recorded as written skips
- * every line in between — the log silently loses the retained tail and
- * everything appended after it. */
+ * from it too; if the loader counted a continuation marker as a user turn, it
+ * would cut a user turn earlier, and the item count recorded as written would
+ * skip every line in between — the log would silently lose the retained
+ * tail and everything appended after it. */
 static void test_undo_with_continuation_cuts_disk_and_memory_alike(void)
 {
     set_state_dir();
@@ -584,7 +498,7 @@ static void test_undo_with_continuation_cuts_disk_and_memory_alike(void)
     /* Revert to before "second": the whole first turn, continuation included,
      * survives in memory... */
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_undo, &c);
+    char *out = t_capture_stdout(do_undo, &c);
     EXPECT(agent_user_turn_count(&f.session) == 1);
     size_t kept = f.session.n_items;
 
@@ -634,7 +548,7 @@ static void test_fork_branches_and_switches_log(void)
     char *orig = xstrdup(session_log_path(f.state.session_log));
 
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_fork, &c);
+    char *out = t_capture_stdout(do_fork, &c);
 
     /* History cut to the branch point, discarded prompt staged. */
     EXPECT(agent_user_turn_count(&f.session) == 1);
@@ -645,14 +559,18 @@ static void test_fork_branches_and_switches_log(void)
     EXPECT(newpath != NULL);
     EXPECT(strcmp(newpath, orig) != 0);
 
-    /* ...which holds just the branch prefix, stamped forked_from the source... */
+    /* ...which holds just the branch prefix, stamped forked_from the source and inherited... */
     struct item *items;
     size_t n;
     struct session_meta meta = {0};
     EXPECT(session_load(newpath, &items, &n, &meta) == 0);
     EXPECT(count_users(items, n) == 1);
+    for (size_t i = 0; i < n; i++)
+        EXPECT(items[i].inherited);
     free_items(items, n);
     session_meta_free(&meta);
+    for (size_t i = 0; i < f.session.n_items; i++)
+        EXPECT(f.session.items[i].inherited);
 
     /* ...while the original is left whole and resumable. */
     EXPECT(session_load(orig, &items, &n, NULL) == 0);
@@ -686,7 +604,7 @@ static void test_fork_at_tip_clones_whole(void)
 
     /* turn == count: clone at the tip, nothing discarded. */
     struct history_mutation_call c = {.state = &f.state, .turn_index = 2};
-    char *out = capture_stdout(do_fork, &c);
+    char *out = t_capture_stdout(do_fork, &c);
 
     EXPECT(f.session.n_items == items_before);
     EXPECT(f.state.pending_recall == NULL); /* no prompt discarded */
@@ -720,7 +638,7 @@ static void test_fork_without_recording_leaves_state(void)
     size_t items_before = f.session.n_items;
 
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_fork, &c);
+    char *out = t_capture_stdout(do_fork, &c);
 
     /* Refused, conversation fully intact. */
     EXPECT(strstr(out, "session recording") != NULL);
@@ -756,23 +674,24 @@ static void test_fork_records_live_selection(void)
     char *orig = xstrdup(session_log_path(f.state.session_log));
 
     struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_fork, &c);
+    char *out = t_capture_stdout(do_fork, &c);
     char *branch = xstrdup(session_log_path(f.state.session_log));
 
-    /* Branching alone changes nothing on disk — the prefix is still all the
-     * branch has produced. */
+    /* The branch's header carries the run's selection from the start, so resuming it before
+     * any new turn does not snap back to the prefix's older one. */
     struct session_meta fm;
     EXPECT(session_read_meta(branch, &fm) == 0);
-    EXPECT_STR_EQ(fm.provider, "old-prov");
+    EXPECT_STR_EQ(fm.provider, "prov-x");
+    EXPECT_STR_EQ(fm.model, "model-a");
+    EXPECT(fm.preset == NULL); /* no stance is active in this run */
     session_meta_free(&fm);
 
-    /* The next turn is the run's, so it carries the run's selection. */
+    /* The next turn runs under the same selection and records nothing new. */
     add_turn(&f.session, "third", "r3");
     session_log_append(f.state.session_log, f.session.items, f.session.n_items);
     EXPECT(session_read_meta(branch, &fm) == 0);
     EXPECT_STR_EQ(fm.provider, "prov-x");
     EXPECT_STR_EQ(fm.model, "model-a");
-    EXPECT(fm.preset == NULL); /* no stance is active in this run */
     session_meta_free(&fm);
     free(branch);
 
@@ -835,8 +754,7 @@ static void test_apply_settings_records_switch(void)
     char *path = xstrdup(session_log_path(f.state.session_log));
 
     setenv("HAX_MODEL", "model-b", 1);
-    char *out = capture_stdout(do_apply, &f);
-    EXPECT(f.result == 0);
+    char *out = t_capture_stdout(do_apply, &f);
 
     /* A switch the user hasn't used yet stays out of the file. */
     struct session_meta m;
@@ -858,50 +776,17 @@ static void test_apply_settings_records_switch(void)
     fixture_free(&f);
 }
 
-static void test_undo_intact_when_truncate_fails(void)
-{
-    set_state_dir();
-    struct fixture f;
-    fixture_init(&f);
-    add_turn(&f.session, "first", "r1");
-    add_turn(&f.session, "second", "r2");
-    add_turn(&f.session, "third", "r3");
-
-    f.state.session_log = session_log_open("prov-x", "model-a", NULL, NULL, NULL);
-    EXPECT(f.state.session_log != NULL);
-    session_log_append(f.state.session_log, f.session.items, f.session.n_items);
-    size_t items_before = f.session.n_items;
-
-    /* Make the on-disk truncation fail: unlink the file so scan_turn_offset's
-     * reopen can't find it. agent_undo must bail before touching memory. */
-    EXPECT(unlink(session_log_path(f.state.session_log)) == 0);
-
-    struct history_mutation_call c = {.state = &f.state, .turn_index = 1};
-    char *out = capture_stdout(do_undo, &c);
-
-    EXPECT(strstr(out, "could not truncate") != NULL);
-    EXPECT(f.session.n_items == items_before); /* history untouched */
-    EXPECT(f.state.pending_recall == NULL);
-
-    free(out);
-    session_log_close(f.state.session_log);
-    agent_session_free(&f.session);
-    unsetenv("HAX_MODEL");
-    unsetenv("HAX_SYSTEM_PROMPT");
-    unsetenv("HAX_NO_ENV");
-    unsetenv("HAX_NO_AGENTS_MD");
-}
-
 int main(void)
 {
+    /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
+    EXPECT(chdir(t_tempdir()) == 0);
     test_apply_settings_empty_reprints_banner();
     test_apply_settings_nonempty_prints_marker();
+    test_apply_settings_switch_line_skips_banner();
     test_apply_settings_quiet_prints_nothing();
-    test_apply_settings_no_model_fails_intact();
-    test_apply_settings_failed_provider_change_keeps_old();
+    test_apply_settings_switches_without_model();
     test_apply_settings_refreshes_on_model_or_provider_change();
     test_resync_effort_follows_late_metadata();
-    test_apply_settings_keeps_stamped_spend();
     test_new_conversation_resets_everything();
     test_continue_marker_is_not_a_user_turn();
     test_undo_reverts_history_and_file();
@@ -912,6 +797,5 @@ int main(void)
     test_fork_records_live_selection();
     test_apply_settings_records_switch();
     test_session_records_provider_id();
-    test_undo_intact_when_truncate_fails();
     T_REPORT();
 }

@@ -9,28 +9,30 @@
 
 #include "agent.h"
 #include "agent_core.h"
-#include "agent_usage.h"
-#include "catalog.h"
+#include "buf.h"
+#include "compact.h"
 #include "config.h"
 #include "file_mention.h"
-#include "login.h"
-#include "model_meta.h"
 #include "provider.h"
 #include "select.h"
 #include "session.h"
 #include "session_picker.h"
 #include "xalloc.h"
+#include "commands/login.h"
+#include "commands/session_cmd.h"
+#include "commands/tasks.h"
 #include "render/disp.h"
 #include "render/render_ctx.h"
 #include "terminal/ansi.h"
 #include "terminal/clipboard.h"
+#include "terminal/input_core.h"
 #include "terminal/picker.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
-#include "text/fmt.h"
+#include "text/completion.h"
+#include "text/display_safe.h"
 #include "text/width.h"
-#include "tools/task_registry.h"
 
 /* Managed handlers leave disp bookkeeping accurate; raw handlers end on an untracked newline. */
 enum command_display {
@@ -47,9 +49,18 @@ struct slash_command {
     const char *name;
     const char *alias;
     const char *summary;
-    int accepts_argument;
+    const char *usage; /* argument placeholder such as "[preset]"; NULL takes no argument */
     enum command_display display;
     void (*handler)(const struct command_call *call);
+    /* Add the values of the argument word that follows `preceding`, the trimmed earlier
+     * arguments. Runs on Tab, so it must return promptly: no network, child processes, waiting on
+     * background work, or tty output. NULL completes nothing. */
+    void (*argument_choices)(struct agent_state *state, const char *preceding,
+                             struct completion *choices);
+    /* Return the placeholder for the argument word after `preceding`, the trimmed earlier
+     * arguments, or NULL; `usage` already covers the first word. A NULL hook hints nothing
+     * past the first word. */
+    const char *(*later_usage)(const char *preceding);
 };
 
 struct shortcut {
@@ -61,7 +72,7 @@ struct shortcut {
 
 struct parsed_command {
     char *name;
-    const char *argument;
+    char *argument; /* trimmed; NULL when absent */
 };
 
 static void run_new(const struct command_call *call);
@@ -82,15 +93,37 @@ static void run_usage(const struct command_call *call);
 static void run_login(const struct command_call *call);
 static void run_logout(const struct command_call *call);
 static void run_help(const struct command_call *call);
+static void provider_id_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices);
+static void model_id_choices(struct agent_state *state, const char *preceding,
+                             struct completion *choices);
+static void effort_level_choices(struct agent_state *state, const char *preceding,
+                                 struct completion *choices);
+static void preset_name_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices);
+static void preset_save_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices);
+static const char *preset_save_later_usage(const char *preceding);
+static void config_choices(struct agent_state *state, const char *preceding,
+                           struct completion *choices);
+static const char *config_later_usage(const char *preceding);
+static void tasks_argument_choices(struct agent_state *state, const char *preceding,
+                                   struct completion *choices);
+static const char *tasks_later_usage(const char *preceding);
+static void login_provider_choices(struct agent_state *state, const char *preceding,
+                                   struct completion *choices);
+static void logout_provider_choices(struct agent_state *state, const char *preceding,
+                                    struct completion *choices);
 
 /* Registry order is also /help order. */
 static const struct slash_command COMMANDS[] = {
     {
         .name = "new",
         .alias = "clear",
-        .summary = "start a fresh conversation (optional: preset)",
-        .accepts_argument = 1,
+        .summary = "start a fresh conversation",
+        .usage = "[preset]",
         .handler = run_new,
+        .argument_choices = preset_name_choices,
     },
     {
         .name = "resume",
@@ -100,62 +133,73 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "undo",
-        .summary = "revert conversation to before an earlier message (optional: turns back)",
-        .accepts_argument = 1,
+        .summary = "revert conversation to before an earlier message",
+        .usage = "[turns back]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_undo,
     },
     {
         .name = "fork",
-        .summary = "branch a new session before an earlier message (optional: turns back)",
-        .accepts_argument = 1,
+        .summary = "branch a new session before an earlier message",
+        .usage = "[turns back]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_fork,
     },
     {
         .name = "provider",
-        .summary = "switch provider, then model and effort",
+        .summary = "switch provider",
+        .usage = "[id]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_provider,
+        .argument_choices = provider_id_choices,
     },
     {
         .name = "model",
-        .summary = "switch model, then effort",
+        .summary = "switch model",
+        .usage = "[id]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_model,
+        .argument_choices = model_id_choices,
     },
     {
         .name = "effort",
         .summary = "set reasoning effort",
+        .usage = "[level]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_effort,
+        .argument_choices = effort_level_choices,
     },
     {
         .name = "preset",
-        .summary = "switch to a config-defined preset (optional: name)",
-        .accepts_argument = 1,
+        .summary = "switch to a config-defined preset",
+        .usage = "[name]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_preset,
+        .argument_choices = preset_name_choices,
     },
     /* `/preset save` would conflict with a preset named "save". */
     {
         .name = "preset-save",
-        .summary = "save the current selection as a preset (name, optional tint)",
-        .accepts_argument = 1,
+        .summary = "save the current selection as a preset",
+        .usage = "<name> [tint]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_preset_save,
+        .argument_choices = preset_save_choices,
+        .later_usage = preset_save_later_usage,
     },
     {
         .name = "config",
-        .summary = "view or change settings (optional: key value)",
-        .accepts_argument = 1,
+        .summary = "view or change settings",
+        .usage = "[key [value]]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_config,
+        .argument_choices = config_choices,
+        .later_usage = config_later_usage,
     },
     {
         .name = "compact",
-        .summary = "summarize history to free up context (optional: focus instructions)",
-        .accepts_argument = 1,
+        .summary = "summarize the conversation to free up context",
+        .usage = "[focus]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_compact,
     },
@@ -166,9 +210,11 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "tasks",
-        .summary = "list background tasks (optional: kill <id>... | kill all)",
-        .accepts_argument = 1,
+        .summary = "list background tasks",
+        .usage = "[kill <id>... | kill all]",
         .handler = run_tasks,
+        .argument_choices = tasks_argument_choices,
+        .later_usage = tasks_later_usage,
     },
     {
         .name = "session",
@@ -182,17 +228,19 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "login",
-        .summary = "log in to a provider account, managed by hax (optional: provider)",
-        .accepts_argument = 1,
+        .summary = "log in to a provider account, managed by hax",
+        .usage = "[provider]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_login,
+        .argument_choices = login_provider_choices,
     },
     {
         .name = "logout",
-        .summary = "log out and remove a hax-managed login (optional: provider)",
-        .accepts_argument = 1,
+        .summary = "log out and remove a hax-managed login",
+        .usage = "[provider]",
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_logout,
+        .argument_choices = logout_provider_choices,
     },
     {
         .name = "help",
@@ -216,7 +264,7 @@ static const struct shortcut SHORTCUTS[] = {
     {.key = "ctrl-d", .description = "quit (on empty prompt)"},
     {.key = "ctrl-l", .description = "clear screen and redraw prompt"},
     {.key = "ctrl-g", .description = "edit prompt in $EDITOR"},
-    {.key = "ctrl-o", .description = "view conversation history in $PAGER"},
+    {.key = "ctrl-o", .description = "view the conversation in $PAGER"},
     {.key = "ctrl-t", .description = "view model-facing transcript in $PAGER"},
     {.key = "ctrl-v", .description = "paste image (or text) from clipboard"},
     {.key = "@ + tab",
@@ -226,6 +274,11 @@ static const struct shortcut SHORTCUTS[] = {
 };
 #define N_SHORTCUTS (sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]))
 
+static int is_name_byte(unsigned char c)
+{
+    return isalnum(c) || c == '_' || c == '-';
+}
+
 static int parse_command(const char *line, struct parsed_command *parsed)
 {
     if (!line || line[0] != '/')
@@ -234,9 +287,8 @@ static int parse_command(const char *line, struct parsed_command *parsed)
     const char *name = line + 1;
     const char *cursor = name;
     while (*cursor && !isspace((unsigned char)*cursor)) {
-        unsigned char c = (unsigned char)*cursor;
         /* Restrict command-shaped input so paths and terminal control bytes pass through. */
-        if (!isalnum(c) && c != '_' && c != '-')
+        if (!is_name_byte((unsigned char)*cursor))
             return 0;
         cursor++;
     }
@@ -250,7 +302,10 @@ static int parse_command(const char *line, struct parsed_command *parsed)
 
     while (*cursor && isspace((unsigned char)*cursor))
         cursor++;
-    parsed->argument = *cursor ? cursor : NULL;
+    size_t argument_length = strlen(cursor);
+    while (argument_length > 0 && isspace((unsigned char)cursor[argument_length - 1]))
+        argument_length--;
+    parsed->argument = argument_length ? xasprintf("%.*s", (int)argument_length, cursor) : NULL;
     return 1;
 }
 
@@ -262,6 +317,15 @@ static const struct slash_command *find_command(const char *name)
             return &COMMANDS[i];
     }
     return NULL;
+}
+
+/* Look up the command spelled by the first `name_len` bytes of `text`. */
+static const struct slash_command *find_command_span(const char *text, size_t name_len)
+{
+    char *name = xasprintf("%.*s", (int)name_len, text);
+    const struct slash_command *command = find_command(name);
+    free(name);
+    return command;
 }
 
 enum slash_result slash_dispatch(const char *line, struct agent_state *state)
@@ -280,7 +344,7 @@ enum slash_result slash_dispatch(const char *line, struct agent_state *state)
         result = SLASH_UNKNOWN;
         goto raw_output;
     }
-    if (parsed.argument && !command->accepts_argument) {
+    if (parsed.argument && !command->usage) {
         ui_error("/%s takes no arguments.", parsed.name);
         result = SLASH_BAD_USAGE;
         goto raw_output;
@@ -288,18 +352,195 @@ enum slash_result slash_dispatch(const char *line, struct agent_state *state)
 
     struct command_call call = {
         .state = state,
-        .argument = command->accepts_argument ? parsed.argument : NULL,
+        .argument = command->usage ? parsed.argument : NULL,
     };
     command->handler(&call);
     if (command->display == COMMAND_DISPLAY_RAW)
         disp_sync_external_line(disp);
+    free(parsed.argument);
     free(parsed.name);
     return SLASH_HANDLED;
 
 raw_output:
     disp_sync_external_line(disp);
+    free(parsed.argument);
     free(parsed.name);
     return result;
+}
+
+/* ---------- completion and prompt hints ---------- */
+
+/* The command name occupies [1, name_end) of a line that starts with a slash. Return 0 for input
+ * that is not command-shaped, such as a path, so no completion or hint applies. */
+static int scan_command_name(const char *line, size_t *name_end)
+{
+    if (line[0] != '/')
+        return 0;
+
+    size_t end = 1;
+    while (is_name_byte((unsigned char)line[end]))
+        end++;
+    if (line[end] != '\0' && !isspace((unsigned char)line[end]))
+        return 0;
+    *name_end = end;
+    return 1;
+}
+
+/* `text` is the command line after its slash, up to the cursor. Collect the choices matching its
+ * last word, which `*word` points at; that word is the command name when no space precedes it. */
+static void collect_choices(struct agent_state *state, const char *text, struct completion *choices,
+                            const char **word)
+{
+    const char *word_start = text + strlen(text);
+    while (word_start > text && !isspace((unsigned char)word_start[-1]))
+        word_start--;
+    *word = word_start;
+
+    if (word_start == text) {
+        for (size_t i = 0; i < N_COMMANDS; i++) {
+            completion_add(choices, COMMANDS[i].name);
+            if (COMMANDS[i].alias)
+                completion_add(choices, COMMANDS[i].alias);
+        }
+    } else {
+        size_t name_len = 0;
+        while (is_name_byte((unsigned char)text[name_len]))
+            name_len++;
+        const struct slash_command *command = find_command_span(text, name_len);
+        if (!command || !command->argument_choices)
+            return;
+
+        const char *preceding = text + name_len;
+        while (isspace((unsigned char)*preceding))
+            preceding++;
+        size_t preceding_len = (size_t)(word_start - preceding);
+        while (preceding_len > 0 && isspace((unsigned char)preceding[preceding_len - 1]))
+            preceding_len--;
+        char *trimmed = xasprintf("%.*s", (int)preceding_len, preceding);
+        command->argument_choices(state, trimmed, choices);
+        free(trimmed);
+    }
+    completion_keep_prefixed(choices, word_start);
+}
+
+/* Complete only the word that ends at the cursor, on the line's first row. */
+static int match_command(const char *buffer, size_t buffer_len, size_t cursor, size_t *start,
+                         size_t *end, void *user)
+{
+    (void)user;
+
+    size_t name_end;
+    if (cursor > buffer_len || !scan_command_name(buffer, &name_end) || cursor < name_end)
+        return 0;
+    if (cursor < buffer_len && !isspace((unsigned char)buffer[cursor]))
+        return 0;
+    if (memchr(buffer, '\n', cursor))
+        return 0;
+    /* Leave other argument words, such as an @file mention in a /compact focus, to later
+     * completers. */
+    if (cursor > name_end) {
+        const struct slash_command *command = find_command_span(buffer + 1, name_end - 1);
+        if (!command || !command->argument_choices)
+            return 0;
+    }
+    *start = 1;
+    *end = cursor;
+    return 1;
+}
+
+static char *complete_command(const char *text, void *user)
+{
+    struct completion choices = {0};
+    const char *word;
+    char *replacement = NULL;
+
+    collect_choices(user, text, &choices, &word);
+    char *extended = completion_extend(&choices, word);
+    if (extended)
+        replacement = xasprintf("%.*s%s", (int)(word - text), text, extended);
+    free(extended);
+    completion_free(&choices);
+    return replacement;
+}
+
+/* Two spaces set the list apart from the text it follows. A bare slash matches every command,
+ * which /help already lists in full instead of a truncated row. Like a shell listing a directory,
+ * candidates that split into parts show only their next part. */
+static char *list_command_choices(const char *text, void *user)
+{
+    if (*text == '\0')
+        return xstrdup("  see /help");
+
+    struct completion choices = {0};
+    const char *word;
+    char *listing = NULL;
+
+    collect_choices(user, text, &choices, &word);
+    completion_to_parts(&choices, word);
+    if (choices.count > 1) {
+        const char *marker = word == text ? "/" : "";
+        struct buf list;
+        buf_init(&list);
+        for (size_t i = 0; i < choices.count; i++) {
+            buf_append_str(&list, i > 0 ? " " : "  ");
+            buf_append_str(&list, marker);
+            buf_append_str(&list, choices.candidates[i]);
+        }
+        listing = buf_steal(&list);
+    }
+    completion_free(&choices);
+    return listing;
+}
+
+void slash_completer_init(struct input_completer *completer, struct agent_state *state)
+{
+    *completer = (struct input_completer){
+        .match = match_command,
+        .complete = complete_command,
+        .candidates = list_command_choices,
+        .user = state,
+    };
+}
+
+/* Placeholders appear once the name is complete and before any argument, so a mistyped or
+ * partial name draws nothing. A later argument's appears once a space ends the word before it. */
+char *slash_hint(const char *line)
+{
+    size_t name_end;
+
+    if (!scan_command_name(line, &name_end) || strchr(line, '\n'))
+        return NULL;
+
+    const struct slash_command *command = find_command_span(line + 1, name_end - 1);
+    if (!command || !command->usage)
+        return NULL;
+
+    const char *argument = line + name_end;
+    while (isspace((unsigned char)*argument))
+        argument++;
+    if (!*argument)
+        return xasprintf("%s%s", line[name_end] == '\0' ? " " : "", command->usage);
+
+    size_t argument_len = strlen(argument);
+    if (!command->later_usage || !isspace((unsigned char)argument[argument_len - 1]))
+        return NULL;
+    while (isspace((unsigned char)argument[argument_len - 1]))
+        argument_len--;
+    char *preceding = xasprintf("%.*s", (int)argument_len, argument);
+    const char *usage = command->later_usage(preceding);
+    free(preceding);
+    return usage ? xstrdup(usage) : NULL;
+}
+
+/* Whether trimmed `arguments` hold exactly one word. */
+static int is_one_word(const char *arguments)
+{
+    if (!*arguments)
+        return 0;
+    for (const char *cursor = arguments; *cursor; cursor++)
+        if (isspace((unsigned char)*cursor))
+            return 0;
+    return 1;
 }
 
 /* ---------- /new ---------- */
@@ -387,7 +628,7 @@ static void run_history_action(const struct command_call *call, enum history_act
 
     long turn_index;
     if (call->argument) {
-        /* N counts turns back from the end: 1 is the most recent turn, `turn_count`
+        /* N counts user turns back from the end: 1 is the most recent, `turn_count`
          * the first. /fork also accepts 0 — the current tip — which clones the
          * whole conversation; that stays valid even when the only user item is
          * a compaction seed (turn_count 0), as long as there's history to copy.
@@ -455,17 +696,39 @@ static void run_fork(const struct command_call *call)
 
 static void run_provider(const struct command_call *call)
 {
-    select_provider(call->state);
+    select_provider(call->state, call->argument);
+}
+
+static void provider_id_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices)
+{
+    (void)state;
+    if (!*preceding)
+        select_provider_choices(choices);
 }
 
 static void run_model(const struct command_call *call)
 {
-    select_model(call->state);
+    select_model(call->state, call->argument);
+}
+
+static void model_id_choices(struct agent_state *state, const char *preceding,
+                             struct completion *choices)
+{
+    if (!*preceding)
+        select_model_choices(state, choices);
 }
 
 static void run_effort(const struct command_call *call)
 {
-    select_effort(call->state);
+    select_effort(call->state, call->argument);
+}
+
+static void effort_level_choices(struct agent_state *state, const char *preceding,
+                                 struct completion *choices)
+{
+    if (!*preceding)
+        select_effort_choices(state, choices);
 }
 
 static void run_preset(const struct command_call *call)
@@ -473,9 +736,44 @@ static void run_preset(const struct command_call *call)
     select_preset(call->state, call->argument, 1);
 }
 
+/* Alphabetical, like the preset picker. Only names in the preset-name grammar are offered: a
+ * hand-written name outside it, such as one with a space, cannot complete as one word. */
+static void preset_name_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices)
+{
+    (void)state;
+    if (*preceding)
+        return;
+
+    char **names = NULL;
+    size_t count = config_preset_names(&names);
+    for (size_t i = 0; i < count; i++) {
+        if (config_preset_name_valid(names[i]))
+            completion_add(choices, names[i]);
+        free(names[i]);
+    }
+    free(names);
+    completion_sort(choices);
+}
+
 static void run_preset_save(const struct command_call *call)
 {
     select_preset_save(call->state, call->argument);
+}
+
+/* Naming an existing preset overwrites it after confirmation. */
+static void preset_save_choices(struct agent_state *state, const char *preceding,
+                                struct completion *choices)
+{
+    if (!*preceding)
+        preset_name_choices(state, preceding, choices);
+    else if (is_one_word(preceding))
+        select_tint_choices(choices);
+}
+
+static const char *preset_save_later_usage(const char *preceding)
+{
+    return is_one_word(preceding) ? "[tint]" : NULL;
 }
 
 static void run_config(const struct command_call *call)
@@ -483,9 +781,27 @@ static void run_config(const struct command_call *call)
     select_config(call->state, call->argument);
 }
 
+static void config_choices(struct agent_state *state, const char *preceding,
+                           struct completion *choices)
+{
+    (void)state;
+    if (!*preceding)
+        select_config_key_choices(choices);
+    else if (is_one_word(preceding))
+        select_config_value_choices(preceding, choices);
+}
+
+static const char *config_later_usage(const char *preceding)
+{
+    if (!is_one_word(preceding))
+        return NULL;
+    const struct config_setting *setting = config_setting_find(preceding);
+    return setting && setting->editable ? "[value]" : NULL;
+}
+
 static void run_compact(const struct command_call *call)
 {
-    agent_compact(call->state, call->argument, 0);
+    agent_compact(call->state, call->argument, COMPACT_MANUAL);
 }
 
 /* ---------- /copy ---------- */
@@ -518,240 +834,28 @@ static void run_copy(const struct command_call *call)
     ui_error("clipboard copy failed: %s", error ? error : "unknown error");
 }
 
-/* ---------- task and session status ---------- */
+/* ---------- /tasks, /session ---------- */
 
-#define SESSION_LABEL_WIDTH 14
-
-/* Indent of value rows; also decides between the aligned label column and stacked layout. */
-static int session_value_indent(int columns)
+static void tasks_argument_choices(struct agent_state *state, const char *preceding,
+                                   struct completion *choices)
 {
-    int value_column = 2 + SESSION_LABEL_WIDTH;
-    return columns - value_column >= UI_ROW_MIN_TEXT_CELLS ? value_column : UI_ROW_STACKED_INDENT;
+    (void)state;
+    tasks_choices(preceding, choices);
 }
 
-static void print_session_row(const char *label, const char *value)
+static const char *tasks_later_usage(const char *preceding)
 {
-    ui_label_row(label, ANSI_DIM, value, ANSI_DIM, 2 + SESSION_LABEL_WIDTH, display_width());
-}
-
-/* Unknown and negligible cost estimates are omitted. The returned length may exceed the buffer. */
-static int append_token_segment(char *row, size_t row_size, int row_length, const char *label,
-                                long tokens, double cost)
-{
-    char formatted[32];
-    if (row_length < 0 || (size_t)row_length >= row_size)
-        return row_length;
-    format_tokens(formatted, sizeof(formatted), tokens);
-    row_length += snprintf(row + row_length, row_size - (size_t)row_length, "%s%s %s",
-                           row_length ? " · " : "", label, formatted);
-    if (cost >= COST_DISPLAY_MIN && row_length > 0 && (size_t)row_length < row_size) {
-        format_cost(formatted, sizeof(formatted), cost);
-        row_length += snprintf(row + row_length, row_size - (size_t)row_length, " ~%s", formatted);
-    }
-    return row_length;
-}
-
-static void kill_tasks(const char *arguments)
-{
-    const char **ids = NULL;
-    size_t id_count = 0;
-    size_t id_capacity = 0;
-    char *words = xstrdup(arguments);
-    int all = 0;
-    for (char *word = strtok(words, " \t"); word; word = strtok(NULL, " \t")) {
-        if (strcmp(word, "all") == 0) {
-            all = 1;
-            continue;
-        }
-        if (id_count == id_capacity) {
-            id_capacity = id_capacity ? id_capacity * 2 : 4;
-            ids = xrealloc(ids, id_capacity * sizeof(*ids));
-        }
-        ids[id_count++] = word;
-    }
-    if (!all && id_count == 0) {
-        ui_error("usage: /tasks kill <id>... | kill all");
-    } else {
-        size_t stopped = task_stop(all ? NULL : ids, all ? 0 : id_count);
-        printf("  stopped %zu task%s\n", stopped, stopped == 1 ? "" : "s");
-    }
-    free(ids);
-    free(words);
+    return strcmp(preceding, "kill") == 0 ? "<id>... | all" : NULL;
 }
 
 static void run_tasks(const struct command_call *call)
 {
-    if (config_bool("no_tasks")) {
-        ui_note("background tasks are disabled (no_tasks)");
-        return;
-    }
-    const char *argument = call->argument;
-    if (argument && *argument) {
-        if (strncmp(argument, "kill", 4) == 0 &&
-            (argument[4] == '\0' || argument[4] == ' ' || argument[4] == '\t'))
-            kill_tasks(argument + 4);
-        else
-            ui_error("usage: /tasks [kill <id>... | kill all]");
-        return;
-    }
-
-    struct task_info *tasks = NULL;
-    size_t task_count = task_list(&tasks);
-    if (task_count == 0) {
-        printf("  " ANSI_DIM "no background tasks" ANSI_RESET "\n");
-        free(tasks);
-        return;
-    }
-
-    struct task_status {
-        char text[40];
-    } *statuses = xmalloc(task_count * sizeof(*statuses));
-    int terminal_width = display_width();
-    int id_width = 4;
-    int status_width = 0;
-    for (size_t i = 0; i < task_count; i++) {
-        int id_cells = (int)strlen(tasks[i].id);
-        if (id_cells > id_width)
-            id_width = id_cells;
-        char state_label[16];
-        char elapsed_label[16];
-        if (tasks[i].running)
-            snprintf(state_label, sizeof(state_label), "running");
-        else if (tasks[i].term_signal)
-            snprintf(state_label, sizeof(state_label), "signal %d", tasks[i].term_signal);
-        else
-            snprintf(state_label, sizeof(state_label), "exit %d", tasks[i].exit_code);
-        format_duration(elapsed_label, sizeof(elapsed_label), tasks[i].elapsed_ms);
-        snprintf(statuses[i].text, sizeof(statuses[i].text), "%s · %s", state_label, elapsed_label);
-        int status_cells = (int)display_cells(statuses[i].text);
-        if (status_cells > status_width)
-            status_width = status_cells;
-    }
-    for (size_t i = 0; i < task_count; i++) {
-        int status_padding = status_width - (int)display_cells(statuses[i].text);
-        int fixed_width = 2 + id_width + 2 + status_width + 2;
-        int command_width = terminal_width - fixed_width - 1;
-        if (command_width < 8)
-            command_width = 8;
-        char *flattened = flatten_for_display(tasks[i].command);
-        char *command = truncate_for_display(flattened, (size_t)command_width);
-        free(flattened);
-        printf("  " ANSI_BOLD "%-*s" ANSI_BOLD_OFF "  %s%*s  " ANSI_DIM "%s" ANSI_RESET "\n",
-               id_width, tasks[i].id, statuses[i].text, status_padding, "", command);
-        free(command);
-    }
-    free(statuses);
-    free(tasks);
+    tasks_command(call->argument);
 }
 
-/* Stats cover the current process: /new resets them and /resume does not restore old totals. */
 static void run_session(const struct command_call *call)
 {
-    struct agent_state *state = call->state;
-    const struct session_stats *stats = &state->stats;
-    char row[160], formatted[32];
-
-    const char *hint = session_log_resume_hint(state->session_log);
-    print_session_row("session", hint ? hint : "not recorded");
-
-    const char *preset = config_str("preset");
-    if (preset && *preset)
-        print_session_row("preset", preset);
-
-    /* Report the effort the next request will carry after metadata resolution. */
-    agent_session_resync_effort(state->session, state->provider, NULL);
-    const char *provider_name =
-        (state->provider && state->provider->name) ? state->provider->name : "?";
-    const char *model = (state->session && state->session->model && *state->session->model)
-                            ? state->session->model
-                            : "?";
-    const char *effort = state->session ? state->session->effort : NULL;
-    if (effort && *effort)
-        snprintf(row, sizeof(row), "%s · %s · %s", provider_name, model, effort);
-    else
-        snprintf(row, sizeof(row), "%s · %s", provider_name, model);
-    /* When the identity overflows its row, break after the provider rather than between model
-     * and effort; a hard newline in the value forces the row break. */
-    int columns = display_width();
-    if ((int)display_cells(row) > columns - session_value_indent(columns)) {
-        if (effort && *effort)
-            snprintf(row, sizeof(row), "%s\n%s · %s", provider_name, model, effort);
-        else
-            snprintf(row, sizeof(row), "%s\n%s", provider_name, model);
-    }
-    print_session_row("provider", row);
-
-    if (stats->user_turns > 0) {
-        snprintf(row, sizeof(row), "%ld", stats->user_turns);
-        print_session_row("user turns", row);
-    }
-
-    if (stats->requests > 0) {
-        snprintf(row, sizeof(row), "%ld", stats->requests);
-        print_session_row("requests", row);
-    }
-
-    if (stats->tool_calls > 0) {
-        int row_length = snprintf(row, sizeof(row), "%ld", stats->tool_calls);
-        for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS && stats->tools[i].name; i++) {
-            if (row_length < 0 || (size_t)row_length >= sizeof(row))
-                break;
-            row_length += snprintf(row + row_length, sizeof(row) - (size_t)row_length, " · %s %ld",
-                                   stats->tools[i].name, stats->tools[i].count);
-        }
-        print_session_row("tool calls", row);
-    }
-
-    if (stats->worked_ms > 0) {
-        format_duration(formatted, sizeof(formatted), stats->worked_ms);
-        print_session_row("time worked", formatted);
-    }
-
-    /* Context is the latest request's window use. Until a request reports usage — a fresh
-     * session, or a compaction or history cut invalidated the snapshot — usage is unknown
-     * rather than zero, but the resolved window is still worth showing. */
-    if (stats->latest_context_tokens > 0) {
-        format_context(row, sizeof(row), stats->latest_context_tokens, stats->context_limit);
-        print_session_row("context", row);
-    } else {
-        long window =
-            model_meta_context(state->provider, state->session ? state->session->model : NULL);
-        if (window > 0) {
-            format_context(row, sizeof(row), -1, window);
-            print_session_row("context", row);
-        }
-    }
-
-    /* Category costs are rate estimates even when the provider reported an exact total charge. */
-    if (stats->input_tokens > 0 || stats->output_tokens > 0) {
-        struct catalog_split split;
-        int split_available = agent_spend_split(&stats->spend, &split);
-        long cached_tokens = stats->cached_tokens > 0 ? stats->cached_tokens : 0;
-        long cache_write_tokens = stats->cache_write_tokens > 0 ? stats->cache_write_tokens : 0;
-        int row_length = 0;
-        row_length =
-            append_token_segment(row, sizeof(row), row_length, "in", stats->uncached_input_tokens,
-                                 split_available ? split.cost_input : -1);
-        if (cached_tokens > 0)
-            row_length = append_token_segment(row, sizeof(row), row_length, "cache", cached_tokens,
-                                              split_available ? split.cost_cache_read : -1);
-        if (cache_write_tokens > 0)
-            row_length =
-                append_token_segment(row, sizeof(row), row_length, "write", cache_write_tokens,
-                                     split_available ? split.cost_cache_write : -1);
-        append_token_segment(row, sizeof(row), row_length, "out", stats->output_tokens,
-                             split_available ? split.cost_output : -1);
-        print_session_row("tokens total", row);
-    }
-
-    /* A mixed reported/estimated total remains an estimate. */
-    int estimated = 0;
-    double spend = agent_session_spend(stats, &estimated);
-    if (spend > 0) {
-        format_cost(formatted, sizeof(formatted), spend);
-        snprintf(row, sizeof(row), "%s%s", estimated ? "~" : "", formatted);
-        print_session_row("spend", row);
-    }
+    session_command(call->state);
 }
 
 /* ---------- /usage ---------- */
@@ -783,6 +887,22 @@ static void run_logout(const struct command_call *call)
     logout_command(call->state, call->argument);
 }
 
+static void login_provider_choices(struct agent_state *state, const char *preceding,
+                                   struct completion *choices)
+{
+    (void)state;
+    if (!*preceding)
+        login_choices(choices);
+}
+
+static void logout_provider_choices(struct agent_state *state, const char *preceding,
+                                    struct completion *choices)
+{
+    (void)state;
+    if (!*preceding)
+        logout_choices(choices);
+}
+
 /* ---------- /help ---------- */
 
 static void print_help_row(const char *label, const char *label_color, const char *summary,
@@ -799,6 +919,13 @@ static void print_command_row(const char *name, const char *summary, int dimmed,
     print_help_row(label, theme_open(dimmed ? THEME_CHROME_DIM : THEME_CHROME), summary, dimmed,
                    description_column, columns);
     free(label);
+}
+
+static char *command_help_summary(const struct slash_command *command)
+{
+    if (!command->usage)
+        return xstrdup(command->summary);
+    return xasprintf("%s %s", command->summary, command->usage);
 }
 
 static void run_help(const struct command_call *call)
@@ -826,7 +953,9 @@ static void run_help(const struct command_call *call)
 
     fputs(ANSI_BOLD "commands" ANSI_RESET "\n", stdout);
     for (size_t i = 0; i < N_COMMANDS; i++) {
-        print_command_row(COMMANDS[i].name, COMMANDS[i].summary, 0, description_column, columns);
+        char *summary = command_help_summary(&COMMANDS[i]);
+        print_command_row(COMMANDS[i].name, summary, 0, description_column, columns);
+        free(summary);
         if (COMMANDS[i].alias) {
             char *summary = xasprintf("alias for /%s", COMMANDS[i].name);
             print_command_row(COMMANDS[i].alias, summary, 1, description_column, columns);

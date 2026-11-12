@@ -3,7 +3,7 @@
 Run hax from the directory you want it to work in. Sessions, project instructions, file completion,
 and the environment shown to the model are all based on the current directory.
 
-## A good everyday workflow
+## Workflow
 
 1. Start `hax` in the repository and choose a provider/model with `/provider` if needed.
 2. State the goal, constraints, and how the result should be verified. Mention relevant files with
@@ -15,7 +15,7 @@ and the environment shown to the model are all based on the current directory.
 5. Review the diff and validation results before accepting the work. hax has no per-command approval
    prompts and is not a security boundary; use OS-level isolation for untrusted work.
 
-## CLI modes
+## Options
 
 Without `-p`, hax starts the interactive REPL. A positional PROMPT, its words joined with spaces,
 is submitted as the first message, as if typed; stdin is not read for it. After `-c` or `--resume`,
@@ -24,7 +24,7 @@ that preset and is not part of the prompt.
 
 ```sh
 hax                              # interactive
-hax "fix the failing test"       # interactive, starting with this prompt
+hax "fix the failing test"       # interactive, with a first prompt
 hax -p "fix the failing test"    # one-shot
 printf "explain x" | hax -p      # one-shot prompt from stdin
 hax -c                           # continue the latest session here
@@ -48,6 +48,11 @@ hax --resume=ID -p "continue"    # resume non-interactively
 | `-h`, `--help` | Show current CLI help. |
 | `-v`, `--version` | Show the version. |
 
+A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with `-p`. `--raw` and
+`--bare` still record the conversation; combine either with `--no-session` for a disposable run.
+
+### One-shot mode
+
 In one-shot mode, positional arguments are joined with spaces. With no arguments, a non-terminal
 stdin becomes the prompt. The final answer goes to stdout; the provider banner, usage stats, errors,
 and resume hint go to stderr. This makes `hax -p` safe to pipe without losing diagnostics:
@@ -61,22 +66,22 @@ For orchestrators and scripts that want to observe a run as it happens — turns
 cost — `--json` (which implies `-p`) turns stdout into a JSONL event stream: the run's session
 records live as they are appended, closed by a `result` record with the outcome, final text,
 usage, and the session id for a follow-up `--resume=ID -p`. The stderr banner and stats are
-omitted; errors and warnings still go there. See [sessions.md](./sessions.md) for the record
-reference.
+omitted; errors and warnings still go there. The records are described in
+[sessions.md](./sessions.md).
 
 ```sh
-hax --json "fix the failing test" | jq 'select(.kind == "tool_call" or .type == "result")'
+hax --json "fix the failing test" |
+    jq 'select(.kind == "tool_call" or .type == "result")'
 ```
 
-A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with `-p`. `--raw` and
-`--bare` still record the conversation; combine either with `--no-session` for a disposable run.
-`max_turns` bounds a one-shot run's provider round-trips (default 100).
+A one-shot run is unlimited by default; set `max_turns` to abort after that many provider
+round-trips.
 
-A one-shot run responds to signals the way the REPL responds to Esc: SIGUSR1 pauses cleanly at
-the next turn boundary (outcome `paused`), and SIGINT (Ctrl-C) or SIGTERM interrupts at once,
-saving completed work (outcome `interrupted`, exit status 130); a second signal kills the
-process. The session stays resumable: `hax --resume=ID -p` without a prompt continues where the
-run stopped, and a new prompt steers it instead.
+A one-shot run responds to signals the way the REPL responds to Esc: SIGUSR1 pauses cleanly after
+the current step, or at once if the model has not started answering (outcome `paused`), and SIGINT
+(Ctrl-C) or SIGTERM interrupts at once, saving completed work (outcome `interrupted`, exit status
+130); a second signal kills the process. The session stays resumable: `hax --resume=ID -p`
+without a prompt continues where the run stopped, and a new prompt steers it instead.
 
 ## REPL commands
 
@@ -87,23 +92,31 @@ Type `/help` for the authoritative live list.
 | `/new [preset]` | Start a fresh conversation, optionally with a preset. `/clear` is an alias. |
 | `/resume` | Pick a past session for this directory. |
 | `/fork [n]` | Create a new session before an earlier prompt; `/fork 0` clones the current tip. |
-| `/undo [n]` | Permanently truncate this session before an earlier prompt. |
-| `/provider` | Choose a provider, model, and effort. |
-| `/model` | Choose a model and effort for the current provider. |
-| `/effort` | Choose reasoning effort when supported. |
+| `/undo [n]` | Roll the conversation back to before an earlier prompt. |
+| `/provider [id]` | Switch provider. |
+| `/model [id]` | Switch the current provider's model. |
+| `/effort [level]` | Set reasoning effort, when the model supports it. |
 | `/preset [name]` | Apply a config-defined preset. |
 | `/preset-save <name> [tint]` | Save the current provider/model/effort as a preset. |
 | `/config [key [value]]` | Inspect settings or change one for this process. |
 | `/compact [focus]` | Summarize older context, optionally emphasizing a focus. |
 | `/copy` | Copy the latest assistant response. |
 | `/tasks [kill <id>... \| kill all]` | List or stop background tasks. |
-| `/session` | Show session selection and local usage totals. |
+| `/session` | Show the session's selection and usage totals. |
 | `/usage` | Query provider account/subscription usage when supported. |
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
+| `/help` | List commands and keyboard shortcuts. |
 
-Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` rewrites both
-memory and the session file and has no redo.
+Without an argument, `/provider`, `/model`, and `/effort` open pickers, and the provider and model
+pickers continue to the settings that depend on them. With an argument they switch directly:
+`/provider <id>` starts on the provider's default model, or none until `/model` picks one, and
+`/model <id>` keeps the current effort where the new model allows it. Model ids complete from the
+provider's model list, fetched in the background; where that isn't available, open the `/model`
+picker once.
+
+Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` has no redo;
+the removed user turns still count toward the session's usage totals.
 
 ## Keyboard shortcuts
 
@@ -114,16 +127,17 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Enter | Submit; at a paused empty prompt, continue without adding a message. |
 | Shift-Enter | Insert a newline if the terminal sends LF for it. |
 | Up / Down | Recall previous/next prompts. |
-| Ctrl-R | Search persistent prompt history. |
+| Ctrl-R | Search prompt history. |
 | Esc | Pause after the current step so you can steer. |
 | Esc Esc | Interrupt the model or running tool immediately. |
 | Ctrl-C | Clear the current prompt; twice on an empty prompt quits. |
 | Ctrl-D | Quit on an empty prompt. |
 | Ctrl-L | Clear the screen and redraw the prompt. |
-| Ctrl-G | Edit the prompt in `$EDITOR`. |
+| Ctrl-G | Edit the prompt in `$VISUAL` or `$EDITOR`. |
 | Ctrl-O | Open the rendered conversation in `$PAGER`. |
 | Ctrl-T | Open the model-facing transcript in `$PAGER`. |
 | Ctrl-V | Paste an image, or clipboard text when no image is available. |
+| Tab | Complete a `/` command name or argument. |
 | `@` + Tab | Choose a project file with `fzf`. |
 
 Ctrl-O is the best view for reviewing what happened. Ctrl-T includes the system prompt, tool schemas,
@@ -159,13 +173,17 @@ Skills are discovered at `<dir>/.agents/skills/<name>/SKILL.md`, searched in thi
 2. `~/.config/hax/skills/`, for skills meant only for hax;
 3. `~/.agents/skills/`, the cross-agent location other tools install into and read from.
 
-The first match for a given skill name wins, so a nearer directory shadows a wider one. hax only
-reads `~/.agents/skills` and never writes to it. A skill should explain when and how to use a CLI
-or repeatable workflow; project policy usually belongs in `AGENTS.md` instead.
+The directory name is the skill's name, and the first match for a name wins, so a nearer directory
+shadows a wider one. hax only reads `~/.agents/skills` and never writes to it. The model sees each
+skill's name and the `description` from the YAML front matter that opens its `SKILL.md`, and reads
+the whole file when a task matches, so the description should say when to use the skill. A skill
+should explain when and how to use a CLI or repeatable workflow; project policy usually belongs in
+`AGENTS.md` instead.
 
 Use `--bare` for a task that needs tools but should not receive project instructions, skills, or
 subagent guidance. Use `--raw` only when you want a plain model chat with no tools. Individual
-context sections can also be disabled through [configuration](./configuration.md).
+context sections can also be turned off with the `no_*` settings in
+[configuration.md](./configuration.md).
 
 ## Files and images
 
@@ -180,7 +198,7 @@ image is present, Ctrl-V pastes text. Image understanding also depends on the se
 model/provider; hax detects support when metadata is available, and `image_input` can override
 detection.
 
-## Sessions and history
+## Sessions and prompt history
 
 Non-empty conversations are recorded as JSONL session files under:
 
@@ -188,10 +206,13 @@ Non-empty conversations are recorded as JSONL session files under:
 ~/.local/state/hax/sessions/<encoded-cwd>/
 ```
 
-Sessions are scoped to the current directory. `-c`, `--resume`, and `/resume` therefore show the
-history for where hax is running, not every repository. Sessions inactive for 30 days are removed by
-default; set `session_retention_days` to another value or `0` to keep them indefinitely. The file
-format is documented in [sessions.md](./sessions.md) and is safe to read from scripts.
+Sessions are scoped to the current directory. `-c`, `--resume`, and `/resume` therefore list the
+sessions for where hax is running, not every repository. Sessions inactive for 30 days are removed
+by default; set `session_retention_days` to another value or `0` to keep them indefinitely. The
+file format is documented in [sessions.md](./sessions.md) and is safe to read from scripts.
+
+Prompt history (Up, Ctrl-R) is scoped the same way: each directory keeps its own `history` file
+beside its session files, so recall stays within the project.
 
 Resuming restores the provider, model, effort, and preset last used by that conversation. A CLI
 selection flag deliberately overrides the restored choice:
@@ -205,13 +226,22 @@ The new selection is recorded in the resumed session. If its old provider or pre
 hax reports the problem rather than silently choosing another backend: a one-shot run exits with an
 error naming what the session recorded, while the REPL warns and resumes without it.
 
-`--no-session` (or `no_session`) prevents new session and prompt-history writes. It does not hide or
-disable existing sessions and prompt recall.
+`--no-session` (or `no_session`) prevents new session and prompt-history writes. It does not hide
+existing sessions or disable prompt recall.
+
+## Running inside herdr
+
+In a [herdr](https://herdr.dev) pane, the REPL reports its state to herdr: `working` during a turn
+and `idle` at the prompt. Once the conversation is recorded, hax also reports
+`hax --resume=<id>`, so herdr reopens the conversation after a restart. herdr runs that command
+by name, so it starts the first `hax` on `PATH`. Quitting releases the pane. One-shot runs report
+nothing.
 
 ## Pausing and steering
 
-The first Esc requests a clean pause. Work already in flight normally finishes, including tool calls,
-and hax returns to a prompt at the next model-turn boundary. At that prompt:
+The first Esc requests a clean pause. Work already in flight normally finishes, including tool calls
+and compaction, and hax returns to a prompt before the next model request. If the compaction ran
+for a message you just sent, the message returns to the prompt unsent. At that prompt:
 
 - press Enter on an empty line to continue;
 - type a message to add new direction before the next model request; or
@@ -222,7 +252,7 @@ remain visible, but unfinished reasoning is discarded so it cannot confuse the n
 model had not yet produced answer text or a tool call, the conversation is left unchanged; press
 Enter on an empty line to retry. `max_turns` provides the same kind of periodic check-in after a
 configured number of model round-trips. In one-shot mode, SIGUSR1 and SIGINT request the same
-pause and interrupt from outside; see [CLI modes](#cli-modes).
+pause and interrupt from outside; see [One-shot mode](#one-shot-mode).
 
 Resuming an interrupted conversation (`--resume`, `-c`, `/resume`) offers the same empty-Enter
 continue at the first prompt.
@@ -235,7 +265,8 @@ tasks are reported without polling. Tasks belong to the conversation and are sto
 it. In one-shot mode, tasks not awaited before the final answer are stopped.
 
 Set `no_tasks` to disable this behavior and make command timeouts kill the command. Related timeout
-and concurrency settings are in [configuration](./configuration.md#tools-and-transport).
+and concurrency settings are listed under Tools and transport in
+[configuration.md](./configuration.md#tools-and-transport).
 
 When explicitly asked to use subagents, hax can run additional `hax -p` processes as background
 tasks. They inherit the current provider/model/effort by default. Presets with a `description` are
@@ -246,13 +277,26 @@ faster and cheaper in one conversation.
 ## Context, compaction, and usage
 
 After a turn, hax shows elapsed time, current context use, and spend when the provider or model
-metadata can supply it. A `~` marks estimated cost. `/session` shows totals for the current process;
-`/usage` asks the provider for account-level usage when supported. One-shot runs put equivalent stats
-on stderr.
+metadata can supply it. A `~` marks estimated cost. `/session` shows the conversation's totals,
+including undone user turns and retried requests, with a token row per model when models were
+switched; a resumed session shows the same totals. `/usage` asks the provider for account-level
+usage when supported. One-shot runs put equivalent stats on stderr.
 
-Automatic compaction summarizes old history near 85% of a known context window. Use `/compact`
+Automatic compaction summarizes the older part of the conversation as it nears a known context
+window: at 85%, or earlier on a small window to leave room for the summary. It runs only when the
+conversation goes on, so a conversation you leave is never summarized for nothing. Use `/compact`
 earlier when the conversation has accumulated obsolete exploration, optionally naming what the
 summary must preserve. Manual compaction works even when the model's context limit is unknown.
+
+If the conversation outgrows the context window, even one whose size hax does not know, hax
+compacts it and carries on; with automatic compaction off, `/compact` recovers it. A conversation
+too large to summarize whole is shortened first, oldest detail first, so restate anything from
+early on that still matters. If hax does not recognize a server's context-overflow error, add its
+wording to the provider's `overflow_phrases` setting (see [providers.md](./providers.md)).
+
+After three automatic compactions fail with none succeeding in between, hax stops trying and says
+so. A successful `/compact`, a change of provider, model, effort, or any `/config` setting, `/undo`,
+`/fork`, or a new conversation lets it try again.
 
 For local servers, configure a context window large enough for the system prompt, project context,
 conversation, and response. A small server-side context often appears as truncated answers rather

@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 
+#include "agent_stream.h"
 #include "provider.h"
 #include "tool.h"
 #include "tools/bash_env.h"
@@ -12,7 +13,7 @@
  * the canonical flat item log (struct agent_session) with its views and mutators, and the
  * helpers that keep the record consistent with its logs and background tasks. Anything here
  * must behave identically in both frontends and needs no live provider stream — provider
- * round-trips belong in agent_loop, presentation in the frontends. */
+ * round-trips belong in agent_stream and agent_loop, presentation in the frontends. */
 
 /* Synthetic history content used to keep interrupted or refused tool turns well formed. */
 #define INTERRUPT_MARKER "[interrupted]"
@@ -66,6 +67,18 @@ struct agent_session {
     struct item *items;
     size_t n_items;
     size_t cap_items;
+    /* Items /undo removed from the conversation, in their original order. They are no longer
+     * context, but the requests they record were still served and paid for. */
+    struct item *retired;
+    size_t n_retired;
+    size_t cap_retired;
+    /* Wall time of completed user turns, as the session file records it. */
+    long worked_ms;
+    long last_user_turn_ms; /* -1 until a user turn completes */
+    /* Automatic compactions that failed since one last succeeded, however many turns apart.
+     * Reconfiguration, a settings change, a reset, or a history cut also clears it, since each
+     * can change whether a summary fits. Not persisted. */
+    int compact_failures;
 };
 
 /* Initialize a session. A missing model is valid so the interactive frontend can prompt for one. */
@@ -79,9 +92,9 @@ void agent_session_init(struct agent_session *session, struct provider *provider
  * tells the model the tool exists but does not decide what runs when it is called. */
 int agent_session_add_tool(struct agent_session *session, const struct tool_def *def);
 
-/* Re-resolve request settings for `provider` without changing history or tools. Returns -1 when
- * the provider has no configured or default model; the existing settings remain unchanged. */
-int agent_session_reconfigure(struct agent_session *session, struct provider *provider);
+/* Re-resolve request settings for `provider` without changing history or tools. Like startup, a
+ * provider with no configured or default model leaves the model unset until one is chosen. */
+void agent_session_reconfigure(struct agent_session *session, struct provider *provider);
 
 /* Wait for model metadata and update cached effort. Returns true if it changed. `previous`, when
  * non-NULL, receives ownership of the replaced value; otherwise the old value is freed. */
@@ -90,8 +103,21 @@ int agent_session_resync_effort(struct agent_session *session, struct provider *
 
 void agent_session_free(struct agent_session *session);
 
-/* Clear conversation items while preserving session settings and item-vector capacity. */
+/* Clear conversation items, retired items, and timing while preserving session settings and
+ * item-vector capacity. */
 void agent_session_reset(struct agent_session *session);
+
+/* Move items[from, n_items) to the retired list and forget the last user turn's duration. */
+void agent_session_retire(struct agent_session *session, size_t from);
+
+struct session_loaded;
+
+/* Replace the conversation, retired items, and timing with a loaded session file's, taking
+ * ownership of its arrays and leaving its metadata for the caller. */
+void agent_session_adopt(struct agent_session *session, struct session_loaded *loaded);
+
+/* Record a completed user turn's wall time. */
+void agent_session_add_worked(struct agent_session *session, long elapsed_ms);
 
 /* Return a borrowed provider context, valid until the next session mutation. Items before the
  * newest compaction seed are excluded: compaction summarizes a prefix rather than discarding it,
@@ -110,11 +136,16 @@ void agent_session_add_continuation(struct agent_session *session);
 /* Append a boundary between provider round-trips in one user turn. */
 void agent_session_add_boundary(struct agent_session *session);
 
-/* Append an owned usage footer for one provider round-trip. `response` is the identity the
- * provider reported for it, or NULL when the footer stands in for no single stream. */
+/* Append an owned usage record for one provider round-trip. `response` is the identity the
+ * provider reported for it, or NULL when the record stands in for no single stream. `origin` is
+ * ITEM_ORIGIN_COMPACTION for a summarization request, whose window is not the conversation's. */
 void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
                                   const struct stream_usage *usage, long elapsed_ms,
-                                  const struct stream_response *response);
+                                  const struct stream_response *response, enum item_origin origin);
+
+/* As agent_session_add_turn_usage, for one served attempt of a request. */
+void agent_session_add_attempt_usage(struct agent_session *session, const struct provider *provider,
+                                     const struct attempt *attempt, enum item_origin origin);
 
 /* Add an interrupt marker unless the latest content is an already-marked tool result. */
 void agent_session_mark_interrupt(struct agent_session *session);
@@ -129,12 +160,39 @@ enum agent_resume_tail {
 
 enum agent_resume_tail agent_session_resume_tail(const struct agent_session *session);
 
-/* Context-window size of the newest request a usage footer records in the model-visible
+struct session_log;
+struct session_meta;
+struct transcript_log;
+
+/* What an adopted record leaves for the run continuing it. */
+struct agent_resumed {
+    struct session_log *session_log; /* owned; NULL unless recording reopened the file */
+    enum agent_resume_tail tail;
+};
+
+/* Bind an adopted record at `path` to the run continuing it: reopen the file for appending when
+ * recording is enabled, stage the live selection there, append the history to `transcript`,
+ * settle model metadata, and read what the record's tail owes the run. `recorded` is the file's
+ * own selection, against which the staged one reads as an override. Call after the provider is
+ * final and before anything consults model metadata. */
+void agent_session_prepare_resumed(struct agent_session *session, struct provider *provider,
+                                   const char *path, const struct session_meta *recorded,
+                                   struct transcript_log *transcript, struct agent_resumed *out);
+
+/* Context-window size of the newest request a usage record reports in the model-visible
  * context, or -1 when none reports it. This is the recorded counterpart of a live run's
- * latest-usage snapshot, for continuation decisions such as compact-before-send; compaction's
- * own accounting, which describes the summarized request rather than the fresh seed's window,
- * is ignored. */
+ * latest-usage snapshot, as the stats display reports it; compaction's own accounting, which
+ * describes the summarized request rather than the fresh seed's window, is ignored. */
 long agent_session_last_context_tokens(const struct agent_session *session);
+
+/* agent_session_last_context_tokens() plus an items_token_estimate() of what that usage
+ * record's request could not count: tool results answering its response and everything appended
+ * after it, such as task notes. -1 when no usage record reports window use. */
+long agent_session_context_estimate(const struct agent_session *session);
+
+/* Whether any usage record that model metadata can price or bound reports input or output
+ * tokens: live records, inherited or not, and retired records of this session's own turns. */
+int agent_session_has_reported_usage(const struct agent_session *session);
 
 struct turn;
 
@@ -160,5 +218,8 @@ void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
  * shutdown destroys, and no completion is announced into an unrelated conversation. */
 void agent_finalize_tasks(struct agent_session *session, struct transcript_log *tlog,
                           struct session_log *slog);
+
+/* The latched interrupt requests as a stop signal. */
+enum agent_signal agent_interrupt_signal(void);
 
 #endif /* HAX_AGENT_CORE_H */

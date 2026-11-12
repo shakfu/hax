@@ -26,9 +26,11 @@ static int list_models_from_server(struct loopback *server, int n_responses, cha
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
     setenv("HAX_ANTHROPIC_BASE_URL", base_url, 1);
 
+    /* Not provider_construct: its metadata warm-up would spend a scripted reply on a listing
+     * probe. */
     const struct provider_def *factory = provider_find("anthropic-compatible");
     EXPECT(factory != NULL);
-    struct provider *provider = factory ? provider_construct(factory) : NULL;
+    struct provider *provider = factory ? http_provider_new(factory) : NULL;
     EXPECT(provider != NULL);
 
     size_t n_models = 0;
@@ -219,9 +221,6 @@ static void test_first_party_pins_endpoint(void)
 int main(void)
 {
     setenv("HAX_ANTHROPIC_API_KEY", "test-key", 1);
-
-    /* Keep constructor probes from racing the model-list fixture for its canned response. */
-    unsetenv("HAX_MODEL");
     test_first_party_pins_endpoint();
     test_max_tokens_uses_model_limit();
     test_background_probe_publishes_metadata();

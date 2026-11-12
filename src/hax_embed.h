@@ -66,6 +66,6 @@ struct hax_abi {
 /* Borrowed; static storage. */
 const struct hax_abi *hax_abi(void);
 
-#define HAX_ABI_VERSION 1u
+#define HAX_ABI_VERSION 2u
 
 #endif /* HAX_HAX_EMBED_H */

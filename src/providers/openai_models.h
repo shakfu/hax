@@ -12,4 +12,8 @@
 int openai_list_models(struct provider *provider, struct model_info **models, size_t *n_models,
                        char **error, http_tick_cb tick, void *tick_user);
 
+/* Probe through the full listing: the def's parse_model hook, if any, refines `model`'s entry, and
+ * the listing's ids serve /model completion. */
+int openai_probe_model(struct provider *provider, const char *model, struct model_probe *probe);
+
 #endif /* HAX_PROVIDERS_OPENAI_MODELS_H */

@@ -5,21 +5,38 @@
 #include <stddef.h>
 #include <termios.h>
 
+#include "terminal/live_region.h"
+
 /* Shared editor state and terminal-independent operations. */
 
-/* `match` performs no I/O and returns the replacement span [start, end).
- * `pick` runs in cooked mode with the edit area erased and owns the terminal until it returns.
- * It returns a malloc'd replacement, or NULL to leave the buffer unchanged. */
-struct input_modal_completer {
+/* `match` performs no I/O and returns the replacement span [start, end). `complete` receives the
+ * span's text and returns a malloc'd replacement, or NULL to leave the buffer unchanged. A modal
+ * completer's `complete` runs in cooked mode with the edit area erased and owns the terminal until
+ * it returns; an inline completer's must not touch the tty. The optional `candidates` returns
+ * malloc'd ghost text listing what the token could become, or NULL. */
+struct input_completer {
     int (*match)(const char *buf, size_t len, size_t cursor, size_t *start, size_t *end,
                  void *user);
-    char *(*pick)(const char *token, void *user);
+    char *(*complete)(const char *token, void *user);
+    char *(*candidates)(const char *token, void *user);
+    int modal;
     void *user;
 };
+
+/* Tab tries completers in registration order and stops at the first whose `match` succeeds. */
+#define INPUT_COMPLETERS_MAX 4
 
 /* Slots for application-bound modal control keys (input_bind_modal_key).
  * Small on purpose: these are top-level views, not a general keymap. */
 #define INPUT_MODAL_KEYS_MAX 4
+
+/* A hint waits until typing pauses, so one that the next keystroke would remove never flashes.
+ * Once shown, it follows edits without waiting again until no hint applies. */
+enum input_hint_state {
+    INPUT_HINT_NONE,
+    INPUT_HINT_PENDING,
+    INPUT_HINT_SHOWN,
+};
 
 struct input {
     /* current edit buffer (NUL-terminated, may contain '\n') */
@@ -37,16 +54,14 @@ struct input {
      * same line must still reach the file. */
     int hist_newest_unpersisted;
 
-    /* Screen-relative state for repainting the visible edit area. */
-    int painted_cursor_row;
-    int painted_rows;
-    int previous_paint_clipped;
+    /* The visible edit area: clip indicators included, and the cursor resting at the caret. */
+    struct live_region region;
     int window_top;
-    int top_indicator_width;
-    int hint_painted; /* the last paint drew the exit hint */
+    int ghost_painted; /* the last paint drew ghost text after the buffer */
 
     int continuation_at_column_zero;
-    const char *prompt; /* borrowed for the duration of input_readline */
+    const char *prompt;   /* borrowed for the duration of input_readline */
+    int terminal_columns; /* 0 when unknown */
     int display_columns;
     int terminal_rows; /* 0 disables viewport clipping */
 
@@ -63,8 +78,14 @@ struct input {
         void *user;
     } modal_keys[INPUT_MODAL_KEYS_MAX];
 
-    /* Borrowed; NULL makes Tab insert a literal tab. */
-    const struct input_modal_completer *completer;
+    /* Borrowed; filled in order, NULL marks an unused slot. */
+    const struct input_completer *completers[INPUT_COMPLETERS_MAX];
+    int last_key_was_tab;
+    char *candidates; /* owned; cleared by the next key */
+
+    char *(*hint_fn)(const char *buf, void *user);
+    void *hint_user;
+    enum input_hint_state hint_state;
 
     /* Returns malloc'd insertion text. Empty bracketed pastes also invoke this hook. */
     char *(*paste_hook)(void *user);
@@ -74,8 +95,8 @@ struct input {
     char *(*paste_filter)(const char *text, void *user);
     void *paste_filter_user;
 
-    /* Enter on an empty buffer submits when set. */
-    int empty_submit;
+    /* Owned; non-NULL lets Enter submit an empty buffer, which shows it as ghost text. */
+    char *empty_placeholder;
 
     /* Ctrl-C on an empty buffer arms this; a consecutive Ctrl-C quits and
      * any other key disarms. */
@@ -105,6 +126,22 @@ void input_core_commit_paste(struct input *in, const char *body, size_t len);
  * the cursor right after the inserted text. No-op when the span is out
  * of range. */
 void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text);
+
+/* Trim the buffer as a submitted prompt (trim_prompt) and return whether it may be submitted:
+ * text remains, or an empty-submit placeholder gives an empty send a meaning. The trim stands
+ * either way, so refusing whitespace-only text leaves the buffer empty. */
+int input_core_submit_ready(struct input *in);
+
+/* Replace the buffer with `len` bytes an external editor wrote back. Embedded NULs become spaces
+ * to keep the buffer a C string, and the text is trimmed so the cursor lands after it rather than
+ * past the final newline most editors append. */
+void input_core_load_edited(struct input *in, const char *text, size_t len);
+
+/* Offset of the word that ends before `end` in `text`, after skipping the separators just before
+ * `end`. Words are whitespace-delimited for Ctrl-W and alphanumeric, like readline's Meta word
+ * operations, for the alnum variant. `text` may be NULL when `end` is 0. */
+size_t input_core_word_start(const char *text, size_t end);
+size_t input_core_alnum_word_start(const char *text, size_t end);
 
 /* ---- motions / edits (operate on the buffer at in->cursor) ---- */
 size_t input_core_line_start(const struct input *in);
@@ -140,6 +177,16 @@ char *input_core_history_decode(const char *encoded, size_t len);
 
 /* Older entries are evicted past this cap. */
 #define INPUT_CORE_HISTORY_MAX 1000
+
+/* Recompute hint_state for the current buffer and cursor: NONE when no hint applies, otherwise
+ * PENDING unless a hint is already shown. Revealing a pending hint is the caller's decision. */
+void input_core_update_hint(struct input *in);
+
+/* Return the allocated dim text drawn after the buffer, or NULL: the exit confirmation, then
+ * completion candidates, then the empty-buffer placeholder, then a shown hint. It appears only
+ * with the cursor at the buffer end, which lets the painter erase it from the cursor, and it is
+ * sanitized because candidates and hints may echo untrusted text. */
+char *input_core_ghost_text(const struct input *in);
 
 /* ---- layout / utf-8 ---- */
 

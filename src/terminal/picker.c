@@ -15,10 +15,12 @@
 #include "system/locale.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
+#include "terminal/live_region.h"
 #include "terminal/picker_core.h"
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
+#include "text/display_safe.h"
 #include "text/utf8.h"
 #include "text/width.h"
 
@@ -31,19 +33,12 @@
 
 #define PICKER_TITLE_LINES  3
 #define PICKER_FOOTER_LINES 4
-/* Title/footer separators, search row, and list separator. */
-#define PICKER_FRAME_FIXED_ROWS 4
-#define PICKER_FRAME_ROWS_MAX                                                                      \
-    (PICKER_TITLE_LINES + PICKER_MAX_ROWS + PICKER_FOOTER_LINES + PICKER_FRAME_FIXED_ROWS)
 
 struct picker {
     struct picker_core core;
     int title_lines;
     int footer_lines;
-    int painted;
-    int previous_row_count;
-    /* A terminal resize can reflow each previously painted row. */
-    int previous_row_widths[PICKER_FRAME_ROWS_MAX];
+    struct live_region region;
     int terminal_cols;
     int terminal_rows;
     struct termios saved_termios;
@@ -200,50 +195,6 @@ static int footer_text_width(int terminal_cols)
     return w < 8 ? 8 : w;
 }
 
-/* Trusted picker ANSI sequences have zero width. Final clipping keeps each logical row on one
- * physical row; the returned width supports cursor recovery after terminal reflow. */
-static int append_clipped_line(struct buf *output, const char *line, size_t line_len,
-                               int terminal_cols, int use_utf8)
-{
-    int cells = 0;
-    size_t offset = 0;
-    while (offset < line_len) {
-        if ((unsigned char)line[offset] == 0x1b) {
-            size_t escape_end = offset + 1;
-            if (escape_end < line_len && line[escape_end] == '[') {
-                escape_end++;
-                while (escape_end < line_len &&
-                       !(line[escape_end] >= 0x40 && line[escape_end] <= 0x7e))
-                    escape_end++;
-                if (escape_end < line_len)
-                    escape_end++;
-            }
-            buf_append(output, line + offset, escape_end - offset);
-            offset = escape_end;
-            continue;
-        }
-
-        size_t bytes;
-        int width = utf8_codepoint_cells(line, line_len, offset, &bytes);
-        int codepoint_cells = width < 0 ? 1 : width;
-        if (cells + codepoint_cells > terminal_cols) {
-            if (cells < terminal_cols) {
-                buf_append_str(output, use_utf8 ? "\xe2\x80\xa6" : ".");
-                cells++;
-            }
-            buf_append_str(output, ANSI_RESET);
-            return cells;
-        }
-        if (width < 0)
-            buf_append(output, "?", 1);
-        else
-            buf_append(output, line + offset, bytes ? bytes : 1);
-        cells += codepoint_cells;
-        offset += bytes ? bytes : 1;
-    }
-    return cells;
-}
-
 static void render_search(struct buf *output, const struct picker *picker, int terminal_cols,
                           int use_utf8)
 {
@@ -349,20 +300,21 @@ static void render_row(struct buf *output, const struct picker *picker, size_t m
 }
 
 struct frame {
+    struct live_region *region;
     struct buf output;
     struct buf row;
-    int row_count;
-    int row_widths[PICKER_FRAME_ROWS_MAX];
+    struct buf clipped_row;
     int width;
     int use_utf8;
 };
 
-static void frame_init(struct frame *frame, int terminal_cols, int use_utf8)
+static void frame_init(struct frame *frame, struct live_region *region, int terminal_cols,
+                       int use_utf8)
 {
+    frame->region = region;
     buf_init(&frame->output);
     buf_init(&frame->row);
-    frame->row_count = 0;
-    memset(frame->row_widths, 0, sizeof(frame->row_widths));
+    buf_init(&frame->clipped_row);
     frame->width = terminal_cols;
     frame->use_utf8 = use_utf8;
 }
@@ -370,14 +322,12 @@ static void frame_init(struct frame *frame, int terminal_cols, int use_utf8)
 /* Emit one clipped physical line and reset the row buffer. */
 static void frame_emit(struct frame *frame)
 {
-    if (frame->row_count)
-        buf_append_str(&frame->output, "\r\n");
-    int cells = append_clipped_line(&frame->output, frame->row.data ? frame->row.data : "",
-                                    frame->row.len, frame->width, frame->use_utf8);
-    if (frame->row_count < PICKER_FRAME_ROWS_MAX)
-        frame->row_widths[frame->row_count] = cells;
-    frame->row_count++;
-    buf_append_str(&frame->output, ANSI_ERASE_LINE);
+    buf_reset(&frame->clipped_row);
+    int cells = clip_styled_row(&frame->clipped_row, frame->row.data ? frame->row.data : "",
+                                frame->row.len, frame->width, frame->use_utf8);
+    live_region_add_row(frame->region, &frame->output,
+                        frame->clipped_row.data ? frame->clipped_row.data : "",
+                        frame->clipped_row.len, cells);
     buf_reset(&frame->row);
 }
 
@@ -385,6 +335,7 @@ static void frame_free(struct frame *frame)
 {
     buf_free(&frame->output);
     buf_free(&frame->row);
+    buf_free(&frame->clipped_row);
 }
 
 static void render_title(struct frame *frame, const char *title, int line_count)
@@ -397,7 +348,9 @@ static void render_title(struct frame *frame, const char *title, int line_count)
         } else {
             size_t separator_bytes;
             size_t line_bytes = wrap_row_bytes(remaining, (size_t)frame->width, &separator_bytes);
-            picker_core_append_sanitized(&frame->row, remaining, line_bytes);
+            char *safe_line = sanitize_for_display(remaining, line_bytes);
+            buf_append_str(&frame->row, safe_line);
+            free(safe_line);
             remaining += line_bytes + separator_bytes;
         }
         buf_append_str(&frame->row, ANSI_BOLD_OFF);
@@ -439,7 +392,9 @@ static void render_footer(struct frame *frame, const struct picker *picker,
             } else {
                 size_t separator_bytes;
                 size_t line_bytes = wrap_row_bytes(remaining, (size_t)text_cells, &separator_bytes);
-                picker_core_append_sanitized(&frame->row, remaining, line_bytes);
+                char *safe_line = sanitize_for_display(remaining, line_bytes);
+                buf_append_str(&frame->row, safe_line);
+                free(safe_line);
                 remaining += line_bytes + separator_bytes;
             }
             buf_append_str(&frame->row, ANSI_BOLD_OFF);
@@ -488,23 +443,6 @@ static void picker_layout(struct picker *picker, int terminal_cols, int terminal
     picker->core.viewport_rows = viewport_rows;
 }
 
-/* A width change can reflow each old logical row across multiple physical rows. This calculation
- * assumes xterm-style reflow; terminals that truncate on resize may leave stale content. */
-static int reflow_climb(const struct picker *picker, int terminal_cols, int terminal_rows)
-{
-    if (!picker->painted || picker->previous_row_count <= 0 || terminal_cols <= 0)
-        return 0;
-
-    int recorded_rows = picker->previous_row_count < PICKER_FRAME_ROWS_MAX
-                            ? picker->previous_row_count
-                            : PICKER_FRAME_ROWS_MAX;
-    int climb = reflow_physical_rows(picker->previous_row_widths, recorded_rows, terminal_cols) - 1;
-    /* Climbing beyond the screen top would start the repaint on the wrong row. */
-    if (terminal_rows > 0 && climb > terminal_rows - 1)
-        climb = terminal_rows - 1;
-    return climb < 0 ? 0 : climb;
-}
-
 static void paint(struct picker *picker)
 {
     int terminal_cols, terminal_rows;
@@ -515,19 +453,11 @@ static void paint(struct picker *picker)
     }
 
     struct frame frame;
-    frame_init(&frame, picker_width(terminal_cols), locale_have_utf8());
+    frame_init(&frame, &picker->region, picker_width(terminal_cols), locale_have_utf8());
 
     /* Redraw before erasing stale tails for terminals that ignore synchronized output. */
     buf_append_str(&frame.output, ANSI_SYNC_BEGIN);
-
-    int climb = reflow_climb(picker, terminal_cols, terminal_rows);
-    if (climb > 0) {
-        char cursor_up[16];
-        snprintf(cursor_up, sizeof cursor_up, ANSI_CSI "%dA", climb);
-        buf_append_str(&frame.output, cursor_up);
-    }
-    if (picker->painted)
-        buf_append(&frame.output, "\r", 1);
+    live_region_rewind(&picker->region, &frame.output, terminal_cols);
 
     if (picker->title_lines)
         render_title(&frame, picker->core.options->title, picker->title_lines);
@@ -555,15 +485,12 @@ static void paint(struct picker *picker)
 
     render_footer(&frame, picker, selected_label_clipped);
 
-    buf_append_str(&frame.output, ANSI_ERASE_BELOW);
+    /* The cursor is hidden; resting it on column 0 keeps a rewrapped last row out of the climb. */
+    live_region_end_frame(&picker->region, &frame.output, picker->region.row_count - 1, 0);
     buf_append_str(&frame.output, ANSI_SYNC_END);
 
     fwrite(frame.output.data ? frame.output.data : "", 1, frame.output.len, stdout);
     fflush(stdout);
-
-    memcpy(picker->previous_row_widths, frame.row_widths, sizeof(picker->previous_row_widths));
-    picker->previous_row_count = frame.row_count;
-    picker->painted = 1;
     frame_free(&frame);
 }
 
@@ -573,7 +500,7 @@ enum picker_input_result {
     PICKER_INPUT_CANCEL,
 };
 
-static void apply_navigation_action(struct picker_core *core, enum input_action action)
+static void apply_escape_action(struct picker_core *core, enum input_action action)
 {
     switch (action) {
     case INPUT_ACTION_HISTORY_PREV:
@@ -594,6 +521,11 @@ static void apply_navigation_action(struct picker_core *core, enum input_action 
     case INPUT_ACTION_PAGE_DOWN:
         picker_core_page_selection(core, PICKER_DIRECTION_NEXT);
         break;
+    case INPUT_ACTION_KILL_WORD_BACK_ALNUM: {
+        size_t word_start = input_core_alnum_word_start(core->query.data, core->query.len);
+        picker_core_truncate_query(core, word_start);
+        break;
+    }
     default:
         break;
     }
@@ -603,27 +535,28 @@ static enum picker_input_result process_input_byte(struct picker_core *core, uns
 {
     if (byte == 0x03 || byte == 0x07) /* Ctrl-C / Ctrl-G */
         return PICKER_INPUT_CANCEL;
-    if (byte == 0x0d || byte == 0x0a) /* Enter / LF */
+    /* Raw mode clears ICRNL, so Enter arrives as CR and LF is Ctrl-J, which moves down as in
+     * fzf. */
+    if (byte == 0x0d)
         return core->match_count ? PICKER_INPUT_ACCEPT : PICKER_INPUT_CONTINUE;
     if (byte == 0x7f || byte == 0x08) { /* Backspace */
-        if (core->query.len) {
-            core->query.len = utf8_prev(core->query.data, core->query.len);
-            core->query.data[core->query.len] = '\0';
-            picker_core_update_matches(core);
-        }
+        picker_core_truncate_query(core, utf8_prev(core->query.data, core->query.len));
         return PICKER_INPUT_CONTINUE;
     }
     if (byte == 0x15) { /* Ctrl-U */
-        if (core->query.len) {
-            core->query.len = 0;
-            core->query.data[0] = '\0';
-            picker_core_update_matches(core);
-        }
+        picker_core_truncate_query(core, 0);
         return PICKER_INPUT_CONTINUE;
     }
-    if (byte == 0x0e || byte == 0x10) { /* Ctrl-N / Ctrl-P */
-        picker_core_move_selection(core, byte == 0x0e ? PICKER_DIRECTION_NEXT
-                                                      : PICKER_DIRECTION_PREVIOUS);
+    if (byte == 0x17) { /* Ctrl-W */
+        picker_core_truncate_query(core, input_core_word_start(core->query.data, core->query.len));
+        return PICKER_INPUT_CONTINUE;
+    }
+    if (byte == 0x0e || byte == 0x0a) { /* Ctrl-N / Ctrl-J */
+        picker_core_move_selection(core, PICKER_DIRECTION_NEXT);
+        return PICKER_INPUT_CONTINUE;
+    }
+    if (byte == 0x10 || byte == 0x0b) { /* Ctrl-P / Ctrl-K */
+        picker_core_move_selection(core, PICKER_DIRECTION_PREVIOUS);
         return PICKER_INPUT_CONTINUE;
     }
     if (byte == 0x1b) {
@@ -632,7 +565,7 @@ static enum picker_input_result process_input_byte(struct picker_core *core, uns
             return PICKER_INPUT_CANCEL;
         struct escape_reader reader = {.pending_byte = next_byte};
         enum input_action action = input_core_decode_escape(read_escape_byte, &reader);
-        apply_navigation_action(core, action);
+        apply_escape_action(core, action);
         return PICKER_INPUT_CONTINUE;
     }
     if (byte < 0x20)
@@ -704,21 +637,19 @@ long picker_run(const struct picker_opts *options)
         paint(&picker);
     }
 
-    /* Erase the picker's painted area; leave the cursor at column 0 of a
-     * clean line for the caller's next output, and restore the cursor. */
-    if (picker.painted && picker.previous_row_count > 0) {
-        int current_terminal_cols, current_terminal_rows;
-        get_terminal_size(&current_terminal_cols, &current_terminal_rows);
-        int climb = reflow_climb(&picker, current_terminal_cols, current_terminal_rows);
-        fputs(ANSI_SYNC_BEGIN, stdout);
-        if (climb > 0)
-            printf(ANSI_CSI "%dA", climb);
-        fputs("\r" ANSI_ERASE_BELOW ANSI_SYNC_END, stdout);
-    }
+    /* Leave the cursor at column 0 of a clean line for the caller's next output. */
+    int terminal_cols_now, terminal_rows_now;
+    get_terminal_size(&terminal_cols_now, &terminal_rows_now);
+    struct buf erase;
+    buf_init(&erase);
+    live_region_erase(&picker.region, &erase, terminal_cols_now);
+    fwrite(erase.data ? erase.data : "", 1, erase.len, stdout);
+    buf_free(&erase);
     fputs(ANSI_CURSOR_SHOW, stdout);
     fflush(stdout);
     disable_raw_mode(&picker);
 
+    live_region_free(&picker.region);
     free(picker.core.matches);
     buf_free(&picker.core.query);
     return result;

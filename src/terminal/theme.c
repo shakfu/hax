@@ -38,6 +38,7 @@ struct theme_preset {
 
 /* Preserve identity by hue when retuning: warm accent marks the user, cool chrome marks the app,
  * and the stance and Markdown roles share a separate model tint. */
+
 /* clang-format off */
 static const struct theme_preset THEME_PRESETS[] = {
     {
@@ -84,12 +85,12 @@ static const struct theme_preset THEME_PRESETS[] = {
         .roles = {
             [THEME_ACCENT]      = COLOR_STYLE(FG256(130)),
             [THEME_CHROME]      = COLOR_STYLE(FG256(30)),
-            [THEME_CHROME_DIM]  = COLOR_STYLE(FG256(37)),
+            [THEME_CHROME_DIM]  = COLOR_STYLE(FG256(66)),
             [THEME_STANCE]      = COLOR_STYLE(FG256(31)),
             [THEME_CODE_INLINE] = COLOR_STYLE(FG256(31)),
-            [THEME_CODE_BLOCK]  = COLOR_STYLE(FG256(38)),
+            [THEME_CODE_BLOCK]  = COLOR_STYLE(FG256(31)),
             [THEME_HEADING]     = ROLE_STYLE(ANSI_BOLD FG256(31), ANSI_BOLD_OFF ANSI_FG_DEFAULT),
-            [THEME_LINK]        = ROLE_STYLE(LINK256(38), LINK256_OFF),
+            [THEME_LINK]        = ROLE_STYLE(LINK256(31), LINK256_OFF),
             [THEME_ADD]         = COLOR_STYLE(FG256(28)),
             [THEME_REMOVE]      = COLOR_STYLE(FG256(124)),
             [THEME_OK]          = COLOR_STYLE(FG256(28)),
@@ -115,6 +116,7 @@ struct tint {
 };
 
 /* Keep tints away from saturated status colors, the gray axis, and the warm user accent. */
+
 /* clang-format off */
 static const struct tint TINTS[] = {
     {.name = "teal"},
@@ -130,26 +132,26 @@ static const struct tint TINTS[] = {
         .light_opens = {
             [THEME_STANCE]      = FG256(97),
             [THEME_CODE_INLINE] = FG256(97),
-            [THEME_CODE_BLOCK]  = FG256(140),
+            [THEME_CODE_BLOCK]  = FG256(97),
             [THEME_HEADING]     = ANSI_BOLD FG256(97),
-            [THEME_LINK]        = LINK256(140),
+            [THEME_LINK]        = LINK256(97),
         },
     },
     {
         .name = "rose",
         .dark_opens = {
-            [THEME_STANCE]      = FG256(168),
-            [THEME_CODE_INLINE] = FG256(168),
-            [THEME_CODE_BLOCK]  = FG256(132),
-            [THEME_HEADING]     = ANSI_BOLD FG256(168),
-            [THEME_LINK]        = LINK256(132),
+            [THEME_STANCE]      = FG256(211),
+            [THEME_CODE_INLINE] = FG256(211),
+            [THEME_CODE_BLOCK]  = FG256(168),
+            [THEME_HEADING]     = ANSI_BOLD FG256(211),
+            [THEME_LINK]        = LINK256(168),
         },
         .light_opens = {
             [THEME_STANCE]      = FG256(132),
             [THEME_CODE_INLINE] = FG256(132),
-            [THEME_CODE_BLOCK]  = FG256(168),
+            [THEME_CODE_BLOCK]  = FG256(132),
             [THEME_HEADING]     = ANSI_BOLD FG256(132),
-            [THEME_LINK]        = LINK256(168),
+            [THEME_LINK]        = LINK256(132),
         },
     },
     {
@@ -164,9 +166,9 @@ static const struct tint TINTS[] = {
         .light_opens = {
             [THEME_STANCE]      = FG256(71),
             [THEME_CODE_INLINE] = FG256(71),
-            [THEME_CODE_BLOCK]  = FG256(114),
+            [THEME_CODE_BLOCK]  = FG256(71),
             [THEME_HEADING]     = ANSI_BOLD FG256(71),
-            [THEME_LINK]        = LINK256(114),
+            [THEME_LINK]        = LINK256(71),
         },
     },
 };

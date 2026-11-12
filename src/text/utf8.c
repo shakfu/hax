@@ -24,11 +24,21 @@ size_t utf8_sequence_length(unsigned char byte)
 
 int utf8_sequence_is_valid(const char *bytes, size_t length)
 {
+    uint32_t codepoint;
+    return utf8_decode_codepoint(bytes, length, &codepoint);
+}
+
+int utf8_decode_codepoint(const char *bytes, size_t length, uint32_t *out)
+{
     const unsigned char *input = (const unsigned char *)bytes;
     if (length < 1 || length > 4 || utf8_sequence_length(input[0]) != length)
         return 0;
-    if (length == 1)
-        return input[0] < 0x80;
+    if (length == 1) {
+        if (input[0] >= 0x80)
+            return 0;
+        *out = input[0];
+        return 1;
+    }
 
     uint32_t codepoint;
     if (length == 2)
@@ -47,9 +57,10 @@ int utf8_sequence_is_valid(const char *bytes, size_t length)
     static const uint32_t minimum_codepoint[] = {0, 0, 0x80, 0x800, 0x10000};
     if (codepoint < minimum_codepoint[length])
         return 0;
-    if (codepoint >= 0xD800 && codepoint <= 0xDFFF)
+    if ((codepoint >= 0xD800 && codepoint <= 0xDFFF) || codepoint > 0x10FFFF)
         return 0;
-    return codepoint <= 0x10FFFF;
+    *out = codepoint;
+    return 1;
 }
 
 int utf8_is_valid(const char *bytes, size_t length)
@@ -64,6 +75,33 @@ int utf8_is_valid(const char *bytes, size_t length)
     return 1;
 }
 
+/* Not utf8_encode: libjansson.a exports that name, so the static release link would clash. */
+size_t utf8_encode_codepoint(uint32_t codepoint, char out[4])
+{
+    if ((codepoint >= 0xD800 && codepoint <= 0xDFFF) || codepoint > 0x10FFFF)
+        return 0;
+    if (codepoint < 0x80) {
+        out[0] = (char)codepoint;
+        return 1;
+    }
+    if (codepoint < 0x800) {
+        out[0] = (char)(0xC0 | codepoint >> 6);
+        out[1] = (char)(0x80 | (codepoint & 0x3F));
+        return 2;
+    }
+    if (codepoint < 0x10000) {
+        out[0] = (char)(0xE0 | codepoint >> 12);
+        out[1] = (char)(0x80 | (codepoint >> 6 & 0x3F));
+        out[2] = (char)(0x80 | (codepoint & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | codepoint >> 18);
+    out[1] = (char)(0x80 | (codepoint >> 12 & 0x3F));
+    out[2] = (char)(0x80 | (codepoint >> 6 & 0x3F));
+    out[3] = (char)(0x80 | (codepoint & 0x3F));
+    return 4;
+}
+
 size_t utf8_next(const char *bytes, size_t length, size_t offset)
 {
     if (offset >= length)
@@ -73,6 +111,13 @@ size_t utf8_next(const char *bytes, size_t length, size_t offset)
     if (sequence_len > length - offset || !utf8_sequence_is_valid(bytes + offset, sequence_len))
         return offset + 1;
     return offset + sequence_len;
+}
+
+size_t utf8_char_start(const char *bytes, size_t offset)
+{
+    while (offset > 0 && byte_is_continuation((unsigned char)bytes[offset]))
+        offset--;
+    return offset;
 }
 
 size_t utf8_prev(const char *bytes, size_t offset)

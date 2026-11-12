@@ -16,4 +16,14 @@ enum slash_result {
  * renderer must be live for consumed input. */
 enum slash_result slash_dispatch(const char *line, struct agent_state *state);
 
+/* Return the malloc'd argument placeholder for the prompt `line` while its cursor sits at the end
+ * of a complete command name with no argument yet, or NULL. */
+char *slash_hint(const char *line);
+
+/* Set up Tab completion of the command name at the start of the prompt and of argument values for
+ * commands that enumerate them, some from the live selection in `state`. The completer borrows
+ * `state`, which must outlive it. */
+struct input_completer;
+void slash_completer_init(struct input_completer *completer, struct agent_state *state);
+
 #endif /* HAX_SLASH_H */

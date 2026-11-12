@@ -27,6 +27,7 @@ struct turn {
 
     struct buf reasoning;
     int has_reasoning;
+    const char *reasoning_field; /* static storage; NULL until a delta names one */
 
     struct pending_tool_call *pending_calls;
     size_t n_pending_calls;
@@ -53,6 +54,10 @@ void turn_discard_reasoning(struct turn *turn);
  * calls. Provider-error repair keeps only what the user saw — replaying truncated reasoning or
  * calls that never ran misleads the model on the retry. */
 void turn_keep_text(struct turn *turn);
+
+/* True once the current attempt has streamed assistant text, reasoning, or a tool call, open or
+ * assembled. A retry discards the dead attempt's content. */
+int turn_has_content(const struct turn *turn);
 
 /* Transfer the assembled item vector to the caller. `out_count` may be NULL. */
 struct item *turn_take_items(struct turn *turn, size_t *out_count);

@@ -13,11 +13,11 @@
 #include "xalloc.h"
 #include "render/disp.h"
 #include "render/render_ctx.h"
-#include "render/spinner.h"
 #include "render/tool_render.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
 #include "terminal/width.h"
+#include "text/display_safe.h"
 #include "text/width.h"
 
 #define HEADER_EXTRA_MAX_CELLS 20
@@ -194,13 +194,11 @@ static void write_tool_header(struct disp *disp, const struct item *call)
     disp_flush(disp);
 }
 
-/* Read headers remain open so later reads can coalesce on the same row. Returns the cells the
- * row occupies. */
-static int write_collapsed_header(struct disp *disp, const struct item *call,
-                                  const struct header_text *text, int row_cells)
+/* Read headers remain open so later reads can coalesce on the same row. */
+static void write_collapsed_header(struct disp *disp, const struct item *call,
+                                   const struct header_text *text, int row_cells)
 {
     const char *name = tool_name(call);
-    int cells = tool_tag_cells(name);
     char *layout = header_text_layout(text, row_cells, row_cells, 1);
 
     disp_write_ansi(disp, theme_open(THEME_CHROME_DIM));
@@ -210,14 +208,10 @@ static int write_collapsed_header(struct disp *disp, const struct item *call,
     disp_write_ansi(disp, ANSI_DIM);
     disp_putc(disp, ' ');
     disp_write(disp, layout, strlen(layout));
-    cells += (int)display_cells(layout);
     disp_write_ansi(disp, ANSI_RESET);
     free(layout);
     write_header_extra(disp, text);
-    cells += header_text_extra_cells(text);
     disp_commit_newlines(disp);
-    disp_flush(disp);
-    return cells;
 }
 
 /* Cells a call appended to an open row would occupy. */
@@ -226,7 +220,7 @@ static int coalesced_cells(const struct header_text *text)
     return 2 + (int)display_cells(text->argument) + header_text_extra_cells(text);
 }
 
-static int append_collapsed_argument(struct disp *disp, const struct header_text *text)
+static void append_collapsed_argument(struct disp *disp, const struct header_text *text)
 {
     disp_write_ansi(disp, ANSI_DIM);
     disp_write(disp, ", ", 2);
@@ -235,8 +229,6 @@ static int append_collapsed_argument(struct disp *disp, const struct header_text
     disp_write_ansi(disp, ANSI_RESET);
     write_header_extra(disp, text);
     disp_commit_newlines(disp);
-    disp_flush(disp);
-    return coalesced_cells(text);
 }
 
 void render_tool_call_header(struct render_ctx *render, const struct item *call)
@@ -301,22 +293,24 @@ static void write_cluster_line(struct render_ctx *render, const struct item *cal
     int row_cells = row_budget(terminal_width - tool_tag_cells(tool_name(call)) - 1);
     struct header_text text = header_text_resolve(tool, call, 1, row_cells);
     if (can_coalesce) {
-        if (render->cluster.line_cells + coalesced_cells(&text) > terminal_width - 1) {
+        if ((int)disp->column + coalesced_cells(&text) > terminal_width - 1) {
             close_collapsed_line(disp);
-            render->cluster.line_cells = write_collapsed_header(disp, call, &text, row_cells);
+            write_collapsed_header(disp, call, &text, row_cells);
         } else {
-            render->cluster.line_cells += append_collapsed_argument(disp, &text);
+            append_collapsed_argument(disp, &text);
         }
     } else {
         if (render->cluster.line_open)
             close_collapsed_line(disp);
-        render->cluster.line_cells = write_collapsed_header(disp, call, &text, row_cells);
+        write_collapsed_header(disp, call, &text, row_cells);
         if (!is_read)
             close_collapsed_line(disp);
     }
     header_text_free(&text);
     render->cluster.line_open = is_read;
     render->cluster.last_tool = tool ? tool->def.name : NULL;
+    /* One flush for the whole row change, so the status row returns below it in one frame. */
+    disp_flush(disp);
 }
 
 void render_collapsed_tool_call(struct render_ctx *render, const struct item *call)
@@ -329,26 +323,11 @@ static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
                                                 const struct bash_env_selection *selection)
 {
     const struct item *call = &prepared->effective;
-    struct spinner *spinner = render->spinner;
-    int is_read = strcmp(call->tool_name, "read") == 0;
-
-    /* The swap keeps the indicator continuous: the erase that restores the cursor to an open
-     * read line, the appended cluster text, and the reparked spinner land as one frame. */
-    spinner_swap_begin(spinner);
     write_cluster_line(render, call);
-
-    /* Preserve the open line's cursor column for the next read. */
-    char label[64];
-    char request_key[32];
-    snprintf(label, sizeof(label), "[%s] running...", call->tool_name);
-    snprintf(request_key, sizeof(request_key), "run:%s", call->tool_name);
-    spinner_request_label(spinner, request_key, label);
-    spinner_park(spinner, is_read ? render->cluster.line_cells : 0);
-    spinner_swap_end(spinner);
+    render_tool_running(render, call->tool_name);
 
     struct tool_run_ctx run_ctx = {.image_input = image_input, .env_selection = selection};
     char *output = agent_tool_call_run(prepared, &run_ctx);
-    spinner_request_label(spinner, "working", "working...");
 
     struct item result = agent_tool_result_make(call, output, &run_ctx);
     free(output);
@@ -358,9 +337,6 @@ static struct item dispatch_tool_call_collapsed(struct render_ctx *render,
 void render_tool_solo_marker(struct render_ctx *render, const char *text)
 {
     struct disp *disp = &render->disp;
-    /* Replacing the spinner (or a live placeholder row) with the marker is a swap, so it
-     * cannot render as blank-and-repaint. */
-    spinner_swap_begin(render->spinner);
     tool_render_write_marker_gutter(disp);
     disp_write_ansi(disp, ANSI_DIM);
     int available_cells = display_width() - TOOL_RENDER_GUTTER_COLS;
@@ -373,7 +349,6 @@ void render_tool_solo_marker(struct render_ctx *render, const char *text)
     free(line);
     disp_write_ansi(disp, ANSI_RESET);
     disp_putc(disp, '\n');
-    spinner_swap_end(render->spinner);
     disp_flush(disp);
 }
 
@@ -386,19 +361,14 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
     const struct item *call = &prepared->effective;
     const struct tool *tool = prepared->tool;
     struct disp *disp = &render->disp;
-    struct spinner *spinner = render->spinner;
     write_tool_header(disp, call);
-    /* A deferred "running" label could surface after the tool-status row releases the spinner. */
-    spinner_set_label(spinner, "working", "working...");
+    render_tool_running(render, call->tool_name);
 
     /* Diff mode is selected from the completed output so errors remain plain previews. */
     enum tool_render_mode mode =
         preview_mode == TOOL_PREVIEW_HEAD_TAIL ? TOOL_RENDER_HEAD_TAIL : TOOL_RENDER_HEAD;
     struct tool_render renderer;
-    tool_render_init(&renderer, disp, spinner, mode);
-    /* An empty live row instead of a parked "working..." label: the indicator sits in the block
-     * and the first output line replaces it in place, so a fast tool never blinks a label. */
-    tool_render_begin_live(&renderer);
+    tool_render_init(&renderer, disp, render->footer, mode);
     struct tool_run_ctx run_ctx = {
         .display = tool_render_emit,
         .display_data = &renderer,
@@ -421,7 +391,6 @@ static struct item dispatch_tool_call_verbose(struct render_ctx *render,
         }
     }
     tool_render_finalize(&renderer);
-    spinner_hide(spinner);
 
     /* Use actual rendered rows: control stripping can erase otherwise non-empty display bytes. */
     if (tool_has_diff_output(tool) && renderer.display_was_called && renderer.rows_emitted == 0 &&
@@ -442,7 +411,7 @@ struct item dispatch_tool_call(struct render_ctx *render, const struct item *cal
 
     enum tool_preview_mode preview_mode = tool_call_preview_mode(&prepared.effective);
     render_set_mode(render,
-                    preview_mode == TOOL_PREVIEW_COLLAPSED ? RENDER_TOOL_CLUSTER : RENDER_IDLE);
+                    preview_mode == TOOL_PREVIEW_COLLAPSED ? RENDER_TOOL_CLUSTER : RENDER_TOOL);
     struct item result =
         preview_mode == TOOL_PREVIEW_COLLAPSED
             ? dispatch_tool_call_collapsed(render, &prepared, image_input, selection)

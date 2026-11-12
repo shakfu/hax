@@ -48,19 +48,6 @@ int picker_core_label_cells(const struct picker_item *item, int terminal_cols)
     return label_cells < 1 ? 1 : label_cells;
 }
 
-void picker_core_append_sanitized(struct buf *output, const char *text, size_t len)
-{
-    for (size_t offset = 0; offset < len;) {
-        size_t bytes;
-        int width = utf8_codepoint_cells(text, len, offset, &bytes);
-        if (width < 0)
-            buf_append(output, "?", 1);
-        else
-            buf_append(output, text + offset, bytes ? bytes : 1);
-        offset += bytes ? bytes : 1;
-    }
-}
-
 static unsigned char ascii_lower(unsigned char c)
 {
     return c >= 'A' && c <= 'Z' ? (unsigned char)(c + ('a' - 'A')) : c;
@@ -141,6 +128,15 @@ void picker_core_update_matches(struct picker_core *core)
 
     core->selection = 0;
     core->first_visible = 0;
+}
+
+void picker_core_truncate_query(struct picker_core *core, size_t len)
+{
+    if (len >= core->query.len)
+        return;
+    core->query.len = len;
+    core->query.data[len] = '\0';
+    picker_core_update_matches(core);
 }
 
 void picker_core_move_selection(struct picker_core *core, enum picker_direction direction)

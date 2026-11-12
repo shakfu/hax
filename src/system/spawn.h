@@ -21,7 +21,8 @@ int spawn_shell_wait(const char *shell_cmd);
 char *spawn_shell_cmd_force_utf8(char *shell_cmd);
 
 /* Fire-and-forget: run `argv` directly, detached and with stdio redirected to /dev/null. The
- * child is reparented to init, so it is never waited on or killed and may outlive the caller.
+ * child is reparented to init in a session of its own, so it is never waited on or killed, and
+ * outlives the caller even when the caller's exit hangs up its terminal.
  * Returns 0 when the detached child was spawned — which says nothing about the exec or the
  * program succeeding — and -1 when forking failed. */
 int spawn_detached(const char *const *argv);
@@ -40,6 +41,13 @@ char *spawn_capture_stdout(const char *const *argv, size_t max_bytes, int timeou
 void spawn_parent_ignore_signals(struct spawn_signal_state *state);
 void spawn_parent_restore_signals(const struct spawn_signal_state *state);
 void spawn_child_reset_signals(void);
+
+/* fork() for every child process. Until it execs, a child would otherwise inherit the parent's
+ * handlers, so a signal arriving first (the parent's SIGTERM, a terminal Ctrl-C) would run one
+ * there and be lost to the program it then execs. The child instead starts with caught signals
+ * reset to their default actions, as exec would leave them; ignored signals stay ignored. Returns
+ * as fork(). */
+pid_t spawn_fork(void);
 
 /* Redirect all three standard descriptors to /dev/null on a best-effort basis. */
 void spawn_child_redirect_stdio_to_null(void);

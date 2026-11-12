@@ -37,7 +37,7 @@ struct provider_def {
     int pinned;
     const char *api_key_env;  /* env var holding the key; NULL → local/no key */
     const char *catalog_id;   /* models.dev key (catalog.h); NULL means none. Shipped defs curate
-                                 it; a config-only def has one only from providers.<id>.catalog_id */
+                                 it; config-only defs get one only from providers.<id>.catalog_id */
     const char *metadata_api; /* /models dialect: "openai" (flat list) or "anthropic" (paged);
                                  NULL follows the default wire's family */
     int send_cache_key;       /* prompt_cache_key default (0/1) */
@@ -47,9 +47,15 @@ struct provider_def {
     const char *cache;
     int request_cost;             /* chat: request provider-reported per-response cost */
     const char *reasoning_format; /* "flat"/"nested"; NULL → flat */
-    /* Chat default for the member prior reasoning replays under; NULL disables replay.
-     * providers.<id>.reasoning_roundtrip overrides either way. */
+    /* Chat message member that carries prior reasoning back, whichever member it streamed in;
+     * NULL reuses the streamed one. providers.<id>.reasoning_roundtrip overrides either way. */
     const char *reasoning_roundtrip;
+    /* The endpoint rejects a thinking-mode tool loop whose assistant messages lack the replay
+     * member, so each carries it, empty when there is no reasoning to replay. Needs a named
+     * member: reasoning_roundtrip, a catalog hint, or a configured field. Unset, only models
+     * whose catalog hint names the member carry it. providers.<id>.reasoning_required overrides
+     * either way. */
+    int reasoning_required;
     /* Messages: "auto"/"prefer-adaptive" follow model metadata and differ only for a model the
      * catalog lacks; "adaptive"/"budget"/"off" pin. NULL → auto. */
     const char *thinking_mode;
@@ -71,11 +77,15 @@ struct provider_def {
     int probe;
     const char *unconfigured_reason; /* availability reason without a base_url; NULL →
                                         "no base_url" */
+    /* /provider offers it only once providers.<id>.base_url is configured: a generic endpoint
+     * names nothing to choose until the user supplies one. */
+    int offer_once_configured;
 
     /* Capability hooks the generic constructor installs on the built provider; NULL keeps the
      * generic behavior. A def with a construct override wires its provider itself instead.
      * parse_model, probe_model, and list_models refine the def's own metadata dialect and stand
-     * down when a configured metadata_api moves the provider to the other one. */
+     * down when a configured metadata_api moves the provider to the other one. On the OpenAI side
+     * parse_model also refines the background listing probe's entry for the active model. */
     void (*parse_model)(const json_t *entry, struct model_info *out); /* refine one /models entry */
     int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
     int (*list_models)(struct provider *provider, struct model_info **models, size_t *n_models,
@@ -110,12 +120,20 @@ const struct provider_def *provider_find(const char *name);
  * else the def's default, else the id. Borrowed; valid until the next config write. */
 const char *provider_display_name(const struct provider_def *def);
 
+/* models.dev identity without constructing the provider: the configured providers.<id>.catalog_id,
+ * where an explicit empty value opts out, else the def's. Borrowed; NULL means none. */
+const char *provider_catalog_id(const struct provider_def *def);
+
 /* Return the highest-priority user-facing def, or NULL when none is registered. */
 const struct provider_def *provider_default(void);
 
 /* Return the read-only user-facing registry in autoselect order; internal defs are excluded.
  * `count` receives its length. Foreground-thread only. */
 const struct provider_def *const *provider_all(size_t *count);
+
+/* Whether the /provider picker and its completion offer `def`. Unlike availability, this reads
+ * only config, so it is cheap enough for completion. */
+int provider_offered(const struct provider_def *def);
 
 /* Write the space-separated user-facing provider names in autoselect order. */
 void provider_list_names(FILE *out);

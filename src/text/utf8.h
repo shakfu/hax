@@ -3,6 +3,7 @@
 #define HAX_TEXT_UTF8_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Return the encoded length for an ASCII byte or a possible UTF-8 leader. Malformed leaders and
  * continuation bytes are treated as one-byte units. */
@@ -12,13 +13,24 @@ size_t utf8_sequence_length(unsigned char byte);
  * must be between one and four, and the caller must provide that many readable bytes. */
 int utf8_sequence_is_valid(const char *bytes, size_t length);
 
+/* utf8_sequence_is_valid() that also stores the scalar value in out when it returns nonzero. */
+int utf8_decode_codepoint(const char *bytes, size_t length, uint32_t *out);
+
 /* Return whether the entire counted buffer is valid UTF-8. */
 int utf8_is_valid(const char *bytes, size_t length);
+
+/* Write the encoding of a Unicode scalar value to out and return its length, one to four. Returns
+ * zero without writing for surrogates and values above U+10FFFF. */
+size_t utf8_encode_codepoint(uint32_t codepoint, char out[4]);
 
 /* Move by one valid codepoint. Malformed or truncated input is traversed one byte at a time.
  * utf8_next returns length at or beyond the end; utf8_prev returns zero at the start. */
 size_t utf8_next(const char *bytes, size_t length, size_t offset);
 size_t utf8_prev(const char *bytes, size_t offset);
+
+/* The start of the codepoint containing byte `offset`: `offset` itself unless it is a
+ * continuation byte. Cutting there leaves no partial codepoint before the cut. */
+size_t utf8_char_start(const char *bytes, size_t offset);
 
 /* Measure the codepoint at offset and write its byte length to codepoint_len. Returns zero at the
  * end, a positive terminal-cell width for printable codepoints, and -1 for malformed input,

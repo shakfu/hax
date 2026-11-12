@@ -84,16 +84,17 @@ static const struct config_setting REGISTRY[] = {
      .description = "Inhibit idle system sleep while a turn is running (display may still blank)",
      .choices = CONFIG_CHOICES_BOOL, .editable = 1},
     {.key = "compact.auto", .env_var = "HAX_COMPACT_AUTO", .default_value = "1",
-     .description = "Auto-summarize history when it nears the context window "
+     .description = "Auto-summarize the conversation when it nears the context window "
                     "(manual /compact still works)",
      .choices = CONFIG_CHOICES_BOOL, .editable = 1},
     {.key = "compact.threshold", .env_var = "HAX_COMPACT_THRESHOLD", .default_value = "85",
-     .description = "Auto-compact when context usage reaches this percent of the window",
+     .description = "Auto-compact when context usage reaches this percent of the window, or "
+                    "sooner to keep room for the summary",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 100, .editable = 1},
-    {.key = "max_turns", .env_var = "HAX_MAX_TURNS", .default_value = "auto",
-     .description = "Model round-trips per user turn: interactive then pauses for confirmation, "
-                    "one-shot aborts; auto is unlimited interactively and 100 in one-shot",
-     .choices = "auto", .example = "25", .kind = CONFIG_KIND_INT, .editable = 1},
+    {.key = "max_turns", .env_var = "HAX_MAX_TURNS", .default_value = "0",
+     .description = "Model round-trips per user turn before interactive pauses for confirmation "
+                    "and one-shot aborts; 0 is unlimited",
+     .kind = CONFIG_KIND_INT, .editable = 1},
 
     /* model catalog */
     {.key = "catalog.url", .env_var = "HAX_CATALOG_URL",
@@ -176,8 +177,13 @@ static const struct config_setting REGISTRY[] = {
      .env_var = "HAX_OPENAI_REASONING_FORMAT",
      .description = "Reasoning request dialect: flat or nested", .choices = "flat|nested"},
     {.key = "providers.openai-compatible.reasoning_roundtrip",
-     .env_var = "HAX_REASONING_ROUNDTRIP", .keep_empty = 1,
-     .description = "Replay reasoning text to the model (off/on, or a field name)"},
+     .env_var = "HAX_OPENAI_REASONING_ROUNDTRIP", .keep_empty = 1,
+     .description = "Replay reasoning text to the model (auto, off, or a field name)"},
+    {.key = "providers.openai-compatible.reasoning_required",
+     .env_var = "HAX_OPENAI_REASONING_REQUIRED", .choices = CONFIG_CHOICES_TRISTATE,
+     .description = "Send the reasoning field on every assistant message, empty when there is "
+                    "none, for servers that reject tool calls without it; auto uses the provider "
+                    "default, else the model's catalog entry"},
     {.key = "providers.openai-compatible.send_cache_key", .env_var = "HAX_OPENAI_SEND_CACHE_KEY",
      .choices = CONFIG_CHOICES_TRISTATE,
      .description = "Send a stable prompt_cache_key (prefix-cache hint); auto uses the provider "
@@ -234,7 +240,7 @@ static const struct config_setting REGISTRY[] = {
      .description = "Full llama-server base URL; overrides the port setting"},
     {.key = "providers.llamacpp.api_key", .env_var = "HAX_LLAMACPP_API_KEY", .secret = 1,
      .description = "Bearer token when llama-server runs with --api-key"},
-    {.key = "providers.llamacpp.port", .env_var = "HAX_LLAMACPP_PORT", .default_value = "8080",
+    {.key = "providers.llamacpp.port", .env_var = "HAX_LLAMACPP_PORT", .default_value = "9931",
      .description = "Port for the local llama-server (when base_url is unset)",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 65535},
     {.key = "providers.mock.script", .env_var = "HAX_MOCK_SCRIPT",
@@ -770,6 +776,11 @@ int config_bool_or(const char *key, int default_value)
     return value < 0 ? !!default_value : value;
 }
 
+int config_tristate(const char *key)
+{
+    return parse_bool(resolve(key, 1));
+}
+
 const char *config_scoped_str(const char *prefix, const char *leaf)
 {
     if (!prefix)
@@ -786,6 +797,16 @@ int config_scoped_bool_or(const char *prefix, const char *leaf, int fallback)
         return fallback;
     char *key = xasprintf("%s.%s", prefix, leaf);
     int value = config_bool_or(key, fallback);
+    free(key);
+    return value;
+}
+
+int config_scoped_tristate(const char *prefix, const char *leaf)
+{
+    if (!prefix)
+        return -1;
+    char *key = xasprintf("%s.%s", prefix, leaf);
+    int value = config_tristate(key);
     free(key);
     return value;
 }

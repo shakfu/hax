@@ -11,16 +11,18 @@
 #include "tool.h"
 #include "xalloc.h"
 #include "system/fs.h"
-#include "tools/task_helpers.h"
+#include "tools/bash_fixtures.h"
 #include "tools/task_registry.h"
 
 static void test_wait_streams_output_live(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
-    /* The pause spaces the two lines apart so both arrive while the wait streams. */
-    char *cmd =
-        xasprintf("read -r _ <%s; echo streamed-line; sleep " TEST_PAUSE "; echo final-line", gate);
+    /* The final line waits until the display has shown the first, so only a live stream can deliver
+     * both. */
+    char *shown_gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo streamed-line; read -r _ <%s; echo final-line", gate,
+                          shown_gate);
     char *out = call_bash_background(cmd);
     free(cmd);
     char *id = extract_task_id(out);
@@ -29,7 +31,7 @@ static void test_wait_streams_output_live(void)
 
     gate_release(gate);
     free(gate);
-    struct display_capture capture = {0};
+    struct display_capture capture = {.release_on = "streamed-line", .release_gate = shown_gate};
     buf_init(&capture.buf);
     char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":30}", id);
     struct tool_run_ctx ctx = {.display = append_display, .display_data = &capture};
@@ -47,6 +49,7 @@ static void test_wait_streams_output_live(void)
     }
     free(out);
     free(id);
+    free(shown_gate);
     buf_free(&capture.buf);
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
@@ -184,8 +187,8 @@ static void test_kill_delivers_pending_output(void)
 
     gate_release(first_gate);
     free(first_gate);
-    /* Let post-detach output land in the spool before killing; the task stays blocked on the
-     * second gate, which is never released. */
+    /* Let post-detach output land in the spool before killing; the task stays blocked on the second
+     * gate, which is never released. */
     int has_output = 0;
     time_t start = time(NULL);
     while (!has_output && time(NULL) - start < 10) {
@@ -225,9 +228,8 @@ static void test_kill_fires_at_wait_deadline(void)
     EXPECT(id != NULL);
     free(out);
 
-    char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":1,\"kill\":true}", id);
-    out = TOOL_TASK_WAIT.run(args, NULL);
-    free(args);
+    /* Below the tool's whole-second timeout_seconds, so the deadline costs little. */
+    out = task_wait_stream(id ? id : "?", 50, 1, NULL, NULL, NULL);
     EXPECT(strstr(out, "killed (signal ") != NULL);
     EXPECT(strstr(out, "wait timed out") == NULL);
     free(out);
@@ -253,9 +255,9 @@ static void test_kill_spares_task_finishing_within_timeout(void)
     free(args);
     EXPECT(strstr(out, "done-first") != NULL);
     EXPECT(strstr(out, "finished (exit 0)") != NULL);
-    /* Match the status phrase, not a bare "killed": the footer can also carry an orphan-sweep
-     * note containing the word. This command runs only builtins and so orphans nothing — that
-     * note appears when the drainer has yet to observe EOF as the shell's exit is seen. */
+    /* Match the status phrase, not a bare "killed": the footer can also carry an orphan-sweep note
+     * containing the word. This command runs only builtins and so orphans nothing — that note
+     * appears when the drainer has yet to observe EOF as the shell's exit is seen. */
     EXPECT(strstr(out, "killed (signal ") == NULL);
     free(out);
     free(id);
@@ -393,16 +395,17 @@ static void test_binary_markers_reach_display(void)
 
 static void test_binary_marker_shown_after_streamed_text_at_launch(void)
 {
-    /* The pause keeps the text and the NUL in separate chunks, so the text streams (and would
-     * have swallowed the marker) before binary hits; the held transition keeps both inside
-     * the launch window. */
+    /* The NUL waits until the display has shown the text, so the text streams (and would have
+     * swallowed the marker) before binary hits; the held transition keeps both inside the launch
+     * window. */
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     setenv("HAX_BASH_TRANSITION_MIN_BYTES", "11", 1); /* "visible\n" + 'A\0B' */
     char *gate = gate_create();
-    char *cmd = xasprintf("{\"command\":\"echo visible; sleep " TEST_PAUSE
-                          "; printf 'A\\\\000B'; read -r _ <%s\",\"background\":true}",
-                          gate);
-    struct display_capture capture = {0};
+    char *shown_gate = gate_create();
+    char *cmd = xasprintf("{\"command\":\"echo visible; read -r _ <%s; printf 'A\\\\000B'; "
+                          "read -r _ <%s\",\"background\":true}",
+                          shown_gate, gate);
+    struct display_capture capture = {.release_on = "visible", .release_gate = shown_gate};
     buf_init(&capture.buf);
     struct tool_run_ctx ctx = {.display = append_display, .display_data = &capture};
     char *out = TOOL_BASH.run(cmd, &ctx);
@@ -418,6 +421,7 @@ static void test_binary_marker_shown_after_streamed_text_at_launch(void)
 
     gate_release(gate);
     free(gate);
+    free(shown_gate);
     free(wait_for_id(id, 5));
     free(id);
     unsetenv("HAX_BASH_TRANSITION_MIN_BYTES");
@@ -428,10 +432,11 @@ static void test_binary_marker_shown_after_streamed_text_in_wait(void)
 {
     setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
     char *gate = gate_create();
-    /* Text streams during the wait first, then the NUL turns the task binary before it ends;
-     * the pause keeps the two in separate chunks. */
-    char *cmd =
-        xasprintf("read -r _ <%s; echo streamed; sleep " TEST_PAUSE "; printf '\\\\000'", gate);
+    /* Text streams during the wait first, then the NUL turns the task binary before it ends; the
+     * NUL waits until the display has shown the text, keeping the two in separate chunks. */
+    char *shown_gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo streamed; read -r _ <%s; printf '\\\\000'", gate,
+                          shown_gate);
     char *out = call_bash_background(cmd);
     free(cmd);
     char *id = extract_task_id(out);
@@ -440,12 +445,13 @@ static void test_binary_marker_shown_after_streamed_text_in_wait(void)
 
     gate_release(gate);
     free(gate);
-    struct display_capture capture = {0};
+    struct display_capture capture = {.release_on = "streamed", .release_gate = shown_gate};
     buf_init(&capture.buf);
     char *args = xasprintf("{\"id\":\"%s\",\"timeout_seconds\":30}", id);
     struct tool_run_ctx ctx = {.display = append_display, .display_data = &capture};
     out = TOOL_TASK_WAIT.run(args, &ctx);
     free(args);
+    free(shown_gate);
     EXPECT(strstr(out, "[binary output suppressed") != NULL);
     free(out);
     EXPECT(capture.buf.data != NULL && strstr(capture.buf.data, "streamed") != NULL);
@@ -464,11 +470,11 @@ static void test_runaway_output_killed_without_polling(void)
     EXPECT(fd >= 0);
     close(fd);
 
-    /* The producer is the shell's child, not the shell: once killed it is reaped by init
-     * (the shell itself would linger as a zombie until a registry poll reaps it). The gate
-     * holds the flood until after detach: an ungated producer races the yield window
-     * against the drainer reaching the output limit, and on a fast machine the limit can
-     * win, completing the call synchronously with no task to wait on. */
+    /* The producer is the shell's child, not the shell: once killed it is reaped by init (the shell
+     * itself would linger as a zombie until a registry poll reaps it). The gate holds the flood
+     * until after detach: an ungated producer races the yield window against the drainer reaching
+     * the output limit, and on a fast machine the limit can win, completing the call synchronously
+     * with no task to wait on. */
     char *gate = gate_create();
     char *cmd = xasprintf("{ read -r _ <%s; exec yes; } & echo $! > %s; wait", gate, path);
     char *args = xasprintf("{\"command\":\"%s\",\"background\":true}", cmd);
@@ -485,8 +491,8 @@ static void test_runaway_output_killed_without_polling(void)
 
     gate_release(gate);
     free(gate);
-    /* The drainer must stop the producer at the output limit on its own; nothing here calls
-     * into the registry until the process is already gone. */
+    /* The drainer must stop the producer at the output limit on its own; nothing here calls into
+     * the registry until the process is already gone. */
     EXPECT(process_is_gone(pid));
 
     out = wait_for_id(id, 30);
@@ -525,7 +531,7 @@ static void test_detached_log_holds_full_output(void)
     free(cmd);
     char *id = extract_task_id(out);
     EXPECT(id != NULL);
-    /* The compact launch footer no longer carries the path; /tasks (task_list) does. */
+    /* The compact launch footer leaves the log path to /tasks (task_list). */
     EXPECT(strstr(out, "log:") == NULL);
     free(out);
 
@@ -589,9 +595,9 @@ static void test_large_collection_keeps_head_and_tail(void)
 
 int main(void)
 {
-    /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the
-     * suite; tests needing a real grace window override and restore this. */
-    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_YIELD, 1);
+    /* Kill waits sit out the full SIGTERM grace, so the default 2s would dominate the suite; tests
+     * needing a real grace window override and restore this. */
+    setenv("HAX_BASH_TIMEOUT_GRACE", TEST_KILL_GRACE, 1);
     test_wait_streams_output_live();
     test_wait_times_out_on_running_task();
     test_wait_returns_early_when_other_task_finishes();

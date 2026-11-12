@@ -2,8 +2,6 @@
 #ifndef HAX_CATALOG_H
 #define HAX_CATALOG_H
 
-#include <jansson.h>
-
 #include "effort.h"
 #include "transport/http.h"
 
@@ -56,9 +54,10 @@ struct catalog_entry {
     struct effort_set efforts;
 
     /* Chat Completions member that must carry an assistant turn's own reasoning back to the
-     * model: interleaved-thinking models stop reasoning once it is missing from their history.
-     * Static storage, "reasoning" or "reasoning_content"; NULL when the model needs no replay
-     * or round-trips typed blocks instead. */
+     * model, on every assistant message: interleaved-thinking models stop reasoning once it is
+     * missing from their history, and some reject a tool loop without it. Static storage,
+     * "reasoning" or "reasoning_content"; NULL when the model needs no replay or round-trips
+     * typed blocks instead. */
     const char *interleaved_field;
     int interleaved_declared; /* Distinguishes an absent hint from one declared off. */
 
@@ -94,10 +93,6 @@ int catalog_config_routes_models(const char *provider_id);
  * metadata resolved and 0 otherwise. NULL or empty model IDs are unresolved. */
 void catalog_lookup_many(const char *provider_id, const char *catalog_id, const char *const *models,
                          size_t model_count, struct catalog_entry *out, int *found);
-
-/* Parse the top-level member named `key` without tree-parsing the full JSON object. Returns a new
- * reference, or NULL when the member is absent or malformed. The caller must call json_decref. */
-json_t *catalog_extract_member(const char *text, const char *key);
 
 /* Return whether cache writes replace the input charge. A known write rate below the input rate is
  * treated as a storage surcharge; unknown rates use the more common replacement policy. */

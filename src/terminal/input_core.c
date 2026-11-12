@@ -6,7 +6,11 @@
 #include <string.h>
 
 #include "xalloc.h"
+#include "terminal/escape.h"
 #include "terminal/input.h"
+#include "terminal/live_region.h"
+#include "text/display_safe.h"
+#include "text/trim.h"
 #include "text/utf8.h"
 
 /* ---------------- public API: alloc / free ---------------- */
@@ -31,7 +35,46 @@ void input_free(struct input *in)
     free(in->hist);
     free(in->persist_path);
     free(in->preseed);
+    free(in->empty_placeholder);
+    free(in->candidates);
+    live_region_free(&in->region);
     free(in);
+}
+
+static char *unsanitized_ghost_text(const struct input *in)
+{
+    if (in->cursor != in->len)
+        return NULL;
+    if (in->exit_armed && in->len == 0)
+        return xstrdup("ctrl+c again to exit");
+    if (in->candidates)
+        return xstrdup(in->candidates);
+    if (in->len == 0 && in->empty_placeholder)
+        return xstrdup(in->empty_placeholder);
+    if (in->hint_fn && in->hint_state == INPUT_HINT_SHOWN)
+        return in->hint_fn(in->buf, in->hint_user);
+    return NULL;
+}
+
+void input_core_update_hint(struct input *in)
+{
+    char *hint = in->hint_fn && in->cursor == in->len ? in->hint_fn(in->buf, in->hint_user) : NULL;
+
+    if (!hint)
+        in->hint_state = INPUT_HINT_NONE;
+    else if (in->hint_state == INPUT_HINT_NONE)
+        in->hint_state = INPUT_HINT_PENDING;
+    free(hint);
+}
+
+char *input_core_ghost_text(const struct input *in)
+{
+    char *ghost = unsanitized_ghost_text(in);
+    if (!ghost)
+        return NULL;
+    char *safe_ghost = sanitize_for_display(ghost, strlen(ghost));
+    free(ghost);
+    return safe_ghost;
 }
 
 int input_core_prompt_width(const char *prompt)
@@ -43,12 +86,8 @@ int input_core_prompt_width(const char *prompt)
         unsigned char byte = (unsigned char)prompt[offset];
         if (byte == '\n')
             break;
-        if (byte == 0x1b && offset + 1 < len && prompt[offset + 1] == '[') {
-            offset += 2;
-            while (offset < len && (unsigned char)prompt[offset] < 0x40)
-                offset++;
-            if (offset < len)
-                offset++;
+        if (byte == 0x1b) {
+            offset += escape_sequence_len(prompt + offset, len - offset);
             continue;
         }
 
@@ -111,6 +150,23 @@ void input_core_commit_paste(struct input *in, const char *body, size_t len)
         }
     }
     input_core_insert(in, body, len);
+}
+
+int input_core_submit_ready(struct input *in)
+{
+    in->len = trim_prompt(in->buf);
+    in->cursor = in->len;
+    return in->len > 0 || in->empty_placeholder;
+}
+
+void input_core_load_edited(struct input *in, const char *text, size_t len)
+{
+    ensure_buffer_capacity(in, len + 1);
+    for (size_t i = 0; i < len; i++)
+        in->buf[i] = text[i] ? text[i] : ' ';
+    in->buf[len] = '\0';
+    in->len = trim_prompt(in->buf);
+    in->cursor = in->len;
 }
 
 void input_core_replace_span(struct input *in, size_t start, size_t end, const char *text)
@@ -203,29 +259,28 @@ void input_core_kill_to_bol(struct input *in)
     buf_erase(in, b, in->cursor - b);
 }
 
-/* Ctrl-W uses whitespace boundaries; Meta word operations use readline's alphanumeric
- * boundaries. Bytes >= 0x80 count as word bytes so neither scan splits a UTF-8 sequence. */
-static size_t scan_ws_left(const char *buf, size_t i)
+size_t input_core_word_start(const char *text, size_t end)
 {
-    while (i > 0 && isspace((unsigned char)buf[i - 1]))
-        i--;
-    while (i > 0 && !isspace((unsigned char)buf[i - 1]))
-        i--;
-    return i;
+    while (end > 0 && isspace((unsigned char)text[end - 1]))
+        end--;
+    while (end > 0 && !isspace((unsigned char)text[end - 1]))
+        end--;
+    return end;
 }
 
+/* Bytes >= 0x80 count as word bytes so alnum scans never split a UTF-8 sequence. */
 static int is_word_byte(unsigned char c)
 {
     return c >= 0x80 || isalnum(c);
 }
 
-static size_t scan_alnum_left(const char *buf, size_t i)
+size_t input_core_alnum_word_start(const char *text, size_t end)
 {
-    while (i > 0 && !is_word_byte((unsigned char)buf[i - 1]))
-        i--;
-    while (i > 0 && is_word_byte((unsigned char)buf[i - 1]))
-        i--;
-    return i;
+    while (end > 0 && !is_word_byte((unsigned char)text[end - 1]))
+        end--;
+    while (end > 0 && is_word_byte((unsigned char)text[end - 1]))
+        end--;
+    return end;
 }
 
 static size_t scan_alnum_right(const char *buf, size_t len, size_t i)
@@ -239,7 +294,7 @@ static size_t scan_alnum_right(const char *buf, size_t len, size_t i)
 
 void input_core_move_word_left(struct input *in)
 {
-    in->cursor = scan_alnum_left(in->buf, in->cursor);
+    in->cursor = input_core_alnum_word_start(in->buf, in->cursor);
 }
 
 void input_core_move_word_right(struct input *in)
@@ -249,13 +304,13 @@ void input_core_move_word_right(struct input *in)
 
 void input_core_kill_word_back(struct input *in)
 {
-    size_t i = scan_ws_left(in->buf, in->cursor);
+    size_t i = input_core_word_start(in->buf, in->cursor);
     buf_erase(in, i, in->cursor - i);
 }
 
 void input_core_kill_word_back_alnum(struct input *in)
 {
-    size_t i = scan_alnum_left(in->buf, in->cursor);
+    size_t i = input_core_alnum_word_start(in->buf, in->cursor);
     buf_erase(in, i, in->cursor - i);
 }
 

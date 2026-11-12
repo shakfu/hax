@@ -11,7 +11,8 @@
 
 #include "agent_core.h"
 #include "agent_loop.h"
-#include "agent_usage.h"
+#include "agent_stats.h"
+#include "agent_stream.h"
 #include "buf.h"
 #include "catalog.h"
 #include "compact.h"
@@ -27,25 +28,17 @@
 #include "terminal/interrupt.h"
 #include "tools/bash_process.h"
 
-/* Bounds unattended agent loops that no supervisor interrupts; this is what max_turns "auto"
- * means in one-shot, and a positive value replaces it. */
-#define ONESHOT_DEFAULT_MAX_TURNS 100
-
 /* 128 + SIGINT, the shell convention for an interrupted command. */
 #define ONESHOT_EXIT_INTERRUPTED 130
-
-static int resolve_max_turns(void)
-{
-    int max_turns = config_int("max_turns");
-    return max_turns > 0 ? max_turns : ONESHOT_DEFAULT_MAX_TURNS;
-}
 
 struct oneshot_state {
     struct provider *provider;
     struct agent_session session;
     struct transcript_log *transcript;
     struct session_log *session_log;
-    struct spend_totals spend;
+    /* Resumed history, live and undone, precedes this run's own records. */
+    size_t run_from_item;
+    size_t run_from_retired;
     long started_ms;
     long context_tokens;
     int json;           /* stream conversation records as JSONL on stdout */
@@ -53,67 +46,49 @@ struct oneshot_state {
     int json_errno;     /* first stream-write failure; 0 while the stream is healthy */
 };
 
-static int account_compaction_event(const struct stream_event *event, void *user)
-{
-    struct oneshot_state *state = user;
-    const struct stream_usage *usage = NULL;
-
-    if (event->kind == EV_DONE)
-        usage = &event->u.done.usage;
-    else if (event->kind == EV_ERROR)
-        usage = event->u.error.usage;
-    else if (event->kind == EV_RETRY)
-        usage = event->u.retry.usage;
-    if (usage)
-        agent_spend_account(&state->spend, usage, state->provider, state->session.model);
-    return 0;
-}
-
-/* Compaction has no pause seam, so either latched request cancels the retriable transaction;
- * the loop checkpoint that follows turns it into the run's pause or abort. */
-static int compact_cancelled(void *user)
+/* Signals latch synchronously, so polling and settling a stop request are the same read. */
+static enum agent_signal oneshot_poll(void *user)
 {
     (void)user;
-    return cancel_abort_requested() || cancel_pause_requested();
+    return agent_interrupt_signal();
 }
 
-static int compact_context(struct oneshot_state *state)
+/* A failure is reported even under --json: the run goes on against the full window, and no
+ * record says why. A cancellation is reported by the run's own stop diagnostic. */
+static void report_compact_failure(const struct compact_result *result)
 {
+    if (result->outcome == COMPACT_PROVIDER_ERROR)
+        hax_warn("compaction failed: %s",
+                 result->error_message ? result->error_message : "stream failed");
+    else if (result->outcome == COMPACT_NO_SUMMARY)
+        hax_warn("compaction produced no summary");
+    if (result->auto_suspended)
+        hax_warn("automatic compaction off after %d failures", COMPACT_MAX_AUTO_FAILURES);
+}
+
+static int auto_compact(enum compact_reason reason, void *user)
+{
+    struct oneshot_state *state = user;
     struct compact_params params = {
         .session = &state->session,
         .provider = state->provider,
         .session_log = state->session_log,
         .transcript_log = state->transcript,
-        .hooks = {.user = state,
-                  .on_event = account_compaction_event,
-                  .tick = compact_cancelled,
-                  .is_cancelled = compact_cancelled},
+        .reason = reason,
+        .hooks = {.user = state, .poll = oneshot_poll, .checkpoint = oneshot_poll},
     };
     struct compact_result result;
 
     compact_run(&params, &result);
     int completed = result.outcome == COMPACT_COMPLETE;
+    if (!completed) {
+        report_compact_failure(&result);
+    } else if (!state->json) {
+        int tty = isatty(fileno(stderr));
+        fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
+    }
     compact_result_destroy(&result);
     return completed;
-}
-
-static void account_turn(const struct agent_loop_turn *turn, void *user)
-{
-    struct oneshot_state *state = user;
-    /* Retried attempts are separate spend records: merging could void an exact terminal
-     * charge over their unpriced tokens. */
-    agent_spend_account(&state->spend, &turn->usage, state->provider, state->session.model);
-    agent_spend_account(&state->spend, &turn->retry_usage, state->provider, state->session.model);
-}
-
-static void auto_compact(void *user)
-{
-    struct oneshot_state *state = user;
-
-    if (!compact_context(state) || state->json)
-        return;
-    int tty = isatty(fileno(stderr));
-    fprintf(stderr, "%s[compacted context]%s\n", tty ? ANSI_DIM : "", tty ? ANSI_RESET : "");
 }
 
 /* The --json stream on stdout; docs/sessions.md is the record contract. On a write failure
@@ -159,17 +134,9 @@ static void json_tool_seen(const struct item *call, void *user)
     emit_json_items(user);
 }
 
-/* Provider wait/chunk hook: a latched abort (first SIGINT/SIGTERM) cancels the in-flight
- * stream; a pause lets it finish and stops at the seam. */
-static int loop_tick(void *user)
-{
-    (void)user;
-    return cancel_abort_requested();
-}
-
 /* Seams sample the signal-latched requests and, in --json mode, stream freshly appended
  * records — tool results land mid-batch — without delaying them to the next turn. */
-static int loop_checkpoint(void *user)
+static enum agent_signal loop_checkpoint(void *user)
 {
     struct oneshot_state *state = user;
 
@@ -179,15 +146,10 @@ static int loop_checkpoint(void *user)
         emit_json_items(state);
         /* A dead stream means nobody is supervising the run: stop launching tools. */
         if (state->json_errno)
-            return AGENT_LOOP_SIG_ABORT;
+            return AGENT_SIGNAL_ABORT;
     }
-    /* Sample abort after the emission too: an interrupt latches both requests, so reading only
-     * the pause half of one that landed during a blocking write would misreport it. */
-    if (cancel_abort_requested())
-        return AGENT_LOOP_SIG_ABORT;
-    if (cancel_pause_requested())
-        return AGENT_LOOP_SIG_PAUSE;
-    return AGENT_LOOP_SIG_NONE;
+    /* Sample after the emission too: a signal may land during a blocking write. */
+    return agent_interrupt_signal();
 }
 
 /* The run's identity in the file-header schema: the session id when recording, and the live
@@ -275,51 +237,37 @@ static void emit_json_result(struct oneshot_state *state, const struct agent_loo
     emit_json_record(state, record);
 }
 
-static int resume_session(struct oneshot_state *state, const char *path,
-                          struct session_meta *metadata, size_t *item_count)
-{
-    if (!path)
-        return 0;
-
-    struct item *items = NULL;
-    size_t count = 0;
-    if (session_load(path, &items, &count, metadata) != 0) {
-        hax_err("could not resume session '%s'", path);
-        return -1;
-    }
-
-    state->session.items = items;
-    state->session.n_items = count;
-    state->session.cap_items = count;
-    *item_count = count;
-    return 0;
-}
-
-static void open_logs(struct oneshot_state *state, const struct hax_opts *options,
-                      const struct session_meta *resume_metadata, size_t resumed_item_count)
+/* Resolve the session, fresh or resumed, with its logs. Returns -1 after printing a diagnostic. */
+static int open_session(struct oneshot_state *state, const struct hax_opts *options)
 {
     struct agent_session *session = &state->session;
     struct provider *provider = state->provider;
 
+    struct session_loaded loaded = {0};
+    if (options->resume_path) {
+        if (session_load_all(options->resume_path, &loaded) != 0) {
+            hax_err("could not resume session '%s'", options->resume_path);
+            return -1;
+        }
+        agent_session_adopt(session, &loaded);
+    }
     state->transcript =
         transcript_log_open(session->system_prompt, session->tools, session->n_tools);
-    if (agent_recording_enabled(provider)) {
+    if (options->resume_path) {
+        struct agent_resumed resumed;
+        agent_session_prepare_resumed(session, provider, options->resume_path, &loaded.meta,
+                                      state->transcript, &resumed);
+        session_loaded_free(&loaded);
+        state->session_log = resumed.session_log;
+    } else if (agent_recording_enabled(provider)) {
         state->session_log =
-            options->resume_path
-                ? session_log_resume(options->resume_path, resume_metadata->provider,
-                                     resume_metadata->model, resume_metadata->effort,
-                                     resume_metadata->preset, resumed_item_count)
-                : session_log_open(agent_provider_id(provider), session->model,
-                                   session->model_label, session->effort, config_str("preset"));
-        /* The banner announces the id before the first provider call, so the file must exist by
-         * then: a run killed outright never reaches the exit hint. */
-        session_log_begin(state->session_log);
-    }
-    if (options->resume_path)
-        session_log_set_meta(state->session_log, agent_provider_id(provider), session->model,
+            session_log_open(agent_provider_log_name(provider), session->model,
                              session->model_label, session->effort, config_str("preset"));
-    if (resumed_item_count > 0)
-        transcript_log_append(state->transcript, session->items, session->n_items);
+    }
+    /* The banner announces the id before the first provider call, so the file must exist by
+     * then: a run killed outright never reaches the exit hint. */
+    session_log_begin(state->session_log);
+    return 0;
 }
 
 static void print_start_banner(const struct oneshot_state *state, const struct hax_opts *options)
@@ -432,7 +380,6 @@ static void oneshot_state_destroy(struct oneshot_state *state)
 {
     transcript_log_close(state->transcript);
     session_log_close(state->session_log);
-    agent_spend_free(&state->spend);
     agent_session_free(&state->session);
 }
 
@@ -465,14 +412,10 @@ static int start_run(struct oneshot_state *state, const char *prompt,
         return -1;
     }
 
-    struct session_meta resume_metadata = {0};
-    size_t resumed_item_count = 0;
-    if (resume_session(state, options->resume_path, &resume_metadata, &resumed_item_count) != 0) {
-        session_meta_free(&resume_metadata);
+    if (open_session(state, options) != 0)
         return -1;
-    }
-    open_logs(state, options, &resume_metadata, resumed_item_count);
-    session_meta_free(&resume_metadata);
+    state->run_from_item = state->session.n_items;
+    state->run_from_retired = state->session.n_retired;
 
     /* Resumed history is context, not this run's events: stream only what the run appends. */
     state->json_cursor = state->session.n_items;
@@ -557,8 +500,7 @@ static void run_user_turn(struct oneshot_state *state, const char *prompt, int m
         .hooks =
             {
                 .user = state,
-                .tick = loop_tick,
-                .turn_end = account_turn,
+                .poll = oneshot_poll,
                 .checkpoint = loop_checkpoint,
                 .compact = auto_compact,
             },
@@ -588,12 +530,19 @@ static int finish_run(struct oneshot_state *state, const struct agent_loop_resul
         result = ONESHOT_EXIT_INTERRUPTED;
 
     agent_finalize_tasks(&state->session, state->transcript, state->session_log);
+    session_log_user_turn(state->session_log, monotonic_ms() - state->started_ms);
 
     /* A short run may finish before the initial catalog fetch can price its usage. */
-    if (agent_spend_has_unpriced(&state->spend))
+    struct agent_stats stats;
+    agent_stats_collect(&state->session, state->run_from_item, state->run_from_retired,
+                        state->provider, &stats);
+    if (stats.total.unpriced) {
         catalog_drain(3000);
-    int spend_approx = 0;
-    double spend = agent_spend_total(&state->spend, &spend_approx);
+        agent_stats_collect(&state->session, state->run_from_item, state->run_from_retired,
+                            state->provider, &stats);
+    }
+    int spend_approx = stats.total.spend_estimated;
+    double spend = stats.total.spend;
     if (state->json) {
         /* Task finalization may have appended a killed-tasks note after the post-loop drain. */
         emit_json_items(state);
@@ -612,7 +561,7 @@ static int finish_run(struct oneshot_state *state, const struct agent_loop_resul
 
 int oneshot_run(struct provider *provider, const char *prompt, const struct hax_opts *options)
 {
-    int max_turns = resolve_max_turns();
+    int max_turns = config_int("max_turns");
     struct oneshot_state state = {
         .provider = provider,
         .context_tokens = -1,
@@ -632,20 +581,18 @@ int oneshot_run(struct provider *provider, const char *prompt, const struct hax_
     cancel_clear_requests();
     interrupt_install_request_signal_handlers();
 
-    /* The loop compacts only at continuation seams it reaches itself, and a pause stops just
-     * before that check, so continuing a resumed run owns the pre-request pass — the REPL's
-     * deferred compaction before a send. */
-    if (options->resume_path &&
-        compact_should_auto(agent_session_last_context_tokens(&state.session),
-                            model_meta_context(provider, state.session.model)))
-        auto_compact(&state);
+    /* The REPL's compaction before a send: the loop compacts only at seams it reaches itself,
+     * so a resumed record over the threshold is compacted here. */
+    if (compact_due(&state.session, state.provider, prompt))
+        auto_compact(COMPACT_THRESHOLD, &state);
 
     struct agent_loop_result loop_result;
-    if (cancel_abort_requested() || cancel_pause_requested()) {
+    enum agent_signal stop = agent_interrupt_signal();
+    if (stop != AGENT_SIGNAL_NONE) {
         /* The stop belongs to the compaction and cancels the whole send, like the REPL's
          * pre-send transaction: nothing is appended and no turn launches. */
-        loop_result_stopped(&loop_result,
-                            cancel_abort_requested() ? AGENT_LOOP_INTERRUPTED : AGENT_LOOP_PAUSED);
+        loop_result_stopped(&loop_result, stop == AGENT_SIGNAL_ABORT ? AGENT_LOOP_INTERRUPTED
+                                                                     : AGENT_LOOP_PAUSED);
     } else {
         run_user_turn(&state, prompt, max_turns, &loop_result);
     }

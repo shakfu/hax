@@ -2,89 +2,56 @@
 #ifndef HAX_RENDER_SPINNER_H
 #define HAX_RENDER_SPINNER_H
 
-/* Thread-safe live indicators written directly to stdout, for interactive terminals only.
- * Operations taking a spinner pointer are NULL-safe no-ops.
- *
- * Between show and hide, callers must not write to stdout; the spinner owns the cursor. */
-struct spinner;
+/* The animated glyph and status label that the footer paints while work is in progress. Pure: the
+ * footer owns the terminal, the animation thread, and locking. */
 
-#define SPINNER_TOOL_VIEW_ROWS_MAX 8
+struct buf;
 
-/* Create a spinner with a copied initial label. NULL or an empty label selects "working...".
- * Returns NULL when stdout is not a terminal or the animation thread cannot start. */
-struct spinner *spinner_new(const char *label);
-void spinner_free(struct spinner *spinner);
-
-/* Show the labeled spinner at column zero of the current empty row. Hide erases that row. A
- * first appearance from hidden is deferred briefly; any show or hide within the grace period
- * cancels it. */
-void spinner_show(struct spinner *spinner);
-
-/* Show the labeled spinner one blank row below the current cursor, then restore the cursor on
- * hide. cursor_col is the current zero-based column. The current line must not wrap. First
- * appearances are deferred as for spinner_show(). */
-void spinner_park(struct spinner *spinner, int cursor_col);
-
-/* One prepared tool-status row: fully styled bytes for a single physical row without a line
- * ending, and its painted cell width for reflow-aware repaints. Rows must be clipped to the
- * terminal by the caller; a wrapped row breaks the view's row accounting. */
-struct spinner_row {
-    const char *bytes;
-    int cells;
-};
-
-/* Replace the tool-status view with up to SPINNER_TOOL_VIEW_ROWS_MAX copied prepared rows, newest
- * last; excess oldest rows are dropped. Rows are painted verbatim, with the animated glyph
- * overprinting the last row's first cell. Shows the view if it is hidden; content changes repaint
- * on the next animation frame, not synchronously. */
-void spinner_set_tool_status_view(struct spinner *spinner, const struct spinner_row *rows,
-                                  int count);
-
-/* Erase the visible row and restore the cursor position saved by spinner_park(). */
-void spinner_hide(struct spinner *spinner);
-
-/* Hide as spinner_hide(), but begin DEC 2026 synchronized output atomically with the erase and
- * leave the bracket open for the caller's replacement writes. Pair with spinner_swap_end();
- * brackets do not nest. Until then the caller may only write replacement output and optionally
- * re-show the spinner as the final act: a show inside the bracket paints immediately, without
- * the first-appearance grace, so the indicator survives the swap without blinking. */
-void spinner_swap_begin(struct spinner *spinner);
-
-/* End the swap's synchronized output. Emits nothing when no swap is open. */
-void spinner_swap_end(struct spinner *spinner);
-
-/* Immediately replace the labeled spinner's state and discard any deferred request. key identifies
- * a logical state independently of its display text. NULL or empty values select the "working" and
- * "working..." defaults. Inputs are copied. */
-void spinner_set_label(struct spinner *spinner, const char *key, const char *label);
-
-/* Request a label change with hysteresis. A new key is displayed only after remaining stable; churn
- * instead returns the display to "working...". Repeating the displayed key updates its text
- * immediately, while repeating a pending key preserves its settling time. Inputs are copied. */
-void spinner_request_label(struct spinner *spinner, const char *key, const char *label);
-
-/* Set the labeled spinner's elapsed-time origin to a positive monotonic_ms() value, or disable the
- * counter with zero. The counter appears only for long waits and never on tool-status rows. */
-void spinner_set_timer(struct spinner *spinner, long started_at_ms);
+#define SPINNER_FRAME_INTERVAL_MS 80
 
 /* Return a borrowed, NUL-terminated one-cell UTF-8 glyph selected from monotonic time. */
 const char *spinner_glyph_now(void);
 
-/* Cell widths of the physical rows painted by one tool-view frame, for reflow-aware repaints. */
-struct spinner_tool_frame {
-    int row_widths[SPINNER_TOOL_VIEW_ROWS_MAX];
-    int row_count;
+/* Append the status row: the glyph and the label, prefixed by elapsed_ms once it marks a long wait
+ * and both fit. The row fits max_cells; returns its cell width. */
+int spinner_format_status(struct buf *out, const char *glyph, const char *label, long elapsed_ms,
+                          int max_cells);
+
+/* How long a requested label must stay stable before it is displayed. */
+#define SPINNER_LABEL_SETTLE_MS 2000
+
+/* The status label, slow to appear and quick to give way: a requested key other than the default
+ * is displayed once requested steadily for settle_ms, and gives way to "working..." as soon as
+ * anything else is requested, so churning requests leave "working..." up. A key names a logical
+ * state independently of its display text; NULL or empty values select the "working" and
+ * "working..." defaults. Strings are owned copies. Not thread-safe; initialize with
+ * spinner_label_init(). */
+struct spinner_label {
+    char *text;
+    char *key;
+    int held;       /* displayed by spinner_label_set(); requests are ignored until the next set */
+    long settle_ms; /* SPINNER_LABEL_SETTLE_MS after init */
+    char *pending_text; /* NULL when no request is pending */
+    char *pending_key;
+    long pending_since_ms;
 };
 
-struct buf;
+/* Display text under the default key. */
+void spinner_label_init(struct spinner_label *label, const char *text);
+void spinner_label_free(struct spinner_label *label);
 
-/* Append one synchronized tool-view repaint frame: climb over the previous frame (NULL on first
- * paint), then overprint every row before erasing stale tails, so terminals without synchronized
- * output never show a blank frame. Rows are painted verbatim with the glyph overprinting the last
- * row's first cell; their widths are recorded in painted. Pure with respect to the terminal. */
-void spinner_build_tool_frame(struct buf *frame, const struct spinner_row *rows, int row_count,
-                              const char *glyph, int terminal_cols,
-                              const struct spinner_tool_frame *previous,
-                              struct spinner_tool_frame *painted);
+/* Replace the displayed state at once and discard any pending request. A key other than the
+ * default is held until the next set; the default key returns the label to requests. Returns
+ * whether the displayed text changed. */
+int spinner_label_set(struct spinner_label *label, const char *key, const char *text);
+
+/* Request a change at now_ms, unless a set label is held. Repeating the displayed key updates its
+ * text at once, and repeating the pending key updates its text but keeps its settling time.
+ * Returns whether the displayed text changed. */
+int spinner_label_request(struct spinner_label *label, const char *key, const char *text,
+                          long now_ms);
+
+/* Display a pending key that has stayed stable for settle_ms by now_ms. */
+void spinner_label_settle(struct spinner_label *label, long now_ms);
 
 #endif /* HAX_RENDER_SPINNER_H */

@@ -22,7 +22,7 @@
 - **Inspectable** — See exactly what was sent to the model and what it replied in a usable
   transcript view (Ctrl+T). Optionally collect a detailed wire protocol trace.
 - **Broad provider support** — OpenAI (+compatible), Anthropic (+compatible), Codex (via a ChatGPT
-  subscription), OpenRouter, OpenCode Zen/Go, llama.cpp, and custom endpoints.
+  subscription), OpenRouter, OpenCode Zen/Go, DeepSeek, llama.cpp, Ollama, and custom endpoints.
 - **Well-behaved Unix tool** — XDG paths, clean stdout in `-p` one-shot mode with resume hints on
   stderr, plain-text config and session files, composition via subprocesses instead of plugins.
 
@@ -50,21 +50,23 @@ brew install oleksandrchekhovskyi/hax/hax
 
 On Arch Linux, hax is in the [AUR](https://aur.archlinux.org/packages/hax) as `hax`.
 
-On any Linux distribution, download the prebuilt static binary for your architecture (x86_64 or
-aarch64) from the [latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest),
-then unpack the `hax` binary into any directory on your `PATH`.
+Alternatively, prebuilt binaries for Linux (x86_64 and aarch64) and macOS (Apple Silicon) are
+available from the [latest release](https://github.com/OleksandrChekhovskyi/hax/releases/latest):
+unpack the `hax` binary into any directory on your `PATH`. The Linux binaries are fully static,
+and the macOS one needs only libraries that ship with macOS. If macOS refuses to run a binary
+downloaded through a browser, clear its quarantine flag with `xattr -d com.apple.quarantine hax`.
 
 ### From source
 
 Building from source gives a binary linked against your system's shared libraries instead of
-a static one:
+the libraries the prebuilt binaries bundle:
 
 ```sh
 git clone https://github.com/OleksandrChekhovskyi/hax.git
 cd hax
 scripts/install_deps.sh   # Debian/Ubuntu, Fedora, Arch, openSUSE, Alpine, macOS, FreeBSD, OpenBSD
 make                      # the binary is now at ./build/hax
-make install              # optional; may prompt for sudo
+make install              # optional; installs into ~/.local (PREFIX=... to override)
 ```
 
 `scripts/install_deps.sh` installs the build dependencies — a C compiler, `libcurl`,
@@ -72,8 +74,9 @@ make install              # optional; may prompt for sudo
 completion when available. On other platforms, install those packages by hand and run `make`.
 
 For hacking on hax, `make symlink` links the freshly built binary into `~/.local/bin` so it
-stays on `PATH` across rebuilds. `make lint` additionally needs `clang-format` and
-`clang-tidy` (`scripts/install_deps.sh lint` installs them).
+stays on `PATH` across rebuilds. `make tests` additionally needs `tmux`, which drives the
+interactive scenarios (`scripts/install_deps.sh tests` installs it), and `make lint` needs
+`clang-format` and `clang-tidy` (`scripts/install_deps.sh lint` installs them).
 
 The examples below use `hax` as if it is on `PATH`; after a plain build, use `./build/hax`.
 
@@ -89,6 +92,7 @@ and choose a model. hax remembers interactive provider, model, and effort select
 | `anthropic` | Set `ANTHROPIC_API_KEY`. |
 | `openrouter` | Set `OPENROUTER_API_KEY`. |
 | `opencode-zen` / `opencode-go` | Set `OPENCODE_API_KEY`. |
+| `deepseek` | Set `DEEPSEEK_API_KEY`. |
 | `llama.cpp` | Run `llama-server`. |
 | `ollama` | Run `ollama serve`. |
 | Compatible or custom endpoint | See [docs/providers.md](./docs/providers.md). |
@@ -107,8 +111,9 @@ hax --resume                # pick a past session for this directory
 hax --resume=ID -p "next"   # resume a specific session in one-shot mode
 ```
 
-Run `hax --help` for CLI usage. In the REPL, type `/help` for slash commands and shortcuts.
-See [docs/usage.md](./docs/usage.md) for more detailed usage documentation.
+Run `hax --help` for CLI usage, or `man hax` where the man pages are installed. In the REPL, type
+`/help` for slash commands and shortcuts. See [docs/usage.md](./docs/usage.md) for more detailed
+usage documentation.
 
 ## Configuration
 
@@ -119,6 +124,16 @@ CLI selection flag overrides them.
 
 See [docs/configuration.md](./docs/configuration.md) for the file format, resolution order, presets,
 and the setting reference.
+
+## Extras
+
+Optional companions that live outside the core binary, each a small Python CLI with a skill that
+tells hax when to use it:
+
+- [hax-web](https://github.com/OleksandrChekhovskyi/hax-web) — web search and readable page
+  fetching.
+- [hax-mcp](https://github.com/OleksandrChekhovskyi/hax-mcp) — tools of MCP servers, with
+  definitions entering the model's context only as a task needs them.
 
 ## More docs
 

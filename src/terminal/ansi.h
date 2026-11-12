@@ -37,6 +37,10 @@
 #define ANSI_ERASE_SCREEN ANSI_CSI "2J" /* entire screen (ED 2) */
 #define ANSI_CURSOR_HOME  ANSI_CSI "H"
 
+/* DECSC/DECRC: one saved screen position (with SGR state); scrolling invalidates it. */
+#define ANSI_CURSOR_SAVE    ANSI_ESC "7"
+#define ANSI_CURSOR_RESTORE ANSI_ESC "8"
+
 #define ANSI_BRACKETED_PASTE_ENABLE  ANSI_CSI "?2004h"
 #define ANSI_BRACKETED_PASTE_DISABLE ANSI_CSI "?2004l"
 

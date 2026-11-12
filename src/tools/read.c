@@ -607,9 +607,8 @@ static const char READ_DESCRIPTION[] =
     "its 1-indexed line number, a " READ_LINE_DELIM " arrow, then the line's content. The prefix "
     "is presentation only — it is NOT part of the file on disk; do not include it in `edit` tool "
     "`old_string`/`new_string` arguments. Optional 1-indexed line `offset` and `limit` slice a "
-    "range; without them, the whole file is returned. Image files (PNG/JPEG/GIF/WebP) are "
-    "detected by content and attached to the result as images when the model supports image "
-    "input.";
+    "range; without them, the whole file is returned. Image files (PNG/JPEG/GIF/WebP) are detected "
+    "by content and attached to the result as images when the model supports image input.";
 
 static const struct tool_param READ_PARAMS[] = {
     {.name = "path", .type = "string", .required = 1, .description = "Path to the file."},

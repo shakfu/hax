@@ -2,10 +2,12 @@
 #ifndef HAX_PROVIDER_H
 #define HAX_PROVIDER_H
 
+#include <jansson.h>
 #include <stddef.h>
 
 #include "catalog.h"
 #include "effort.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 /* Flat, provider-independent conversation records. Adapters may group adjacent records when their
@@ -34,6 +36,7 @@ enum item_origin {
     ITEM_ORIGIN_REFUSED,      /* TOOL_RESULT for a call disabled by the frontend */
     ITEM_ORIGIN_SUMMARIZED,   /* TOOL_RESULT standing in for separately displayed output */
     ITEM_ORIGIN_TASK_NOTE,    /* synthetic USER_MESSAGE reporting finished background tasks */
+    ITEM_ORIGIN_COMPACTION,   /* TURN_USAGE of a summarization request, not an agent turn */
 };
 
 /* One inline image carried by an item: base64 payload plus the metadata
@@ -68,12 +71,17 @@ struct item {
     char *reasoning_json;
     /* REASONING: human-readable reasoning; an item may carry either form or both. */
     char *reasoning_text;
+    /* REASONING: Chat Completions member reasoning_text streamed in; NULL when unknown. */
+    char *reasoning_field;
     /* REASONING / TURN_USAGE: source identity. Opaque reasoning may be bound to this exact pair. */
     char *provider;
     char *model;
     enum item_origin origin;
     /* TURN_USAGE: owned accounting payload; NULL for other kinds. */
     struct turn_usage *usage;
+    /* Copied from the source session by /fork: context this conversation reads but did not
+     * pay for. */
+    int inherited;
 };
 
 /* Release all fields owned by `item`. The item must not be used afterward. NULL-safe. */
@@ -90,9 +98,27 @@ char *item_image_placeholder(const struct item_image *image);
 size_t items_image_base64_bytes(const struct item *items, size_t n_items);
 size_t items_image_count(const struct item *items, size_t n_items);
 
+/* Rough token counts for ordering and budgeting, never exact accounting: four bytes of text per
+ * token and a fixed cost per image, since providers bill images by dimensions rather than bytes.
+ * An item counts its message text, tool name, arguments, output, and readable reasoning; opaque
+ * reasoning state does not tokenize like text and is left out. `text` may be NULL. */
+#define ITEM_IMAGE_TOKEN_ESTIMATE 2000L
+long bytes_token_estimate(size_t bytes);
+long text_token_estimate(const char *text);
+long items_token_estimate(const struct item *items, size_t n_items);
+
 /* Index of the newest compaction seed, or 0 when there is none. Compaction summarizes a prefix
  * instead of discarding it, so a request built from `items` starts here, not at 0. */
 size_t items_context_floor(const struct item *items, size_t n_items);
+
+/* True for a prompt the user typed: synthetic compaction, continuation, and task-note messages
+ * are excluded. This is the unit /undo and /fork count in, in memory and in the session file. */
+int item_is_typed_prompt(const struct item *item);
+
+/* Index where a cut keeping the first `keep_user_turns` typed prompts lands: before the next
+ * prompt's turn boundary, so the kept tail ends with its own response. Returns n_items when
+ * nothing is cut. */
+size_t items_user_turn_cut(const struct item *items, size_t n_items, size_t keep_user_turns);
 
 /* One JSON Schema property advertised for a tool. Zeroed optional fields are omitted from the
  * generated schema, so `minimum` cannot express a bound of 0. */
@@ -169,7 +195,7 @@ struct turn_provenance {
  * with `cost_estimated` indicating when it is an estimate instead. */
 struct turn_usage {
     struct stream_usage usage;
-    long elapsed_ms;            /* stream wall time, including retries; -1 = unknown */
+    long elapsed_ms;            /* wall time of this attempt; -1 = unknown */
     long uncached_input_tokens; /* count priced by cost_input; -1 = unknown */
     double cost_input;
     double cost_cache_read;
@@ -221,6 +247,9 @@ struct stream_event {
         struct {
             const char *text; /* NULL or "" allowed — signals reasoning
                                  activity even when no plaintext is exposed */
+            /* Static storage: the Chat Completions member `text` arrived in; NULL for other
+             * wires. */
+            const char *field;
         } reasoning_delta;
         struct {
             int attempt;      /* 1-based attempt that just failed */
@@ -243,15 +272,21 @@ struct stream_event {
             struct stream_response response; /* zeroed when nothing was identified */
         } done;
         struct {
-            const char *message;
+            const char *message; /* for people: may be prefixed, truncated, or a fallback */
             int http_status;
+            /* What the server said, for the adapter to classify the failure: its native error
+             * code or type, and its own error text from a recognized error field (or a body
+             * that is not JSON). Either may be NULL; agent code must not branch on them. */
+            const char *code;
+            const char *detail;
+            enum api_error_kind kind; /* set by the adapter; API_ERROR_OTHER when unclassified */
             /* Usage the provider reported before the failure, or NULL.
              * Truncated responses (max_tokens/length) are billed like
              * complete ones, so translators that captured usage attach
              * it here and the agent accounts it exactly as EV_DONE's. */
             const struct stream_usage *usage;
             /* Identity captured before the failure, or NULL; a retained
-             * footer owes the same attribution as EV_DONE's. */
+             * usage record owes the same attribution as EV_DONE's. */
             const struct stream_response *response;
         } error;
     } u;
@@ -265,6 +300,10 @@ enum provider_cap {
     PROVIDER_CAP_YES = 1,
     PROVIDER_CAP_NO = 2,
 };
+
+/* Whether the JSON string array `list` contains `value`; a missing or malformed list is unknown,
+ * not unsupported. */
+enum provider_cap provider_cap_listed(const json_t *list, const char *value);
 
 /* Raw metadata reported by a provider for one model. Every field after `id` is optional;
  * model_info_init establishes the unknown sentinels. Resolved metadata belongs in model_meta.h. */
@@ -310,7 +349,23 @@ struct model_probe {
     /* Locate `model` in the response and fill initialized `out`. Runs off-thread without access to
      * the provider, so implementations must be pure and thread-safe. */
     void (*parse)(const char *body, const char *model, struct model_info *out);
+    /* Without `parse`, the response lists models in an array of objects: the root member holding
+     * the array (NULL → "data"), each entry's id member (NULL → "id"), and the refinement applied
+     * to the entry whose id is `model`, under the same purity contract; without a refinement the
+     * listing yields its ids alone. Static strings. */
+    const char *list_member;
+    const char *id_member;
+    void (*parse_entry)(const json_t *entry, struct model_info *out);
+    /* Optional: whether to leave an entry out of the listed ids, as the model picker does. */
+    int (*entry_hidden)(const json_t *entry);
 };
+
+/* Fill initialized `out` from a probe response through `probe`'s parse or listing locator; a
+ * response that is not JSON or lacks `model` leaves it untouched. With the locator, `model` may be
+ * NULL, and a non-NULL `ids` receives the listed ids other than hidden ones (string_array_free),
+ * or NULL when the response holds no well-formed listing. */
+void model_probe_parse(const struct model_probe *probe, const char *body, const char *model,
+                       struct model_info *out, char ***ids);
 
 /* Release all request fields owned by `probe` and leave it zeroed. NULL-safe. */
 void model_probe_clear(struct model_probe *probe);
@@ -351,8 +406,9 @@ struct provider {
                        char **error, http_tick_cb tick, void *tick_user);
     /* Return a borrowed array of accepted wire effort values. Zero or NULL means unsupported. */
     size_t (*list_efforts)(struct provider *provider, const char *const **efforts);
-    /* Prepare a small metadata request for one model. Return 0 with owned request fields, or -1
-     * when nothing can be fetched. NULL leaves metadata resolution to the catalog. */
+    /* Prepare a small metadata request for `model`, or for the listing alone when it is NULL.
+     * Return 0 with owned request fields, or -1 when nothing can be fetched. NULL leaves metadata
+     * resolution to the catalog. */
     int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
     void (*destroy)(struct provider *provider);
     /* Every destroy callback must call model_meta_release before freeing the provider. */

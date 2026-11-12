@@ -12,7 +12,8 @@ corresponding `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, or `XDG_CACHE_HOME` variable 
 | --- | --- |
 | User configuration | `~/.config/hax/config.json` |
 | Remembered interactive selections | `~/.local/state/hax/state.json` |
-| Sessions and prompt history | `~/.local/state/hax/` |
+| Logins made with `/login` | `~/.local/state/hax/auth.json` |
+| Sessions and prompt history | `~/.local/state/hax/sessions/<encoded-cwd>/` |
 | Model metadata cache | `~/.cache/hax/catalog.json` |
 
 `config.json` expresses durable, user-owned intent. It is suitable for a dotfiles repository or a
@@ -24,7 +25,8 @@ your portable configuration.
 For an ordinary setting, the first defined value wins:
 
 ```text
-current-process override → resumed conversation → environment → state.json → config.json → default
+current-process override → resumed conversation → environment
+    → state.json → config.json → default
 ```
 
 The resumed-conversation tier applies to provider, model, effort, and preset. This ensures `hax -c`
@@ -41,10 +43,6 @@ Sources behave as follows:
   interactive choices.
 - `config.json` should hold durable defaults, provider definitions, and presets. Do not edit
   `state.json` by hand.
-
-A preset is a complete stance rather than a bag of partial defaults. Explicit provider/model/effort
-input exits or suppresses a lower-priority preset instead of silently mixing with it. Select a preset
-explicitly when that is what you want.
 
 In the REPL, `/config` shows each registered setting's resolved value, source, and description. It
 also identifies settings that can be changed for the running process:
@@ -106,10 +104,10 @@ credential itself in JSON.
 
 ```json
 {
-  "provider": "openai-compatible",
+  "provider": "vllm",
   "model": "Qwen3-30B",
   "providers": {
-    "openai-compatible": {
+    "vllm": {
       "display_name": "vLLM",
       "base_url": "http://127.0.0.1:8000/v1"
     }
@@ -195,9 +193,10 @@ Preset fields:
 directory, while absolute paths and `@~/...` work directly. Prefer `system_prompt_append` so updates
 to hax's built-in safety and workflow guidance are retained.
 
-A preset replaces the previous preset as a whole. Explicitly choosing a provider, model, or effort
-leaves the active preset. Endpoint and credential settings are not preset fields; define those on a
-custom provider and point the preset to it.
+A preset is a complete stance rather than a bag of partial defaults: it replaces the previous preset
+as a whole, and an explicit provider, model, or effort from a higher-priority source leaves or
+suppresses it instead of mixing with it. Endpoint and credential settings are not preset fields;
+define those on a custom provider and point the preset to it.
 
 `/preset-save <name> [tint]` writes the current selection to `config.json` as a preset and activates
 it. The command preserves other loaded keys but normalizes JSON formatting. Because it rewrites
@@ -242,9 +241,9 @@ provider-dependent.
 | `theme` | `HAX_THEME` | `auto` | `auto`, `dark`, `light`, `ansi`, or `off`. |
 | `tint` | `HAX_TINT` | `teal` | Model-output tint: `teal`, `violet`, `rose`, or `sage`. |
 | `keep_awake` | `HAX_KEEP_AWAKE` | on | Best-effort idle-sleep inhibition while a turn runs. |
-| `compact.auto` | `HAX_COMPACT_AUTO` | on | Automatically summarize history near the context limit. |
-| `compact.threshold` | `HAX_COMPACT_THRESHOLD` | `85` | Context percentage that triggers automatic compaction. |
-| `max_turns` | `HAX_MAX_TURNS` | `auto` | Model round-trips per user turn: interactive pauses, one-shot aborts. `auto`: unlimited interactively, 100 in one-shot. |
+| `compact.auto` | `HAX_COMPACT_AUTO` | on | Automatically summarize the conversation near the context limit. |
+| `compact.threshold` | `HAX_COMPACT_THRESHOLD` | `85` | Context percentage that triggers automatic compaction. It triggers sooner when needed to keep 16k tokens, or a quarter of a small window, free. |
+| `max_turns` | `HAX_MAX_TURNS` | `0` | Model round-trips per user turn before hax pauses (interactive) or aborts (one-shot). `0` is unlimited. |
 
 `theme=auto` respects `NO_COLOR`, terminal color support, and `COLORFGBG` when available. Terminals
 rarely report a light background reliably, so set `light` explicitly if auto detection is wrong.
@@ -293,11 +292,10 @@ Per-model overrides can be placed under `catalog.models`, with costs in USD per 
 
 Blocks are keyed by the runtime provider id (the `providers.<id>` name) or by the models.dev
 provider key when the two differ; the runtime-id block wins field by field. Configured fields
-override both the cached snapshot and metadata the provider reports live — see
-[Codex](./providers.md#codex) for a worked context-window override. Model API overrides for mixed
-gateways are covered under [Custom providers](./providers.md#custom-providers). A `~` on displayed
-spend means the result is estimated from token counts and this metadata; check provider billing
-for authoritative costs.
+override both the cached snapshot and metadata the provider reports live; the Codex section of
+[providers.md](./providers.md#codex) has a worked context-window override, and its Custom providers
+section covers model API overrides for mixed gateways. A `~` on displayed spend means the result is
+estimated from token counts and this metadata; check provider billing for authoritative costs.
 
 ### Tools and transport
 
@@ -322,14 +320,12 @@ When `no_tasks` is on, reaching `bash.timeout` kills the command instead of deta
 ### Provider settings
 
 Every provider reads settings only from its own `providers.<id>` block; nothing bleeds between
-providers. For the first-party providers the endpoint, protocol, and credential variable
-(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) are pinned — `base_url` and `api`
-in their blocks warn and are ignored, so no setting can redirect a first-party key or change what
-it speaks. Their other advanced fields (the same ones
-[custom providers](./providers.md#custom-providers) accept) are honored but rarely needed; a
-different endpoint is a custom provider, not a tweak. Codex is pinned the same way, and its
-credentials come from the ChatGPT login ([`/login`](./providers.md#codex)) rather than a key, so
-`api_key` and `api_key_env` in its block warn and are ignored.
+providers. Most shipped hosted providers, such as `openai` and `deepseek`, pin their endpoint,
+protocol, and credential variable: `base_url` and `api` in their blocks warn and are ignored, so no
+setting can redirect their key or change what it speaks. Their other advanced fields (the same ones
+custom providers accept) are honored but rarely needed; a different endpoint is a custom provider,
+not a tweak. Codex is pinned the same way, and its credentials come from the ChatGPT login made
+with `/login` rather than a key, so `api_key` and `api_key_env` in its block warn and are ignored.
 
 The shipped `openai-compatible` and `anthropic-compatible` providers are configured the same way —
 through their own `providers.<name>` blocks — and additionally bind environment variables to those
@@ -344,7 +340,8 @@ Keys in the `providers.openai-compatible` block:
 | `display_name` | `HAX_OPENAI_DISPLAY_NAME` | — | Banner and picker name. |
 | `api` | `HAX_OPENAI_API` | `chat` | `chat` (Chat Completions) or `responses`. |
 | `reasoning_format` | `HAX_OPENAI_REASONING_FORMAT` | `flat` | Effort request shape: `flat` or `nested`. |
-| `reasoning_roundtrip` | `HAX_REASONING_ROUNDTRIP` | `auto` | Replay reasoning text: `off`, `on`, or a field name. |
+| `reasoning_roundtrip` | `HAX_OPENAI_REASONING_ROUNDTRIP` | `auto` | Replay reasoning text: `auto`, `off`, or a field name. |
+| `reasoning_required` | `HAX_OPENAI_REASONING_REQUIRED` | `auto` | Send the reasoning field on every assistant message, even empty; `auto` follows the catalog per model. |
 | `send_cache_key` | `HAX_OPENAI_SEND_CACHE_KEY` | `auto` | Send a stable prompt-cache key. |
 | `request_cost` | `HAX_OPENAI_REQUEST_COST` | `auto` | Request provider-specific per-response cost data. |
 | `cache` | `HAX_OPENAI_CACHE` | `auto` | Send explicit prompt-cache breakpoints. |
@@ -375,7 +372,7 @@ When model metadata has no output limit, `max_tokens` falls back internally to 3
 | --- | --- | --- | --- |
 | `providers.llamacpp.base_url` | `HAX_LLAMACPP_BASE_URL` | — | Full llama-server URL; overrides the port. |
 | `providers.llamacpp.api_key` | `HAX_LLAMACPP_API_KEY` | — | Bearer token when llama-server uses `--api-key`. |
-| `providers.llamacpp.port` | `HAX_LLAMACPP_PORT` | `8080` | llama-server port when no base URL is set. |
+| `providers.llamacpp.port` | `HAX_LLAMACPP_PORT` | `9931` | llama-server port when no base URL is set. |
 | `providers.mock.script` | `HAX_MOCK_SCRIPT` | — | Mock-provider script path. |
 
 Custom provider blocks are documented in [providers.md](./providers.md#custom-providers).
