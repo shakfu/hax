@@ -12,6 +12,7 @@
 #include "agent_dispatch.h"
 #include "agent_loop.h"
 #include "agent_stats.h"
+#include "agent_stream.h"
 #include "banner.h"
 #include "catalog.h"
 #include "compact.h"
@@ -146,16 +147,19 @@ static const char *pause_label(void *user)
     return cancel_pause_requested() ? "pausing... (esc again to interrupt)" : NULL;
 }
 
-/* Curl wait/chunk hook for cancellation and the timer-driven retry label. */
-static int agent_stream_tick(void *user)
+/* Sampled on every transport tick, which also drives the timer-based retry label. */
+static enum agent_signal repl_poll(void *user)
 {
-    struct render_ctx *render = user;
-    /* Before first content, a pause cancels at once; the loop maps the empty turn to a resumable
-     * pause. */
-    if (cancel_pause_requested() && !render->stream.content_seen)
-        return 1;
-    render_update_retry_label(render);
-    return cancel_abort_requested();
+    struct agent_state *state = user;
+    render_update_retry_label(state->render);
+    return agent_interrupt_signal();
+}
+
+static enum agent_signal repl_checkpoint(void *user)
+{
+    (void)user;
+    interrupt_resolve_pending_escape();
+    return agent_interrupt_signal();
 }
 
 static int render_on_event(const struct stream_event *event, void *user)
@@ -165,11 +169,6 @@ static int render_on_event(const struct stream_event *event, void *user)
 
     if (event->kind != EV_RETRY)
         render_retry_end(render);
-
-    /* Once output exists, a pause must preserve it by waiting for a turn seam. */
-    if (event->kind == EV_TEXT_DELTA || event->kind == EV_REASONING_DELTA ||
-        event->kind == EV_REASONING_ITEM || event->kind == EV_TOOL_CALL_START)
-        render->stream.content_seen = 1;
 
     switch (event->kind) {
     case EV_TEXT_DELTA:
@@ -203,14 +202,7 @@ static int render_on_event(const struct stream_event *event, void *user)
         disp_flush(disp);
         break;
     case EV_ERROR:
-        /* Closing the render state flushes partial text before the error line. */
-        render_open_block(render);
-        disp_write_ansi(disp, theme_open(THEME_ERROR));
-        disp_printf(disp, "[error: %s]", event->u.error.message);
-        disp_write_ansi(disp, ANSI_RESET);
-        disp_putc(disp, '\n');
-        disp_flush(disp);
-        break;
+        break; /* render_loop_error() draws it if the run ends on it */
     }
 
     return 0;
@@ -456,12 +448,10 @@ void agent_apply_settings(struct agent_state *state, struct provider *provider,
     free(label);
 }
 
-/* Swapping or cutting history invalidates both resumable state and compaction debt tied to the
- * old tail. */
+/* Swapping or cutting history invalidates resumable state tied to the old tail. */
 static void clear_resume_state(struct agent_state *state)
 {
     state->resume_reason = AGENT_RESUME_NONE;
-    state->compaction_deferred = 0;
 }
 
 /* A resumed record can end mid-story; re-offer the empty-send continue its run lost with the
@@ -480,7 +470,6 @@ static void apply_resumed(struct agent_state *state, const struct agent_resumed 
     case AGENT_RESUME_TAIL_EMPTY:
         break;
     }
-    state->compaction_deferred = resumed->compact_owed;
 }
 
 /* Interactive front for agent_finalize_tasks: announce the stop before the kill. */
@@ -691,6 +680,7 @@ static void reshape_after_cut(struct agent_state *state, size_t cut_index, size_
             item_free(&session->items[i]);
         session->n_items = cut_index;
     }
+    session->compact_failures = 0;
 
     transcript_log_reset(state->transcript, session->system_prompt, session->tools,
                          session->n_tools);
@@ -788,19 +778,6 @@ void agent_fork(struct agent_state *state, size_t turn_index)
     reshape_after_cut(state, cut_index, turn_index, "forked", 0);
 }
 
-/* Compaction has no pause seam, so either interrupt cancels the retriable transaction. */
-static int compact_tick(void *user)
-{
-    return agent_stream_tick(user) || cancel_pause_requested();
-}
-
-static int compact_cancelled(void *user)
-{
-    (void)user;
-    interrupt_resolve_pending_escape();
-    return cancel_abort_requested() || cancel_pause_requested();
-}
-
 static void compact_notice(struct render_ctx *render, const char *format, ...)
 {
     va_list args;
@@ -816,35 +793,36 @@ static void compact_notice(struct render_ctx *render, const char *format, ...)
     disp_flush(&render->disp);
 }
 
-/* As agent_compact(), but leaves the status row up for the work that follows. */
-static int compact_conversation(struct agent_state *state, const char *instructions, int automatic)
+/* Run a compaction under whatever interrupt watch the caller holds, showing the "compacting..."
+ * spinner and an outcome notice. The spinner stays up, relabeled "working...", for the work that
+ * follows. Returns 1 only when a seed was appended. */
+static int compact_conversation(struct agent_state *state, const char *instructions,
+                                enum compact_reason reason)
 {
     struct agent_session *session = state->session;
     struct provider *provider = state->provider;
     struct render_ctx *render = state->render;
+    int manual = reason == COMPACT_MANUAL;
 
     if (!provider) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "no provider selected — use /provider");
         return 0;
     }
     if (!session->model || !*session->model) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "no model selected — use /model (or /provider)");
         return 0;
     }
     if (session->n_items == 0) {
-        if (!automatic)
+        if (manual)
             compact_notice(render, "nothing to compact");
         return 0;
     }
 
     render_set_mode(render, RENDER_IDLE);
-    /* Before the status row shows, so it never paints another label first, nor a pause left from
-     * an earlier turn. */
+    /* Before render_stream_begin() shows the spinner, so it never paints another label first. */
     footer_set_label(render->footer, "compacting", "compacting...");
-    cancel_clear_requests();
-    interrupt_arm();
     render_stream_begin(render);
     struct compact_params params = {
         .session = session,
@@ -852,27 +830,23 @@ static int compact_conversation(struct agent_state *state, const char *instructi
         .session_log = state->session_log,
         .transcript_log = state->transcript,
         .instructions = instructions,
+        .reason = reason,
         .hooks =
             {
-                .user = render,
-                .tick = compact_tick,
-                .is_cancelled = compact_cancelled,
+                .user = state,
+                .poll = repl_poll,
+                .checkpoint = repl_checkpoint,
             },
     };
 
     struct compact_result result;
     compact_run(&params, &result);
-    interrupt_disarm();
     /* Release the held label. */
     footer_set_label(render->footer, "working", "working...");
 
     int compacted = result.outcome == COMPACT_COMPLETE;
-    /* Any successful compaction — manual included — settles a deferred end-of-turn pass: the
-     * oversized history it referred to is gone. */
-    if (compacted)
-        state->compaction_deferred = 0;
     /* Manual compaction moves the model past the resumable tail; retract the empty-send offer. */
-    if (compacted && !automatic)
+    if (compacted && manual)
         clear_resume_state(state);
     switch (result.outcome) {
     case COMPACT_COMPLETE:
@@ -889,67 +863,45 @@ static int compact_conversation(struct agent_state *state, const char *instructi
         compact_notice(render, "compaction produced no summary");
         break;
     case COMPACT_NO_PROVIDER:
-        if (!automatic)
-            compact_notice(render, "no provider selected — use /provider");
-        break;
     case COMPACT_NO_MODEL:
-        if (!automatic)
-            compact_notice(render, "no model selected — use /model (or /provider)");
-        break;
     case COMPACT_EMPTY:
-        if (!automatic)
-            compact_notice(render, "nothing to compact");
-        break;
+        break; /* ruled out by the checks above */
     }
+    if (result.auto_suspended)
+        compact_notice(render, "automatic compaction off after %d failures — /compact retries it",
+                       COMPACT_MAX_AUTO_FAILURES);
     compact_result_destroy(&result);
     return compacted;
 }
 
-int agent_compact(struct agent_state *state, const char *instructions, int automatic)
+int agent_compact(struct agent_state *state, const char *instructions, enum compact_reason reason)
 {
-    int compacted = compact_conversation(state, instructions, automatic);
+    /* Clear before the spinner shows: its pause label would report an Esc left from earlier. */
+    cancel_clear_requests();
+    interrupt_arm();
+    int compacted = compact_conversation(state, instructions, reason);
+    interrupt_disarm();
     render_finish(state->render);
     return compacted;
 }
 
-struct repl_loop_ctx {
-    struct agent_state *state;
-};
-
 static int repl_loop_on_event(const struct stream_event *event, void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    return render_on_event(event, ctx->state->render);
-}
-
-static int repl_loop_tick(void *user)
-{
-    struct repl_loop_ctx *ctx = user;
-    return agent_stream_tick(ctx->state->render);
+    struct agent_state *state = user;
+    return render_on_event(event, state->render);
 }
 
 static void repl_loop_turn_begin(void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    render_stream_begin(ctx->state->render);
-}
-
-static int repl_loop_checkpoint(void *user)
-{
-    (void)user;
-    interrupt_resolve_pending_escape();
-    if (cancel_abort_requested())
-        return AGENT_LOOP_SIG_ABORT;
-    if (cancel_pause_requested())
-        return AGENT_LOOP_SIG_PAUSE;
-    return AGENT_LOOP_SIG_NONE;
+    struct agent_state *state = user;
+    render_stream_begin(state->render);
 }
 
 static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_tool_action action,
                                        int image_input, void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    struct render_ctx *render = ctx->state->render;
+    struct agent_state *state = user;
+    struct render_ctx *render = state->render;
     if (action == AGENT_LOOP_TOOL_REFUSE) {
         render_set_mode(render, RENDER_IDLE);
         return dispatch_tool_refused(render, call);
@@ -958,24 +910,33 @@ static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_
         render_set_mode(render, RENDER_IDLE);
         return dispatch_tool_skipped(render, call);
     }
-    return dispatch_tool_call(render, call, image_input, &ctx->state->session->env_selection);
+    return dispatch_tool_call(render, call, image_input, &state->session->env_selection);
 }
 
-static void repl_loop_compact(void *user)
+/* Runs under the loop's interrupt watch, so an Esc latched here reaches its next checkpoint. */
+static int repl_loop_compact(enum compact_reason reason, void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    compact_conversation(ctx->state, NULL, 1);
-    /* Preserve cancellation for the loop checkpoint; otherwise re-arm after compaction. */
-    if (!cancel_abort_requested() && !cancel_pause_requested()) {
-        cancel_clear_requests();
-        interrupt_arm();
-    }
+    return compact_conversation(user, NULL, reason);
+}
+
+/* Drawn when the run ends rather than as the error streams, so a rejection the loop recovers from
+ * by compacting never shows. Closing the render state flushes partial text before the line. */
+static void render_loop_error(struct render_ctx *render, const struct agent_loop_result *result)
+{
+    struct disp *disp = &render->disp;
+    render_open_block(render);
+    disp_write_ansi(disp, theme_open(THEME_ERROR));
+    disp_printf(disp, "[error: %s]",
+                result->error_message ? result->error_message : "stream failed");
+    disp_write_ansi(disp, ANSI_RESET);
+    disp_putc(disp, '\n');
+    disp_flush(disp);
 }
 
 static void repl_loop_task_note(const char *text, void *user)
 {
-    struct repl_loop_ctx *ctx = user;
-    struct render_ctx *render = ctx->state->render;
+    struct agent_state *state = user;
+    struct render_ctx *render = state->render;
     render_open_block(render);
     disp_write_ansi(&render->disp, ANSI_DIM);
     disp_write(&render->disp, text, strlen(text));
@@ -1123,10 +1084,8 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
          * recolors the prompt instead of keeping the startup theme's bytes. */
         char *line = input_readline(input, build_prompt(prompt_buffer, sizeof(prompt_buffer)));
         cursor_hide();
-        if (!line) {
-            putchar('\n');
+        if (!line)
             break;
-        }
         /* Empty input continues only resumable turns. */
         if (!*line && state.resume_reason == AGENT_RESUME_NONE) {
             free(line);
@@ -1166,19 +1125,22 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         herdr_report(HERDR_WORKING, session_log_resume_hint(state.session_log));
 
-        /* Settle deferred compaction before appending steering input or sending another oversized
-         * request. */
-        if (state.compaction_deferred) {
-            agent_compact(&state, NULL, 1);
-            /* A newly latched interrupt belongs to compaction and cancels the whole send; retain
-             * the debt for the next attempt. */
-            if (cancel_abort_requested() || cancel_pause_requested()) {
+        /* Compact before appending the prompt rather than when a user turn ends: only a send
+         * proves the conversation continues. A failed pass lets the send proceed. */
+        if (compact_due(&session, current_provider, line)) {
+            agent_compact(&state, NULL, COMPACT_THRESHOLD);
+            /* An Esc during compaction stops the send as well: nothing launches after it, and
+             * the prompt returns to the editor unsent. A compaction it cut short stays due. */
+            if (agent_interrupt_signal() != AGENT_SIGNAL_NONE) {
+                if (*line) {
+                    disp_block_separator(&render.disp);
+                    ui_note("message not sent — press Enter to send it");
+                    disp_sync_external_line(&render.disp);
+                    input_set_preseed(input, line);
+                }
                 free(line);
                 continue;
             }
-            /* Settled on success (agent_compact clears the flag), attempted
-             * on failure: either way, don't retry ahead of every send. */
-            state.compaction_deferred = 0;
         }
 
         int continued = 0;
@@ -1231,18 +1193,13 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             disp_sync_external_line(&render.disp);
         }
 
-        /* Each request subsumes the prior prefix, so the latest reported usage is the current
-         * window state. -1 means no request reported it. */
-        long user_turn_context_tokens = -1;
         long user_turn_start_ms = monotonic_ms();
-        int user_turn_errored = 0;
 
         footer_set_timer(render.footer, user_turn_start_ms);
 
         /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. */
         cancel_clear_requests();
         interrupt_arm();
-        struct repl_loop_ctx loop_ctx = {.state = &state};
         struct agent_loop_params loop_params = {
             .session = &session,
             .provider = current_provider,
@@ -1252,11 +1209,11 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
             .continued = continued,
             .hooks =
                 {
-                    .user = &loop_ctx,
+                    .user = &state,
                     .observe = repl_loop_on_event,
-                    .tick = repl_loop_tick,
+                    .poll = repl_poll,
                     .turn_begin = repl_loop_turn_begin,
-                    .checkpoint = repl_loop_checkpoint,
+                    .checkpoint = repl_checkpoint,
                     .tool_call = repl_loop_tool_call,
                     .compact = repl_loop_compact,
                     .task_note = repl_loop_task_note,
@@ -1264,13 +1221,12 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         };
         struct agent_loop_result loop_result;
         agent_loop_run(&loop_params, &loop_result);
-        user_turn_context_tokens = loop_result.last_context_tokens;
-        user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
-        int user_turn_complete = loop_result.outcome == AGENT_LOOP_COMPLETE;
+        int user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
+        if (user_turn_errored)
+            render_loop_error(&render, &loop_result);
         set_resume_state(&state, &loop_result);
         agent_loop_result_destroy(&loop_result);
         interrupt_disarm();
-        /* Snapshot Esc before auto-compaction clears the interrupt latch. */
         int user_pressed_escape = cancel_pause_requested();
         footer_set_timer(render.footer, 0);
 
@@ -1288,18 +1244,6 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         if (!user_turn_errored)
             display_stats_line(&render, current_provider, &session, user_turn_ms);
-
-        /* Auto-compact only completed, Esc-free turns. Clean pauses defer compaction until the
-         * next send; errors and aborts retain partial history for retry or explicit
-         * compaction. */
-        if (compact_should_auto(user_turn_context_tokens,
-                                model_meta_context(current_provider, session.model))) {
-            if (user_turn_complete && !user_pressed_escape)
-                agent_compact(&state, NULL, 1);
-            else if (user_turn_complete || state.resume_reason == AGENT_RESUME_PAUSED ||
-                     state.resume_reason == AGENT_RESUME_MAX_TURNS)
-                state.compaction_deferred = 1;
-        }
 
         /* Esc means the user is already present; otherwise notify when the REPL becomes idle,
          * including errors and max-turn pauses. */

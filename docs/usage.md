@@ -73,11 +73,11 @@ hax --json "fix the failing test" |
 A one-shot run is unlimited by default; set `max_turns` to abort after that many provider
 round-trips.
 
-A one-shot run responds to signals the way the REPL responds to Esc: SIGUSR1 pauses cleanly at
-the next turn boundary (outcome `paused`), and SIGINT (Ctrl-C) or SIGTERM interrupts at once,
-saving completed work (outcome `interrupted`, exit status 130); a second signal kills the
-process. The session stays resumable: `hax --resume=ID -p` without a prompt continues where the
-run stopped, and a new prompt steers it instead.
+A one-shot run responds to signals the way the REPL responds to Esc: SIGUSR1 pauses cleanly after
+the current step, or at once if the model has not started answering (outcome `paused`), and SIGINT
+(Ctrl-C) or SIGTERM interrupts at once, saving completed work (outcome `interrupted`, exit status
+130); a second signal kills the process. The session stays resumable: `hax --resume=ID -p`
+without a prompt continues where the run stopped, and a new prompt steers it instead.
 
 ## REPL commands
 
@@ -235,8 +235,9 @@ nothing.
 
 ## Pausing and steering
 
-The first Esc requests a clean pause. Work already in flight normally finishes, including tool calls,
-and hax returns to a prompt at the next model-turn boundary. At that prompt:
+The first Esc requests a clean pause. Work already in flight normally finishes, including tool calls
+and compaction, and hax returns to a prompt before the next model request. If the compaction ran
+for a message you just sent, the message returns to the prompt unsent. At that prompt:
 
 - press Enter on an empty line to continue;
 - type a message to add new direction before the next model request; or
@@ -277,10 +278,21 @@ including undone user turns and retried requests, with a token row per model whe
 switched; a resumed session shows the same totals. `/usage` asks the provider for account-level
 usage when supported. One-shot runs put equivalent stats on stderr.
 
-Automatic compaction summarizes the older part of the conversation near 85% of a known context
-window. Use `/compact` earlier when the conversation has accumulated obsolete exploration,
-optionally naming what the summary must preserve. Manual compaction works even when the model's
-context limit is unknown.
+Automatic compaction summarizes the older part of the conversation as it nears a known context
+window: at 85%, or earlier on a small window to leave room for the summary. It runs only when the
+conversation goes on, so a conversation you leave is never summarized for nothing. Use `/compact`
+earlier when the conversation has accumulated obsolete exploration, optionally naming what the
+summary must preserve. Manual compaction works even when the model's context limit is unknown.
+
+If the conversation outgrows the context window, even one whose size hax does not know, hax
+compacts it and carries on; with automatic compaction off, `/compact` recovers it. A conversation
+too large to summarize whole is shortened first, oldest detail first, so restate anything from
+early on that still matters. If hax does not recognize a server's context-overflow error, add its
+wording to the provider's `overflow_phrases` setting (see [providers.md](./providers.md)).
+
+After three automatic compactions fail with none succeeding in between, hax stops trying and says
+so. A successful `/compact`, a change of provider, model, effort, or any `/config` setting, `/undo`,
+`/fork`, or a new conversation lets it try again.
 
 For local servers, configure a context window large enough for the system prompt, project context,
 conversation, and response. A small server-side context often appears as truncated answers rather

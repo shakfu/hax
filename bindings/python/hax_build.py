@@ -119,9 +119,15 @@ char *agent_tool_call_run(const struct agent_tool_call *tc, struct tool_run_ctx 
 struct item agent_tool_result_make(const struct item *call, const char *output,
                                    struct tool_run_ctx *ctx);
 
+/* --- agent_stream.h --- */
+enum agent_signal { AGENT_SIGNAL_NONE, AGENT_SIGNAL_PAUSE, AGENT_SIGNAL_ABORT };
+typedef enum agent_signal (*agent_signal_cb)(void *user);
+
+/* --- compact.h (needed by the loop hooks) --- */
+enum compact_reason { COMPACT_MANUAL, COMPACT_THRESHOLD, COMPACT_OVERFLOW };
+
 /* --- agent_loop.h --- */
 enum agent_loop_tool_action { AGENT_LOOP_TOOL_RUN, AGENT_LOOP_TOOL_REFUSE, AGENT_LOOP_TOOL_SKIP };
-enum agent_loop_signal { AGENT_LOOP_SIG_NONE, AGENT_LOOP_SIG_PAUSE, AGENT_LOOP_SIG_ABORT };
 enum agent_loop_outcome {
     AGENT_LOOP_COMPLETE, AGENT_LOOP_PROVIDER_ERROR, AGENT_LOOP_INTERRUPTED,
     AGENT_LOOP_PAUSED, AGENT_LOOP_MAX_TURNS
@@ -129,11 +135,11 @@ enum agent_loop_outcome {
 
 struct agent_loop_hooks {
     void *user;
-    int (*tick)(void *user);
-    int (*checkpoint)(void *user);
+    agent_signal_cb poll;
+    agent_signal_cb checkpoint;
     struct item (*tool_call)(const struct item *call, enum agent_loop_tool_action action,
                              int image_input, void *user);
-    void (*compact)(void *user);
+    int (*compact)(enum compact_reason reason, void *user);
     ...;
 };
 
@@ -164,8 +170,8 @@ enum compact_outcome { COMPACT_COMPLETE, ... };
 
 struct compact_hooks {
     void *user;
-    int (*tick)(void *user);
-    int (*is_cancelled)(void *user);
+    agent_signal_cb poll;
+    agent_signal_cb checkpoint;
     ...;
 };
 
@@ -175,6 +181,7 @@ struct compact_params {
     struct session_log *session_log;
     struct transcript_log *transcript_log;
     const char *instructions;
+    enum compact_reason reason;
     struct compact_hooks hooks;
     ...;
 };
@@ -183,9 +190,12 @@ struct compact_result {
     enum compact_outcome outcome;
     int attempts;
     char *error_message;
+    int auto_suspended;
     ...;
 };
 
+int compact_due(const struct agent_session *session, struct provider *provider,
+                const char *pending_prompt);
 void compact_run(const struct compact_params *params, struct compact_result *result);
 void compact_result_destroy(struct compact_result *result);
 
@@ -239,9 +249,8 @@ const struct hax_abi *hax_abi(void);
 /* Trampolines: cffi emits real C functions that call into Python and handle the GIL. */
 extern "Python" struct item hax_py_tool_call(const struct item *, enum agent_loop_tool_action,
                                              int, void *);
-extern "Python" int hax_py_checkpoint(void *);
-extern "Python" int hax_py_tick(void *);
-extern "Python" void hax_py_compact(void *);
+extern "Python" enum agent_signal hax_py_signal(void *);
+extern "Python" int hax_py_compact(enum compact_reason, void *);
 extern "Python" void hax_py_diag(enum hax_diag_level, const char *, void *);
 
 /* free() for the strings hax hands back. */

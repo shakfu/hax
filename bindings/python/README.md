@@ -248,9 +248,11 @@ by the next one.
 
 ### `agent.compact() -> bool`
 
-Summarizes the conversation in place and reports whether a summary was appended. The loop calls
-this on its own once the context crosses hax's `compact.threshold`, so most callers never need
-it; it is here for a host that wants to compact at a moment of its own choosing.
+Summarizes the conversation in place and reports whether a summary was appended. `send()`
+compacts on its own when the context nears the model's window, and when the provider rejects a
+request as too large, so most callers never need this. It is for a host that wants to compact
+at a moment of its own choosing. A cancel during automatic compaction before a send raises
+`HaxCancelled` and leaves the prompt unsent.
 
 Compaction appends a summary seed rather than deleting anything, so `items` still shows every
 turn — what shrinks is the window the model sees. `compactions` counts how many have happened.

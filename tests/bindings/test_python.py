@@ -494,6 +494,36 @@ def test_context_is_compacted_when_it_crosses_the_threshold() -> None:
         del os.environ["HAX_CONTEXT_LIMIT"]
 
 
+def test_context_is_compacted_before_the_next_send() -> None:
+    """The loop compacts only between its own turns; send() owns the check before a prompt."""
+    use_mock("python_presend_compact.txt")
+    os.environ["HAX_CONTEXT_LIMIT"] = "1000"  # the first reply reports 950 tokens of context
+    try:
+        with hax.Agent(provider="mock") as agent:
+            agent.send("tell me about widgets")
+            expect(agent.compactions == 0,
+                   f"a finished reply is not compacted (got {agent.compactions})")
+            reply = agent.send("and gadgets?")
+            expect(agent.compactions == 1,
+                   f"the next send compacted once (got {agent.compactions})")
+            expect(reply == "Second answer.", f"the send ran after compaction (got {reply!r})")
+            kinds = [(i["origin"], i["text"]) for i in agent.items]
+            seed = next(n for n, (origin, _) in enumerate(kinds) if origin == "compact_seed")
+            prompt = next(n for n, (_, text) in enumerate(kinds) if text == "and gadgets?")
+            expect(seed < prompt, f"the seed precedes the new prompt (got {kinds})")
+    finally:
+        del os.environ["HAX_CONTEXT_LIMIT"]
+
+
+def test_overflow_rejection_is_recovered_by_compacting() -> None:
+    """The compaction hook must report success, or the loop ends on the provider error."""
+    use_mock("python_overflow_compact.txt")
+    with hax.Agent(provider="mock") as agent:
+        reply = agent.send("tell me about widgets")
+        expect(agent.compactions == 1, f"the rejection compacted once (got {agent.compactions})")
+        expect(reply.endswith("Recovered answer."), f"the turn was re-issued (got {reply!r})")
+
+
 def test_failed_construction_releases_hax() -> None:
     """hax_init() refuses a second call, so a half-built Agent must not keep the process claimed."""
     use_mock("hello.txt")
@@ -886,6 +916,8 @@ test_cancel_from_another_thread_stops_the_turn()
 test_cancel_stops_only_the_targeted_agent()
 test_asyncio_runs_agents_concurrently()
 test_context_is_compacted_when_it_crosses_the_threshold()
+test_context_is_compacted_before_the_next_send()
+test_overflow_rejection_is_recovered_by_compacting()
 test_failed_construction_releases_hax()
 test_database_example_enforces_read_only()
 test_several_agents_coexist()

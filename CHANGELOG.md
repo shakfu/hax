@@ -42,11 +42,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - In a [herdr](https://herdr.dev) pane, the REPL reports `working` and `idle` to herdr, plus the
   command that resumes the conversation, so herdr reopens it after a restart. See
   [docs/usage.md](docs/usage.md#running-inside-herdr).
-- Man pages for offline reference: `man hax` for usage, plus `hax-config(5)`, `hax-sessions(5)`,
-  and `hax-providers(7)`. Packages and source builds install them; the prebuilt binaries do not.
 
 ### Changed
 
+- The Python binding follows v0.7.0's compaction: `send()` compacts before the prompt when the
+  context nears the window, and recovers a request rejected as too large. A cancel during that
+  compaction raises `HaxCancelled` with the prompt unsent. The loop hooks now take
+  `enum agent_signal`, so `HAX_ABI_VERSION` is 2 and an extension built against 1 refuses to load.
 - `make install` installs into `~/.local` instead of `/usr/local`, so it needs no sudo. Set
   `PREFIX` to install elsewhere.
 - The wheel is now installable on a machine other than the one that built it. It previously
@@ -63,18 +65,6 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - [docs/embedding.md](docs/embedding.md) now states what a `tool_call` hook owes for a call the
   loop declined to dispatch: the marker text and the `origin` that go with the requested action,
   rather than whatever the host invents.
-
-- Prompts are sent without leading blank lines or trailing whitespace, so a paste or Ctrl+G edit
-  that ends in a newline no longer echoes as empty rows. The first line keeps its indentation.
-  A prompt that is only whitespace sends nothing, and `-p` rejects it as empty.
-- The llama.cpp provider now connects to port 9931 by default, matching `llama-server` since
-  llama.cpp v0.7.0. For an older server, set `HAX_LLAMACPP_PORT=8080` or
-  `providers.llamacpp.port`.
-- The status line stays visible for the whole turn, including while an answer streams or a tool
-  runs, so the elapsed time and the current state, such as a requested pause, are always in view.
-- The model now always knows that `--preset <name>` starts a subagent with one of your presets,
-  so asking for a preset by name works even when no preset has a description. Presets with a
-  description are still the only ones listed for the model to pick on its own.
 
 ### Fixed
 
@@ -101,6 +91,40 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   arguments. See [bindings/python/README.md](bindings/python/README.md).
 - `hax_embed.h` and `AGENTS.md` no longer claim one embedded agent per process; several
   `agent_session`s run under one `hax_init()`, as [docs/embedding.md](docs/embedding.md) says.
+
+## [0.7.0] - 2026-11-12
+
+### Added
+
+- Man pages for offline reference: `man hax` for usage, plus `hax-config(5)`, `hax-sessions(5)`,
+  and `hax-providers(7)`. Packages and source builds install them; the prebuilt binaries do not.
+
+### Changed
+
+- A persistent, live-updating area below the conversation keeps the spinner, elapsed time, and
+  status visible while hax works, even as answers stream and tools run. Pause requests show up
+  immediately, and activity labels change without flickering.
+- Compaction can now recover conversations that already exceed the context limit. Both `/compact`
+  and automatic compaction can summarize a shortened copy, sacrificing older detail first when
+  the full conversation will not fit. With automatic compaction enabled, hax tries to recover from
+  context-overflow errors and continue, even when the server's context size is unknown.
+- Automatic compaction accounts for new tool output and your next message, and leaves room for
+  the summary on small context windows. It runs only when the conversation continues, avoiding
+  unnecessary summaries after a finished reply. Repeated failures suspend automatic compaction
+  instead of retrying indefinitely; one-shot runs now report failures on stderr.
+- Esc lets a compaction whose summary has started finish before pausing; a second Esc cancels it.
+  If compaction ran for a message you just sent, pausing returns that message to the prompt unsent.
+  In one-shot mode, SIGUSR1 likewise lets compaction finish, or pauses immediately if the model
+  has not started answering.
+- Prompt polish: slash-command hints wait until you pause typing, pasted or edited prompts no
+  longer leave empty rows from surrounding whitespace, and quitting removes the empty prompt.
+  Prompt indentation is preserved; whitespace-only input is treated as empty.
+- `/provider` and its completion offer `openai-compatible` and `anthropic-compatible` only once
+  their base URL is configured.
+- Subagent guidance now always explains `--preset <name>`, so the model need not discover how to
+  use a preset you request by name, even when none of your presets has a description.
+- The llama.cpp provider now defaults to port 9931, matching `llama-server` since v0.7.0.
+  For an older server, set `HAX_LLAMACPP_PORT=8080` or `providers.llamacpp.port`.
 
 ## [0.6.1] - 2026-10-15
 

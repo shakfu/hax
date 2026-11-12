@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 
+#include "agent_stream.h"
 #include "provider.h"
 #include "tool.h"
 #include "tools/bash_env.h"
@@ -12,7 +13,7 @@
  * the canonical flat item log (struct agent_session) with its views and mutators, and the
  * helpers that keep the record consistent with its logs and background tasks. Anything here
  * must behave identically in both frontends and needs no live provider stream — provider
- * round-trips belong in agent_loop, presentation in the frontends. */
+ * round-trips belong in agent_stream and agent_loop, presentation in the frontends. */
 
 /* Synthetic history content used to keep interrupted or refused tool turns well formed. */
 #define INTERRUPT_MARKER "[interrupted]"
@@ -74,6 +75,10 @@ struct agent_session {
     /* Wall time of completed user turns, as the session file records it. */
     long worked_ms;
     long last_user_turn_ms; /* -1 until a user turn completes */
+    /* Automatic compactions that failed since one last succeeded, however many turns apart.
+     * Reconfiguration, a settings change, a reset, or a history cut also clears it, since each
+     * can change whether a summary fits. Not persisted. */
+    int compact_failures;
 };
 
 /* Initialize a session. A missing model is valid so the interactive frontend can prompt for one. */
@@ -131,12 +136,16 @@ void agent_session_add_continuation(struct agent_session *session);
 /* Append a boundary between provider round-trips in one user turn. */
 void agent_session_add_boundary(struct agent_session *session);
 
-/* Append an owned usage footer for one provider round-trip. `response` is the identity the
- * provider reported for it, or NULL when the footer stands in for no single stream. `origin` is
+/* Append an owned usage record for one provider round-trip. `response` is the identity the
+ * provider reported for it, or NULL when the record stands in for no single stream. `origin` is
  * ITEM_ORIGIN_COMPACTION for a summarization request, whose window is not the conversation's. */
 void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
                                   const struct stream_usage *usage, long elapsed_ms,
                                   const struct stream_response *response, enum item_origin origin);
+
+/* As agent_session_add_turn_usage, for one served attempt of a request. */
+void agent_session_add_attempt_usage(struct agent_session *session, const struct provider *provider,
+                                     const struct attempt *attempt, enum item_origin origin);
 
 /* Add an interrupt marker unless the latest content is an already-marked tool result. */
 void agent_session_mark_interrupt(struct agent_session *session);
@@ -159,7 +168,6 @@ struct transcript_log;
 struct agent_resumed {
     struct session_log *session_log; /* owned; NULL unless recording reopened the file */
     enum agent_resume_tail tail;
-    int compact_owed; /* the record ends over the compaction threshold: compact before sending */
 };
 
 /* Bind an adopted record at `path` to the run continuing it: reopen the file for appending when
@@ -171,15 +179,19 @@ void agent_session_prepare_resumed(struct agent_session *session, struct provide
                                    const char *path, const struct session_meta *recorded,
                                    struct transcript_log *transcript, struct agent_resumed *out);
 
-/* Context-window size of the newest request a usage footer records in the model-visible
+/* Context-window size of the newest request a usage record reports in the model-visible
  * context, or -1 when none reports it. This is the recorded counterpart of a live run's
- * latest-usage snapshot, for continuation decisions such as compact-before-send; compaction's
- * own accounting, which describes the summarized request rather than the fresh seed's window,
- * is ignored. */
+ * latest-usage snapshot, as the stats display reports it; compaction's own accounting, which
+ * describes the summarized request rather than the fresh seed's window, is ignored. */
 long agent_session_last_context_tokens(const struct agent_session *session);
 
-/* Whether any footer that model metadata can price or bound reports input or output tokens:
- * live footers, inherited or not, and retired footers of this session's own turns. */
+/* agent_session_last_context_tokens() plus an items_token_estimate() of what that usage
+ * record's request could not count: tool results answering its response and everything appended
+ * after it, such as task notes. -1 when no usage record reports window use. */
+long agent_session_context_estimate(const struct agent_session *session);
+
+/* Whether any usage record that model metadata can price or bound reports input or output
+ * tokens: live records, inherited or not, and retired records of this session's own turns. */
 int agent_session_has_reported_usage(const struct agent_session *session);
 
 struct turn;
@@ -206,5 +218,8 @@ void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
  * shutdown destroys, and no completion is announced into an unrelated conversation. */
 void agent_finalize_tasks(struct agent_session *session, struct transcript_log *tlog,
                           struct session_log *slog);
+
+/* The latched interrupt requests as a stop signal. */
+enum agent_signal agent_interrupt_signal(void);
 
 #endif /* HAX_AGENT_CORE_H */

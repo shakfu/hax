@@ -18,6 +18,8 @@ struct captured_event {
     char *name;
     char *args_delta;
     char *message;
+    char *code;   /* EV_ERROR's */
+    char *detail; /* EV_ERROR's */
     int http_status;
     struct stream_usage usage;
     char *response_id;
@@ -86,6 +88,8 @@ static int capture_event(const struct stream_event *event, void *user)
         break;
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
+        captured->code = event->u.error.code ? strdup(event->u.error.code) : NULL;
+        captured->detail = event->u.error.detail ? strdup(event->u.error.detail) : NULL;
         captured->http_status = event->u.error.http_status;
         if (event->u.error.usage)
             captured->usage = *event->u.error.usage;
@@ -109,6 +113,8 @@ static void reset_capture(struct capture_state *capture)
         free(capture->events[i].name);
         free(capture->events[i].args_delta);
         free(capture->events[i].message);
+        free(capture->events[i].code);
+        free(capture->events[i].detail);
         free(capture->events[i].response_id);
         free(capture->events[i].served_model);
         free(capture->events[i].route);
@@ -508,6 +514,7 @@ static void test_finish_reason_length_emits_error(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "length") != NULL);
+    EXPECT_STR_EQ(capture.events[0].code, "length");
     EXPECT(capture.events[0].usage.input_tokens == 1234);
     EXPECT(capture.events[0].usage.output_tokens == 56);
     EXPECT(parser.terminal_emitted == 1);
@@ -535,6 +542,7 @@ static void test_finish_reason_content_filter_emits_error(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "content_filter") != NULL);
+    EXPECT(capture.events[0].code == NULL);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -679,7 +687,7 @@ static void test_native_finish_error_on_close_without_sentinel(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
-/* An upstream failure still leaves a usage footer, which owes the same attribution. */
+/* An upstream failure still leaves a usage record, which owes the same attribution. */
 static void test_response_identity_survives_native_error(void)
 {
     EVENTS_FIXTURE(capture, parser);
@@ -740,6 +748,17 @@ static void test_error_object_emits_error(void)
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[0].message, "Rate limit exceeded");
     EXPECT(parser.terminal_emitted == 1);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+static void test_error_object_reports_server_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    chat_events_feed(&parser, "{\"error\":{\"message\":\"too big\",\"code\":400,"
+                              "\"type\":\"exceed_context_size_error\"}}");
+    EXPECT(capture.n_events == 1);
+    EXPECT_STR_EQ(capture.events[0].code, "exceed_context_size_error");
+    EXPECT_STR_EQ(capture.events[0].detail, "too big");
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -908,7 +927,7 @@ static void test_response_identity_survives_finalize_without_terminal(void)
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
-/* A truncated response still leaves a usage footer, which owes the same attribution. */
+/* A truncated response still leaves a usage record, which owes the same attribution. */
 static void test_response_identity_survives_truncation_error(void)
 {
     EVENTS_FIXTURE(capture, parser);
@@ -1038,6 +1057,7 @@ int main(void)
     test_double_termination_gated();
     test_events_after_terminal_ignored();
     test_error_object_emits_error();
+    test_error_object_reports_server_error();
     test_unparseable_json_ignored();
     test_missing_choices_ignored();
     test_finalize_without_terminal_emits_error();

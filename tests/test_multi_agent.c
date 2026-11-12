@@ -15,6 +15,7 @@
 
 #include "agent_core.h"
 #include "agent_loop.h"
+#include "agent_stream.h"
 #include "config.h"
 #include "harness.h"
 #include "hax_embed.h"
@@ -247,14 +248,14 @@ static int wait_for_finish(const struct fixture *fixture, long timeout_ms)
 }
 
 /* What an embedder's checkpoint hook does: answer for this agent's state, not the process's. */
-static int fixture_checkpoint(void *user)
+static enum agent_signal fixture_checkpoint(void *user)
 {
     struct fixture *fixture = user;
     if (cancel_state_abort_requested(&fixture->cancel))
-        return AGENT_LOOP_SIG_ABORT;
+        return AGENT_SIGNAL_ABORT;
     if (cancel_state_pause_requested(&fixture->cancel))
-        return AGENT_LOOP_SIG_PAUSE;
-    return AGENT_LOOP_SIG_NONE;
+        return AGENT_SIGNAL_PAUSE;
+    return AGENT_SIGNAL_NONE;
 }
 
 static void *fixture_run_cancellable(void *arg)

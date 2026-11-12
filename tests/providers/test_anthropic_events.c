@@ -17,6 +17,8 @@ struct captured_event {
     char *args_delta;
     char *json;
     char *message;
+    char *code;   /* EV_ERROR's */
+    char *detail; /* EV_ERROR's */
     char *response_id;
     char *served_model;
     struct stream_usage usage;
@@ -72,6 +74,8 @@ static int capture_event(const struct stream_event *event, void *user)
         break;
     case EV_ERROR:
         captured->message = strdup(event->u.error.message ? event->u.error.message : "");
+        captured->code = event->u.error.code ? strdup(event->u.error.code) : NULL;
+        captured->detail = event->u.error.detail ? strdup(event->u.error.detail) : NULL;
         captured->usage = event->u.error.usage ? *event->u.error.usage
                                                : (struct stream_usage){-1, -1, -1, -1, -1, -1};
         break;
@@ -88,6 +92,8 @@ static void reset_capture(struct capture_state *capture)
         free(capture->events[i].args_delta);
         free(capture->events[i].json);
         free(capture->events[i].message);
+        free(capture->events[i].code);
+        free(capture->events[i].detail);
         free(capture->events[i].response_id);
         free(capture->events[i].served_model);
     }
@@ -287,11 +293,26 @@ static void test_stop_reason_max_tokens_is_error(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT(strstr(capture.events[0].message, "max_tokens") != NULL);
+    EXPECT_STR_EQ(capture.events[0].code, "max_tokens");
 
     EXPECT(capture.events[0].usage.input_tokens == 150);
     EXPECT(capture.events[0].usage.output_tokens == 99);
     EXPECT(capture.events[0].usage.cached_tokens == 40);
     EXPECT(capture.events[0].usage.cache_write_tokens == 10);
+    EVENTS_FIXTURE_FREE(capture, parser);
+}
+
+/* A reply that ran into the context window is not a finished turn. */
+static void test_stop_reason_context_window_exceeded_is_error(void)
+{
+    EVENTS_FIXTURE(capture, parser);
+    FEED(parser, "{\"type\":\"message_delta\",\"delta\":"
+                 "{\"stop_reason\":\"model_context_window_exceeded\"},"
+                 "\"usage\":{\"output_tokens\":10}}");
+    FEED(parser, "{\"type\":\"message_stop\"}");
+    EXPECT(capture.n_events == 1);
+    EXPECT(capture.events[0].kind == EV_ERROR);
+    EXPECT_STR_EQ(capture.events[0].code, "model_context_window_exceeded");
     EVENTS_FIXTURE_FREE(capture, parser);
 }
 
@@ -315,6 +336,8 @@ static void test_error_event(void)
     EXPECT(capture.n_events == 1);
     EXPECT(capture.events[0].kind == EV_ERROR);
     EXPECT_STR_EQ(capture.events[0].message, "Overloaded");
+    EXPECT_STR_EQ(capture.events[0].code, "overloaded_error");
+    EXPECT_STR_EQ(capture.events[0].detail, "Overloaded");
     EXPECT(parser.terminal_emitted == 1);
     EVENTS_FIXTURE_FREE(capture, parser);
 }
@@ -377,6 +400,7 @@ int main(void)
     test_usage_fragments_merge_at_done();
     test_usage_cache_creation_ttl_breakdown();
     test_stop_reason_max_tokens_is_error();
+    test_stop_reason_context_window_exceeded_is_error();
     test_stop_reason_pause_turn_is_error();
     test_error_event();
     test_ping_and_unparseable_ignored();

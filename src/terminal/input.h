@@ -13,8 +13,9 @@ struct input;
 struct input *input_new(void);
 void input_free(struct input *in);
 
-/* Return a malloc'd message, which may contain '\n'; return NULL on EOF or a
- * double Ctrl-C quit. Ctrl-C with text clears the buffer and editing continues. */
+/* Return a malloc'd message, which may contain '\n'; return NULL on EOF or a double Ctrl-C quit,
+ * after erasing the prompt so the cursor rests where it began. Ctrl-C with text clears the buffer
+ * and editing continues. */
 char *input_readline(struct input *in, const char *prompt);
 
 /* Add a non-empty line with erasedups semantics. When persistence is open, append it to
@@ -52,7 +53,8 @@ struct input_completer;
 int input_add_completer(struct input *in, const struct input_completer *completer);
 
 /* Register the ghost-text hint: after each edit `fn` receives the buffer and returns a malloc'd
- * string, or NULL for no hint. The hook must not touch the tty; NULL `fn` disables it. */
+ * string, or NULL for no hint. A hint appears once typing pauses and then follows edits at once
+ * until none applies. The hook must not touch the tty; NULL `fn` disables it. */
 void input_set_hint(struct input *in, char *(*fn)(const char *buf, void *user), void *user);
 
 /* Register the Ctrl-V paste hook. Ctrl-V or an empty bracketed paste calls

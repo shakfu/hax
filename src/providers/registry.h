@@ -37,7 +37,7 @@ struct provider_def {
     int pinned;
     const char *api_key_env;  /* env var holding the key; NULL → local/no key */
     const char *catalog_id;   /* models.dev key (catalog.h); NULL means none. Shipped defs curate
-                                 it; a config-only def has one only from providers.<id>.catalog_id */
+                                 it; config-only defs get one only from providers.<id>.catalog_id */
     const char *metadata_api; /* /models dialect: "openai" (flat list) or "anthropic" (paged);
                                  NULL follows the default wire's family */
     int send_cache_key;       /* prompt_cache_key default (0/1) */
@@ -77,6 +77,9 @@ struct provider_def {
     int probe;
     const char *unconfigured_reason; /* availability reason without a base_url; NULL →
                                         "no base_url" */
+    /* /provider offers it only once providers.<id>.base_url is configured: a generic endpoint
+     * names nothing to choose until the user supplies one. */
+    int offer_once_configured;
 
     /* Capability hooks the generic constructor installs on the built provider; NULL keeps the
      * generic behavior. A def with a construct override wires its provider itself instead.
@@ -127,6 +130,10 @@ const struct provider_def *provider_default(void);
 /* Return the read-only user-facing registry in autoselect order; internal defs are excluded.
  * `count` receives its length. Foreground-thread only. */
 const struct provider_def *const *provider_all(size_t *count);
+
+/* Whether the /provider picker and its completion offer `def`. Unlike availability, this reads
+ * only config, so it is cheap enough for completion. */
+int provider_offered(const struct provider_def *def);
 
 /* Write the space-separated user-facing provider names in autoselect order. */
 void provider_list_names(FILE *out);

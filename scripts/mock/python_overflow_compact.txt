@@ -1,0 +1,13 @@
+# A request rejected as too large, the summary the recovery compaction draws, then the reply to
+# the re-issued turn.
+#
+#   Used by tests/bindings/test_python.py.
+
+overflow
+end-turn
+
+text The user asked about widgets and was told they ship in pairs.
+end-turn
+
+text Recovered answer.
+end-turn

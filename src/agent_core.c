@@ -5,9 +5,9 @@
 #include <string.h>
 
 #include "agent_env.h"
+#include "agent_stream.h"
 #include "agent_usage.h"
 #include "buf.h"
-#include "compact.h"
 #include "config.h"
 #include "diag.h"
 #include "effort.h"
@@ -19,6 +19,7 @@
 #include "turn.h"
 #include "xalloc.h"
 #include "providers/registry.h"
+#include "system/cancel.h"
 #include "tools/bash_env.h"
 #include "tools/task_registry.h"
 
@@ -256,6 +257,7 @@ void agent_session_reconfigure(struct agent_session *session, struct provider *p
     char *effort = resolve_effort(provider, session->model);
     free(session->effort);
     session->effort = effort;
+    session->compact_failures = 0;
     export_selection(provider, session);
 }
 
@@ -405,6 +407,7 @@ void agent_session_reset(struct agent_session *session)
     session->n_retired = 0;
     session->worked_ms = 0;
     session->last_user_turn_ms = -1;
+    session->compact_failures = 0;
 }
 
 void agent_session_retire(struct agent_session *session, size_t from)
@@ -496,8 +499,8 @@ void agent_session_add_boundary(struct agent_session *session)
 
 void agent_session_mark_interrupt(struct agent_session *session)
 {
-    /* Look past inert trailing items (usage footers, boundaries) to the
-     * last *content* item — footer emission between the tool batch and
+    /* Look past inert trailing items (usage records, boundaries) to the
+     * last *content* item — a usage record between the tool batch and
      * this check must not hide an already-marked result and provoke a
      * duplicate marker. */
     size_t i = session->n_items;
@@ -533,31 +536,60 @@ enum agent_resume_tail agent_session_resume_tail(const struct agent_session *ses
     return AGENT_RESUME_TAIL_EMPTY;
 }
 
-long agent_session_last_context_tokens(const struct agent_session *session)
+/* Window use the newest usage record in `window` reports, or -1 when none does. `at`, when
+ * non-NULL, receives the record's index. */
+static long last_context_tokens(const struct context *window, size_t *at)
 {
-    struct context window = agent_session_context(session);
     /* A summarization request reports the window it summarized, not the conversation's: reading
      * it after a successful compaction would immediately recompact the seed, and after a failed
-     * one it would stand in for the last agent turn. Footers recorded before origins were
+     * one it would stand in for the last agent turn. Usage records written before origins were
      * stamped are recognized by position, right after the seed. */
     size_t floor = 0;
-    if (window.n_items > 0 && window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
+    if (window->n_items > 0 && window->items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
         floor = 1;
-        while (floor < window.n_items && window.items[floor].kind == ITEM_TURN_USAGE)
+        while (floor < window->n_items && window->items[floor].kind == ITEM_TURN_USAGE)
             floor++;
     }
-    for (size_t i = window.n_items; i-- > floor;) {
-        const struct item *item = &window.items[i];
+    for (size_t i = window->n_items; i-- > floor;) {
+        const struct item *item = &window->items[i];
         if (item->kind != ITEM_TURN_USAGE || !item->usage || item->origin == ITEM_ORIGIN_COMPACTION)
             continue;
         const struct stream_usage *usage = &item->usage->usage;
-        if (usage->input_tokens >= 0 && usage->output_tokens >= 0)
+        if (usage->input_tokens >= 0 && usage->output_tokens >= 0) {
+            if (at)
+                *at = i;
             return usage->input_tokens + usage->output_tokens;
+        }
     }
     return -1;
 }
 
-static int footer_reports_tokens(const struct item *item)
+long agent_session_last_context_tokens(const struct agent_session *session)
+{
+    struct context window = agent_session_context(session);
+    return last_context_tokens(&window, NULL);
+}
+
+long agent_session_context_estimate(const struct agent_session *session)
+{
+    struct context window = agent_session_context(session);
+    size_t at;
+    long tokens = last_context_tokens(&window, &at);
+    if (tokens < 0)
+        return -1;
+
+    /* A turn's usage record follows the tool results that answer its response, so results
+     * between the turn's boundary and the record were not part of the request it measures. */
+    size_t turn_start = at;
+    while (turn_start > 0 && window.items[turn_start - 1].kind != ITEM_TURN_BOUNDARY)
+        turn_start--;
+    for (size_t i = turn_start; i < at; i++)
+        if (window.items[i].kind == ITEM_TOOL_RESULT)
+            tokens += items_token_estimate(&window.items[i], 1);
+    return tokens + items_token_estimate(window.items + at + 1, window.n_items - at - 1);
+}
+
+static int usage_reports_tokens(const struct item *item)
 {
     if (item->kind != ITEM_TURN_USAGE || !item->usage)
         return 0;
@@ -568,12 +600,12 @@ static int footer_reports_tokens(const struct item *item)
 int agent_session_has_reported_usage(const struct agent_session *session)
 {
     for (size_t i = 0; i < session->n_items; i++) {
-        if (footer_reports_tokens(&session->items[i]))
+        if (usage_reports_tokens(&session->items[i]))
             return 1;
     }
-    /* A retired inherited footer is neither this session's context nor its bill. */
+    /* A retired inherited usage record is neither this session's context nor its bill. */
     for (size_t i = 0; i < session->n_retired; i++) {
-        if (!session->retired[i].inherited && footer_reports_tokens(&session->retired[i]))
+        if (!session->retired[i].inherited && usage_reports_tokens(&session->retired[i]))
             return 1;
     }
     return 0;
@@ -603,11 +635,6 @@ void agent_session_prepare_resumed(struct agent_session *session, struct provide
 
     settle_resumed_metadata(provider, session);
     out->tail = agent_session_resume_tail(session);
-    /* A pause stops before the loop's compact seam, so the record may end over the threshold;
-     * the run that continues it owes the pre-send pass. */
-    if (provider && session->model)
-        out->compact_owed = compact_should_auto(agent_session_last_context_tokens(session),
-                                                model_meta_context(provider, session->model));
 }
 
 /* An ordinary session then stores nothing extra, while a renamed provider or a gguf path still
@@ -674,6 +701,18 @@ struct agent_absorb_result agent_session_absorb(struct agent_session *session, s
     return result;
 }
 
+void agent_session_add_attempt_usage(struct agent_session *session, const struct provider *provider,
+                                     const struct attempt *attempt, enum item_origin origin)
+{
+    struct stream_response response = {
+        .id = attempt->response_id,
+        .model = attempt->served_model,
+        .route = attempt->route,
+    };
+    agent_session_add_turn_usage(session, provider, &attempt->usage, attempt->elapsed_ms, &response,
+                                 origin);
+}
+
 void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
                       const struct item *items, size_t n_items)
 {
@@ -697,4 +736,14 @@ void agent_finalize_tasks(struct agent_session *session, struct transcript_log *
     session_log_discard_selection(slog);
     agent_flush_logs(tlog, slog, session->items, session->n_items);
     task_registry_shutdown();
+}
+
+enum agent_signal agent_interrupt_signal(void)
+{
+    /* An abort latches a pause too, so read it first. */
+    if (cancel_abort_requested())
+        return AGENT_SIGNAL_ABORT;
+    if (cancel_pause_requested())
+        return AGENT_SIGNAL_PAUSE;
+    return AGENT_SIGNAL_NONE;
 }

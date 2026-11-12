@@ -403,24 +403,49 @@ static void test_listener_timeout_and_cancel(void)
     oauth_listener_close(listener);
 }
 
-/* Listen on an ephemeral [::1] port. Returns the fd and sets *port, or -1. */
-static int squat_v6(int *port)
+/* Listen on [::1] at a port whose 127.0.0.1 side is free. An ephemeral [::1] port alone is not
+ * enough: a TIME_WAIT left on 127.0.0.1 by an earlier loopback test blocks the v4 bind there, so
+ * the port comes from a 127.0.0.1 probe that never connects and so leaves nothing behind. Returns
+ * the squatter fd and sets *port, or returns -1 when [::1] is unavailable. */
+static int squat_v6_only(int *port)
 {
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (fd < 0)
-        return -1;
-    struct sockaddr_in6 addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin6_family = AF_INET6;
-    addr.sin6_addr = in6addr_loopback;
-    socklen_t addr_len = sizeof(addr);
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(fd, 1) != 0 ||
-        getsockname(fd, (struct sockaddr *)&addr, &addr_len) != 0) {
-        close(fd);
-        return -1;
+    for (int attempt = 0; attempt < 20; attempt++) {
+        int probe = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr4;
+        memset(&addr4, 0, sizeof(addr4));
+        addr4.sin_family = AF_INET;
+        addr4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t addr4_len = sizeof(addr4);
+        if (probe < 0 || bind(probe, (struct sockaddr *)&addr4, sizeof(addr4)) != 0 ||
+            getsockname(probe, (struct sockaddr *)&addr4, &addr4_len) != 0) {
+            if (probe >= 0)
+                close(probe);
+            return -1;
+        }
+
+        int squatter = socket(AF_INET6, SOCK_STREAM, 0);
+        if (squatter < 0) {
+            close(probe);
+            return -1;
+        }
+        struct sockaddr_in6 addr6;
+        memset(&addr6, 0, sizeof(addr6));
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_port = addr4.sin_port;
+        addr6.sin6_addr = in6addr_loopback;
+        int bound = bind(squatter, (struct sockaddr *)&addr6, sizeof(addr6)) == 0 &&
+                    listen(squatter, 1) == 0;
+        int bind_errno = errno;
+        close(probe);
+        if (bound) {
+            *port = ntohs(addr4.sin_port);
+            return squatter;
+        }
+        close(squatter);
+        if (bind_errno != EADDRINUSE)
+            return -1;
     }
-    *port = ntohs(addr.sin6_port);
-    return fd;
+    return -1;
 }
 
 /* Whether another socket holds 127.0.0.1:port. SO_REUSEADDR as the listener sets it, so TIME_WAIT
@@ -449,7 +474,7 @@ static int v4_port_held(int port)
 static void test_listener_avoids_v6_conflict(void)
 {
     int taken_port = 0;
-    int squatter = squat_v6(&taken_port);
+    int squatter = squat_v6_only(&taken_port);
     if (squatter < 0)
         T_SKIP("cannot listen on ::1");
 
@@ -467,7 +492,7 @@ static void test_listener_avoids_v6_conflict(void)
         if (listener || !v4_port_held(taken_port))
             break;
         close(squatter);
-        squatter = squat_v6(&taken_port);
+        squatter = squat_v6_only(&taken_port);
         EXPECT(squatter >= 0);
         if (squatter < 0)
             return;

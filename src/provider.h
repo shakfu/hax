@@ -7,6 +7,7 @@
 
 #include "catalog.h"
 #include "effort.h"
+#include "transport/api_error.h"
 #include "transport/http.h"
 
 /* Flat, provider-independent conversation records. Adapters may group adjacent records when their
@@ -96,6 +97,15 @@ char *item_image_placeholder(const struct item_image *image);
 
 size_t items_image_base64_bytes(const struct item *items, size_t n_items);
 size_t items_image_count(const struct item *items, size_t n_items);
+
+/* Rough token counts for ordering and budgeting, never exact accounting: four bytes of text per
+ * token and a fixed cost per image, since providers bill images by dimensions rather than bytes.
+ * An item counts its message text, tool name, arguments, output, and readable reasoning; opaque
+ * reasoning state does not tokenize like text and is left out. `text` may be NULL. */
+#define ITEM_IMAGE_TOKEN_ESTIMATE 2000L
+long bytes_token_estimate(size_t bytes);
+long text_token_estimate(const char *text);
+long items_token_estimate(const struct item *items, size_t n_items);
 
 /* Index of the newest compaction seed, or 0 when there is none. Compaction summarizes a prefix
  * instead of discarding it, so a request built from `items` starts here, not at 0. */
@@ -262,15 +272,21 @@ struct stream_event {
             struct stream_response response; /* zeroed when nothing was identified */
         } done;
         struct {
-            const char *message;
+            const char *message; /* for people: may be prefixed, truncated, or a fallback */
             int http_status;
+            /* What the server said, for the adapter to classify the failure: its native error
+             * code or type, and its own error text from a recognized error field (or a body
+             * that is not JSON). Either may be NULL; agent code must not branch on them. */
+            const char *code;
+            const char *detail;
+            enum api_error_kind kind; /* set by the adapter; API_ERROR_OTHER when unclassified */
             /* Usage the provider reported before the failure, or NULL.
              * Truncated responses (max_tokens/length) are billed like
              * complete ones, so translators that captured usage attach
              * it here and the agent accounts it exactly as EV_DONE's. */
             const struct stream_usage *usage;
             /* Identity captured before the failure, or NULL; a retained
-             * footer owes the same attribution as EV_DONE's. */
+             * usage record owes the same attribution as EV_DONE's. */
             const struct stream_response *response;
         } error;
     } u;
