@@ -68,6 +68,16 @@ pub fn build_body(cfg: &Config, messages: &[Message], tools: &[Value]) -> Value 
         }
     }
 
+    // The cache prefix runs tools, then system, then messages. rxa's tools and system prompt are
+    // fixed for the process, so the system marker also covers the tools.
+    if let Some(block) = wire
+        .last_mut()
+        .and_then(|m| m["content"].as_array_mut())
+        .and_then(|c| c.last_mut())
+    {
+        block["cache_control"] = json!({ "type": "ephemeral" });
+    }
+
     let mut body = json!({
         "model": cfg.model,
         "max_tokens": MAX_TOKENS,
@@ -75,7 +85,11 @@ pub fn build_body(cfg: &Config, messages: &[Message], tools: &[Value]) -> Value 
         "messages": wire,
     });
     if !system.is_empty() {
-        body["system"] = json!([{ "type": "text", "text": system }]);
+        body["system"] = json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": { "type": "ephemeral" },
+        }]);
     }
     if !tools.is_empty() {
         body["tools"] = json!(tools);
@@ -101,11 +115,16 @@ pub fn parse_frame(event: &str, data: &str) -> Vec<Result<Event, Error>> {
     match event {
         "message_start" => {
             let usage = &root["message"]["usage"];
+            // Cached tokens are reported apart from `input_tokens` but still fill the window.
+            let cached = ["cache_read_input_tokens", "cache_creation_input_tokens"]
+                .iter()
+                .filter_map(|k| usage[*k].as_u64())
+                .sum::<u64>();
             usage["input_tokens"]
                 .as_u64()
                 .map(|input| {
                     vec![Ok(Event::Usage(Usage::from_parts(
-                        input as u32,
+                        (input + cached) as u32,
                         usage["output_tokens"].as_u64().unwrap_or(0) as u32,
                     )))]
                 })
@@ -148,10 +167,18 @@ pub fn parse_frame(event: &str, data: &str) -> Vec<Result<Event, Error>> {
 
         // The final output count arrives here, but the input count only ever appeared in
         // message_start, so this is a correction rather than a whole figure.
-        "message_delta" => root["usage"]["output_tokens"]
-            .as_u64()
-            .map(|output| vec![Ok(Event::Usage(Usage::from_parts(0, output as u32)))])
-            .unwrap_or_default(),
+        "message_delta" => {
+            let mut events: Vec<_> = root["usage"]["output_tokens"]
+                .as_u64()
+                .map(|output| Ok(Event::Usage(Usage::from_parts(0, output as u32))))
+                .into_iter()
+                .collect();
+            // A 200 response can still end because the window filled mid-answer.
+            if root["delta"]["stop_reason"] == "model_context_window_exceeded" {
+                events.push(Err(Error::ContextExceeded));
+            }
+            events
+        }
 
         "message_stop" => vec![Ok(Event::Done)],
 
@@ -182,6 +209,38 @@ mod tests {
         assert_eq!(body["system"][0]["text"], "be terse");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["max_tokens"], MAX_TOKENS);
+    }
+
+    #[test]
+    fn the_system_prompt_and_the_last_block_are_cache_breakpoints() {
+        let cfg = Config::for_test("m");
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+        };
+        let messages = [
+            Message::system("sys"),
+            Message::user("hi"),
+            Message::assistant(Some("looking".into()), vec![call]),
+            Message::tool_result("c1", "one"),
+        ];
+        let body = build_body(&cfg, &messages, &[]);
+        let ephemeral = json!({ "type": "ephemeral" });
+        assert_eq!(body["system"][0]["cache_control"], ephemeral);
+
+        let wire = body["messages"].as_array().unwrap();
+        let marked: Vec<_> = wire
+            .iter()
+            .flat_map(|m| m["content"].as_array().unwrap())
+            .filter(|b| b.get("cache_control").is_some())
+            .collect();
+        assert_eq!(marked.len(), 1);
+        assert_eq!(marked[0]["type"], "tool_result");
+        assert_eq!(
+            wire.last().unwrap()["content"][0]["cache_control"],
+            ephemeral
+        );
     }
 
     #[test]
@@ -254,5 +313,31 @@ mod tests {
             &Event::Done
         );
         assert!(parse_frame("ping", "{}").is_empty());
+    }
+
+    #[test]
+    fn cached_input_counts_toward_the_window() {
+        let frame = parse_frame(
+            "message_start",
+            r#"{"message":{"usage":{"input_tokens":5,"cache_read_input_tokens":900,"cache_creation_input_tokens":100,"output_tokens":1}}}"#,
+        );
+        assert_eq!(
+            frame[0].as_ref().unwrap(),
+            &Event::Usage(Usage::from_parts(1005, 1))
+        );
+    }
+
+    #[test]
+    fn a_full_window_mid_answer_is_a_context_error() {
+        let frame = parse_frame(
+            "message_delta",
+            r#"{"delta":{"stop_reason":"model_context_window_exceeded"},"usage":{"output_tokens":7}}"#,
+        );
+        assert!(frame[0].is_ok());
+        assert!(matches!(frame[1], Err(Error::ContextExceeded)));
+        assert_eq!(
+            parse_frame("message_delta", r#"{"delta":{"stop_reason":"end_turn"}}"#).len(),
+            0
+        );
     }
 }

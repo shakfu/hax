@@ -3,6 +3,9 @@
 Options, not a roadmap. Each one costs lines against the 4,000 in README.md, and nothing here is
 committed to. Record the decision when one is taken or dropped.
 
+Synced to hax `f85d80c` (2026-11-15). `git log f85d80c.. -- . ':!rxa'` lists what to review next;
+port fixes that touch rxa's scope and bump this sha.
+
 ## Taken
 
 - 2026-09-16: `anthropic-messages` and `openai-responses`, alongside `openai-chat`. The
@@ -13,6 +16,13 @@ committed to. Record the decision when one is taken or dropped.
 - 2026-09-16: provider autoselect from the environment, and the model last used with a provider
   remembered in `state.json`. The registry's order is the autoselect order and is tested as a
   contract.
+- 2026-11-15: ported from hax: `strict: false` on Responses tools, hax's context-overflow phrases
+  plus Anthropic's `model_context_window_exceeded` stop reason, and llama.cpp's port 9931.
+- 2026-11-15: Anthropic `cache_control` markers on the system prompt and the last message block.
+  hax also marks the last tool; rxa skips it because its tools and system prompt never change
+  within a run, so the system marker already covers the tools.
+  Cached input is now added back into the token count, since Anthropic reports it apart from
+  `input_tokens` and the context check would otherwise undercount.
 
 ## Known gaps
 
@@ -81,18 +91,6 @@ back unchanged. Anthropic requires thinking blocks and their signatures to be re
 replaying it after a model switch is rejected (`responses_body.c:47-54`).
 
 Estimated 150-250 lines for both, most of it the provenance rule rather than the parsing.
-
-## Prompt cache markers
-
-Status: not started.
-
-`prompt_cache_key` is sent on both OpenAI dialects and confirmed accepted. Anthropic is different:
-caching is explicit `cache_control` markers on the last system block, the last tool and the last
-message, not a heuristic (`anthropic_body.c:193-225`). rxa sends none, so every Anthropic turn
-reprocesses the whole transcript.
-
-Roughly 40 lines, and the one item here that pays for itself in latency and cost rather than
-capability.
 
 ## Streaming markdown
 

@@ -131,7 +131,7 @@ impl Agent {
             };
             let Some(item) = next else { break };
 
-            match item? {
+            match item.map_err(|e| fatal(e, &self.config.model))? {
                 crate::provider::Event::Text(text) => {
                     frontend.text(&text);
                     assembler.push(crate::provider::Event::Text(text));
@@ -163,11 +163,6 @@ impl Agent {
                 .await
             {
                 Ok(stream) => return Ok(stream),
-                Err(Error::ContextExceeded) => bail!(
-                    "the conversation no longer fits in {}'s context window; rxa does not \
-                     compact, so start a new session",
-                    self.config.model
-                ),
                 Err(e) if e.is_retryable() && attempt < MAX_ATTEMPTS => {
                     attempt += 1;
                     let delay = e
@@ -179,7 +174,7 @@ impl Agent {
                         () = cancel.cancelled() => bail!("cancelled while backing off"),
                     }
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(fatal(e, &self.config.model)),
             }
         }
     }
@@ -198,9 +193,27 @@ impl Agent {
     }
 }
 
+/// A provider error that ends the user turn. Overflow reads the same at connect and mid-stream.
+fn fatal(e: Error, model: &str) -> anyhow::Error {
+    match e {
+        Error::ContextExceeded => anyhow::anyhow!(
+            "the conversation no longer fits in {model}'s context window; rxa does not compact, \
+             so start a new session"
+        ),
+        e => e.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflow_names_the_model_and_the_way_out() {
+        let message = fatal(Error::ContextExceeded, "m1").to_string();
+        assert!(message.contains("m1's context window"));
+        assert!(message.contains("start a new session"));
+    }
 
     #[test]
     fn the_system_prompt_states_the_platform_and_place() {

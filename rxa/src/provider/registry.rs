@@ -45,7 +45,7 @@ pub const ALL: &[Entry] = &[
     },
     Entry {
         id: "llamacpp",
-        base_url: "http://127.0.0.1:8080/v1",
+        base_url: "http://127.0.0.1:9931/v1",
         dialect: Dialect::Chat,
         key_env: None,
     },

@@ -68,13 +68,15 @@ fn content_item(role: &str, kind: &str, text: Option<&str>) -> Value {
     })
 }
 
-/// Flat, unlike Chat: no `function` nesting.
+/// Flat, unlike Chat: no `function` nesting. Without `strict: false`, Responses forces every
+/// optional parameter to be required, so the model must invent `timeout_ms` and the like.
 pub fn tool_spec(name: &str, description: &str, parameters: Value) -> Value {
     json!({
         "type": "function",
         "name": name,
         "description": description,
         "parameters": parameters,
+        "strict": false,
     })
 }
 

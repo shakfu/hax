@@ -102,14 +102,25 @@ async fn classify(status: reqwest::StatusCode, response: reqwest::Response) -> E
     Error::Other(anyhow!("{}", body.trim()).context(format!("HTTP {code}")))
 }
 
-/// Each dialect words it differently, and none of them uses a distinct status code.
+/// Each server words it differently, and none uses a distinct status code. Phrases from hax's
+/// `src/transport/api_error.c`, matched case-insensitively.
 fn is_context_error(body: &str) -> bool {
-    const MARKERS: [&str; 4] = [
-        "context_length_exceeded",
-        "maximum context length",
-        "prompt is too long",
+    const MARKERS: [&str; 13] = [
+        "context_length_exceeded",            // OpenAI's code
+        "model_context_window_exceeded",      // Anthropic's stop reason
+        "exceed_context_size_error",          // llama.cpp's code
+        "prompt is too long",                 // Anthropic
+        "prompt too long",                    // Ollama
+        "exceeds the context window",         // OpenAI
+        "maximum context length",             // OpenAI, DeepSeek, OpenRouter, vLLM
+        "exceeds the available context size", // llama.cpp
+        "greater than the context length",    // LM Studio
         "input length and `max_tokens` exceed",
+        "configured input limit",
+        "context window exceeded", // LiteLLM
+        "context length exceeded",
     ];
+    let body = body.to_lowercase();
     MARKERS.iter().any(|m| body.contains(m))
 }
 
@@ -134,6 +145,13 @@ mod tests {
         assert!(is_context_error(
             r#"{"message":"prompt is too long: 300000 tokens"}"#
         ));
+        assert!(is_context_error(
+            r#"{"error":{"code":400,"message":"request (9000 tokens) exceeds the available context size (8192 tokens)","type":"exceed_context_size_error"}}"#
+        ));
+        assert!(is_context_error(
+            r#"{"error":"prompt too long; exceeded max context length"}"#
+        ));
+        assert!(is_context_error("Context Window Exceeded"));
         assert!(!is_context_error(r#"{"code":"invalid_api_key"}"#));
     }
 

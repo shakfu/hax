@@ -170,6 +170,7 @@ mod tests {
             let responses = tool.spec(Dialect::Responses);
             assert_eq!(responses["name"], tool.name());
             assert_eq!(responses["parameters"]["type"], "object");
+            assert_eq!(responses["strict"], false);
 
             let messages = tool.spec(Dialect::Messages);
             assert_eq!(messages["name"], tool.name());
