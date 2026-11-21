@@ -12,8 +12,9 @@ and the environment shown to the model are all based on the current directory.
    formatting, and safety rules in `AGENTS.md`.
 4. Press Esc once when you want to pause after the current step and steer. Use Esc twice only when
    the current model request or command must stop immediately.
-5. Review the diff and validation results before accepting the work. hax has no per-command approval
-   prompts and is not a security boundary; use OS-level isolation for untrusted work.
+5. Review the diff and validation results before accepting the work. Outside ACP mode, hax has no
+   per-command approval prompts. It is not a security boundary; use OS-level isolation for
+   untrusted work.
 
 ## Options
 
@@ -36,6 +37,7 @@ hax --resume=ID -p "continue"    # resume non-interactively
 | --- | --- |
 | `-p`, `--print` | Run to completion and print the final assistant message to stdout. |
 | `--json` | One-shot (implies `-p`) with stdout as JSON-line conversation records, closed by a `result` record. |
+| `--acp` | Serve the Agent Client Protocol on stdin and stdout for an editor or other client. |
 | `-c`, `--continue` | Resume the newest session for the current directory. |
 | `--resume[=ID]` | Pick a session, or resume an id/unique prefix. The id form works with `-p`; without a prompt it continues the run. A prompt becomes the next message. |
 | `--no-session` | Do not record this run or add its prompts to persistent recall. |
@@ -82,6 +84,35 @@ the current step, or at once if the model has not started answering (outcome `pa
 (Ctrl-C) or SIGTERM interrupts at once, saving completed work (outcome `interrupted`, exit status
 130); a second signal kills the process. The session stays resumable: `hax --resume=ID -p`
 without a prompt continues where the run stopped, and a new prompt steers it instead.
+
+### ACP mode
+
+`hax --acp` serves the [Agent Client Protocol](https://agentclientprotocol.com/protocol/overview),
+version 1, on stdin and stdout. An editor such as Zed, or any other ACP client, starts it as an agent
+server and sends it prompts. stdout carries only protocol messages; banners, warnings, and errors go
+to stderr. `--provider`, `--model`, `--effort`, `--preset`, `--raw`, `--bare`, and `--no-session`
+apply as usual. `-p`, `--json`, `--continue`, `--resume`, and prompt words are refused. A message
+line over 16 MiB is discarded with a parse error.
+
+- Each new session starts a conversation in the directory the client names, and tools run there.
+  The session id is the hax session id, so `hax --resume=ID` in that directory continues it in a
+  terminal.
+- The client can reopen a recorded session by its full id. hax replays its prompts, replies, and tool calls, then
+  continues it. A cut-off reply replays without the `[interrupted]` marker the client never saw. The run's provider and model stay in effect; the session's recorded ones are not
+  restored. With `--no-session`, nothing is recorded and reopening is not offered.
+- Before each `bash`, `edit`, or `write` call, and each `task_wait` that kills, hax asks the
+  client for permission. `read` and other waits run unasked. "Always allow" and "Always reject" cover that tool for the rest of the
+  session. A rejected or cancelled request denies the call, and the model is told so.
+- A cancel from the client stops the model request or command at once, like Esc pressed twice. The
+  completed work is saved. Closing stdin cancels the running prompt and every queued one.
+- A background task belongs to the session that started it. Only that session can wait on it or
+  hear that it finished.
+- Reply text, reasoning, and tool calls stream as they happen. A retried request sends only text
+  the client does not have; a retry whose text differs or stops short is sent in full after a blank
+  line. A reply cut off by a full context also gets a blank line before its retry. A reply
+  cut off by an output limit ends with `max_tokens`, and a provider's refusal with `refusal`. After each prompt, hax reports
+  context use and the session's total cost when the model's context window is known.
+- MCP servers named by the client are ignored, with a warning on stderr.
 
 ## REPL commands
 

@@ -9,6 +9,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- `hax --acp` serves the Agent Client Protocol, version 1, on stdin and stdout, so an editor
+  such as Zed can drive hax as an agent. It streams replies and tool calls, asks the client before
+  each `bash`, `edit`, or `write` call, stops on the client's cancel, and reopens recorded sessions.
+  It is a separate frontend over the same agent loop, tools, and session files, so the REPL and
+  `-p` are unchanged; a wrapper that translated `--json` output could not take part in permission
+  requests or cancellation. See [docs/usage.md](docs/usage.md#acp-mode).
 - `bindings/python/hermetic.py` withdraws hax's ambient context from an embedded agent.
   `Agent(system_prompt=...)` replaces only the base prompt, so a worker still carried the
   Environment section, the skills listing and any `AGENTS.md` above the working directory, and

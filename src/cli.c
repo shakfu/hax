@@ -37,6 +37,10 @@ static const struct help_option {
     {"--json",
      "Non-interactive JSON output (implies -p): stream the run as JSON records on stdout, "
      "one per line, ending with a result record. Format reference: hax-sessions(5)."},
+    {"--acp",
+     "Serve the Agent Client Protocol on stdin and stdout, for an editor or another client to "
+     "drive. Diagnostics go to stderr. Cannot be combined with -p, --json, --continue, "
+     "--resume, or a PROMPT."},
     {"-c, --continue", "Resume the most recent conversation in this directory."},
     {"--resume[=ID]",
      "Resume a past conversation in this directory, restoring its recorded settings: pick "
@@ -141,6 +145,7 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
         OPT_BARE,
         OPT_NO_SESSION,
         OPT_JSON,
+        OPT_ACP,
     };
     static const struct option long_options[] = {
         {"help", no_argument, NULL, 'h'},
@@ -150,6 +155,7 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
         {"resume", optional_argument, NULL, OPT_RESUME},
         {"no-session", no_argument, NULL, OPT_NO_SESSION},
         {"json", no_argument, NULL, OPT_JSON},
+        {"acp", no_argument, NULL, OPT_ACP},
         {"raw", no_argument, NULL, OPT_RAW},
         {"bare", no_argument, NULL, OPT_BARE},
         {"provider", required_argument, NULL, OPT_PROVIDER},
@@ -218,6 +224,9 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
             options->agent_options.json = 1;
             options->one_shot = 1;
             break;
+        case OPT_ACP:
+            options->acp = 1;
+            break;
         case '?':
             fprintf(stderr, "Try 'hax --help' for usage.\n");
             return CLI_PARSE_ERROR;
@@ -250,6 +259,13 @@ enum cli_parse_result cli_parse(int argc, char **argv, struct cli_options *optio
     }
     if (options->one_shot && options->resume_mode == CLI_RESUME_SELECT && !options->resume_id) {
         hax_err("-p with --resume requires a session id (e.g. --resume=ID)");
+        return CLI_PARSE_ERROR;
+    }
+    /* The client supplies prompts and picks sessions, so these would be silently ignored. */
+    if (options->acp &&
+        (options->one_shot || options->resume_mode != CLI_RESUME_NONE || optind < argc)) {
+        hax_err("--acp cannot be combined with -p, --json, --continue, --resume, or a prompt");
+        fprintf(stderr, "Try 'hax --help' for usage.\n");
         return CLI_PARSE_ERROR;
     }
     options->first_prompt_arg = optind;
@@ -346,40 +362,6 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
     return 0;
 }
 
-static char *resolve_session_id(const char *cwd, const char *id)
-{
-    struct session_entry *sessions;
-    size_t session_count;
-    session_list(cwd, &sessions, &session_count);
-
-    char *match = NULL;
-    for (size_t i = 0; i < session_count; i++) {
-        if (sessions[i].id && strcmp(sessions[i].id, id) == 0) {
-            match = xstrdup(sessions[i].path);
-            break;
-        }
-    }
-
-    if (!match) {
-        size_t match_count = 0;
-        size_t id_length = strlen(id);
-        for (size_t i = 0; i < session_count; i++) {
-            if (sessions[i].id && strncmp(sessions[i].id, id, id_length) == 0) {
-                match_count++;
-                free(match);
-                match = xstrdup(sessions[i].path);
-            }
-        }
-        if (match_count != 1) {
-            free(match);
-            match = NULL;
-        }
-    }
-
-    session_list_free(sessions, session_count);
-    return match;
-}
-
 enum cli_session_result cli_resolve_session(const struct cli_options *options, char **path)
 {
     *path = NULL;
@@ -408,7 +390,7 @@ enum cli_session_result cli_resolve_session(const struct cli_options *options, c
         if (!*path)
             hax_warn("no past conversation in this directory; starting fresh");
     } else if (options->resume_id) {
-        *path = resolve_session_id(cwd, options->resume_id);
+        *path = session_find(cwd, options->resume_id, 1);
         if (!*path) {
             if (strchr(options->resume_id, '/'))
                 hax_err("--resume takes a session id, not a path (sessions are per-directory)");

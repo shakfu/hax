@@ -17,6 +17,7 @@ test_support_dep = declare_dependency(link_with: test_support, dependencies: [ha
 # `hax_lib`, and the libcurl/jansson/threads flags; lazy archive linking pulls in only the objects
 # the test references.
 test_sources = [
+    'test_acp_proto.c',
     'test_agent.c',
     'test_agent_core.c',
     'test_agent_dispatch.c',
@@ -185,6 +186,7 @@ endforeach
 # binary through the mock provider (see e2e/harness.py). Names mirror the C tests:
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
+    'acp',
     'oneshot',
     'repl_compact',
     'repl_complete',

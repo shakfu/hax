@@ -70,6 +70,8 @@ version_h = vcs_tag(
 # purpose: it lives only in the `hax` executable, so test binaries, which bring their own `main`,
 # can link the same objects through `hax_lib` without colliding.
 sources = files(
+    'src/acp.c',
+    'src/acp_proto.c',
     'src/agent.c',
     'src/agent_core.c',
     'src/agent_dispatch.c',

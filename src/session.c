@@ -1417,6 +1417,40 @@ int session_list(const char *cwd, struct session_entry **out_entries, size_t *ou
     return 0;
 }
 
+char *session_find(const char *cwd, const char *id, int prefix)
+{
+    struct session_entry *sessions;
+    size_t session_count;
+    session_list(cwd, &sessions, &session_count);
+
+    char *match = NULL;
+    for (size_t i = 0; i < session_count; i++) {
+        if (sessions[i].id && strcmp(sessions[i].id, id) == 0) {
+            match = xstrdup(sessions[i].path);
+            break;
+        }
+    }
+
+    if (!match && prefix) {
+        size_t match_count = 0;
+        size_t id_length = strlen(id);
+        for (size_t i = 0; i < session_count; i++) {
+            if (sessions[i].id && strncmp(sessions[i].id, id, id_length) == 0) {
+                match_count++;
+                free(match);
+                match = xstrdup(sessions[i].path);
+            }
+        }
+        if (match_count != 1) {
+            free(match);
+            match = NULL;
+        }
+    }
+
+    session_list_free(sessions, session_count);
+    return match;
+}
+
 char *session_prompt_history_path(const char *cwd)
 {
     if (!cwd)

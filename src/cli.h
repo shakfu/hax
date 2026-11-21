@@ -38,6 +38,7 @@ struct cli_options {
     const char *resume_id; /* borrowed argv value; NULL opens the resume picker */
     int first_prompt_arg;
     int one_shot;
+    int acp; /* serve the Agent Client Protocol on stdin/stdout */
     int bare;
     int no_session;
 };

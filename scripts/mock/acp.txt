@@ -1,0 +1,31 @@
+# ACP fixture: a process's first two prompts get the same reply, which serves every
+# conformance test.
+# The reply text streams at once, stalls 1.5 s (time for session/cancel), then calls bash,
+# which asks the client for permission. The closing turn ends the prompt with end_turn.
+# Each turn reports a cost; HAX_CONTEXT_LIMIT gives the mock a window, so --acp sends usage_update.
+#
+#   HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/acp.txt HAX_NO_SESSION=0 HAX_CONTEXT_LIMIT=200000 build/hax --acp
+
+text Hello from the mock.
+delay 1500
+text  Still working.
+delay 0
+tool bash {"command":"echo allowed > acp-out.txt"}
+usage in=100 out=10 cost=0.0010
+end-turn
+
+text Done.
+usage in=120 out=2 cost=0.0005
+end-turn
+
+text Hello from the mock.
+delay 1500
+text  Still working.
+delay 0
+tool bash {"command":"echo allowed > acp-out.txt"}
+usage in=100 out=10 cost=0.0020
+end-turn
+
+text Done.
+usage in=120 out=2 cost=0.0008
+end-turn

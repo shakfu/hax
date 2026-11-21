@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "acp.h"
 #include "agent.h"
 #include "cli.h"
 #include "config.h"
@@ -190,17 +191,22 @@ int main(int argc, char **argv)
     session_prune_start(resume_path);
 
     unsigned long diagnostics_before_provider = hax_diag_sequence();
-    provider =
-        select_initial_provider(options.one_shot, &options.agent_options.provider_autoselected);
+    /* Like one-shot mode, ACP has no picker to fall back on when no provider is available. */
+    int headless = options.one_shot || options.acp;
+    provider = select_initial_provider(headless, &options.agent_options.provider_autoselected);
     if (options.one_shot && provider && hax_diag_sequence() != diagnostics_before_provider) {
         fputc('\n', stderr);
         fflush(stderr);
     }
-    if (!provider && options.one_shot)
+    if (!provider && headless)
         goto cleanup_provider;
 
-    result = options.one_shot ? oneshot_run(provider, prompt, &options.agent_options)
-                              : agent_run(&provider, &options.agent_options, prompt);
+    if (options.acp)
+        result = acp_run(provider, &options.agent_options);
+    else if (options.one_shot)
+        result = oneshot_run(provider, prompt, &options.agent_options);
+    else
+        result = agent_run(&provider, &options.agent_options, prompt);
 
 cleanup_provider:
     /* Providers must join background work before global libcurl teardown. */

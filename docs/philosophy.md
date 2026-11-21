@@ -85,6 +85,10 @@ shell, filesystem, and credentials remain one confused command away. Isolation a
 mistaken or compromised process comes from the operating system: run hax in a container or VM
 when working on untrusted input or when the blast radius matters.
 
+ACP mode (`hax --acp`) is the one exception. An editor driving hax over the Agent Client
+Protocol expects to approve edits and commands in its own interface, so hax asks it before each
+`bash`, `edit`, or `write` call. The REPL and one-shot modes never ask.
+
 What hax provides instead is control and restraint, not enforcement: the default system prompt
 forbids destructive git operations and tells the model to ask before irreversible actions, Esc
 pauses a running turn for steering, and `max_turns` can bound unattended runs.

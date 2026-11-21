@@ -25,6 +25,7 @@
   subscription), OpenRouter, OpenCode Zen/Go, DeepSeek, llama.cpp, Ollama, and custom endpoints.
 - **Well-behaved Unix tool** — XDG paths, clean stdout in `-p` one-shot mode with resume hints on
   stderr, plain-text config and session files, composition via subprocesses instead of plugins.
+  `hax --acp` serves the Agent Client Protocol for editors such as Zed.
 
 ## Target audience
 

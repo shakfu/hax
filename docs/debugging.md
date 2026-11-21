@@ -95,6 +95,7 @@ Mock-provider fixtures live under `scripts/mock/`:
 
 | Fixture | Use |
 | --- | --- |
+| `acp.txt` | `--acp` checks: two prompts, each a slow reply, a `bash` call that asks permission, and a cost. |
 | `demo.txt` | End-to-end rendering and multi-turn tool dispatch. |
 | `layout.txt` | Header, gutter, and Markdown layout. |
 | `diff.txt` | Path normalization and diff rendering. |

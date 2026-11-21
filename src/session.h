@@ -183,6 +183,10 @@ struct session_entry {
 int session_list(const char *cwd, struct session_entry **out_entries, size_t *out_count);
 void session_list_free(struct session_entry *entries, size_t count);
 
+/* Return the owned path of cwd's session `id`, or with `prefix` of the only session whose id
+ * starts with `id`; NULL when none or several match. */
+char *session_find(const char *cwd, const char *id, int prefix);
+
 /* Return the owned path of cwd's prompt-history file, a sibling of its session files that listing
  * and pruning ignore. Return NULL for a NULL cwd or when no state directory is available, so an
  * unknown working directory records nothing, as with sessions. */
