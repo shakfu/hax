@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include "harness.h"
 #include "paste_image.h"
@@ -108,6 +109,12 @@ static void install_fake_helpers(const char *dir)
     for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
         char *path = xasprintf("%s/%s", dir, NAMES[i]);
         write_file(path, SCRIPT, sizeof(SCRIPT) - 1, 0755);
+        /* macOS scans a new executable on its first exec, which under load can outlast the paste
+         * timeout and kill the helper before it answers. */
+        char *warm = xasprintf("'%s' </dev/null >/dev/null 2>&1", path);
+        int status = system(warm);
+        EXPECT(status != -1 && WIFEXITED(status) && WEXITSTATUS(status) != 127);
+        free(warm);
         free(path);
     }
 }

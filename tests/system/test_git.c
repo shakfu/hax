@@ -133,6 +133,10 @@ static char *prepend_recording_git(const char *marker)
         fclose(script);
     }
     EXPECT(chmod(path, 0755) == 0);
+    /* macOS scans a new executable on its first exec, which under load can outlast the probe's
+     * timeout and kill the stub before it records anything. */
+    EXPECT(system(path) == 0);
+    EXPECT(unlink(marker) == 0);
     free(path);
     return t_path_prepend(dir);
 }
