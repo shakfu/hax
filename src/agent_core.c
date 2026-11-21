@@ -720,8 +720,8 @@ void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
     session_log_append(slog, items, n_items);
 }
 
-void agent_finalize_tasks(struct agent_session *session, struct transcript_log *tlog,
-                          struct session_log *slog)
+void agent_record_task_exit(struct agent_session *session, struct transcript_log *tlog,
+                            struct session_log *slog)
 {
     /* Record the terminal state before the shutdown destroys uncollected output. */
     char *exit_note = task_exit_note();
@@ -735,6 +735,12 @@ void agent_finalize_tasks(struct agent_session *session, struct transcript_log *
      * `/new <preset>` meant for the next conversation) into the record being left. */
     session_log_discard_selection(slog);
     agent_flush_logs(tlog, slog, session->items, session->n_items);
+}
+
+void agent_finalize_tasks(struct agent_session *session, struct transcript_log *tlog,
+                          struct session_log *slog)
+{
+    agent_record_task_exit(session, tlog, slog);
     task_registry_shutdown();
 }
 

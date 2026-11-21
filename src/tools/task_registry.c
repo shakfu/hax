@@ -58,7 +58,7 @@ struct task {
     int spool_write_failed;
     int overflow; /* produced past BASH_OUTPUT_DRAIN_LIMIT; excess discarded */
 
-    /* Main thread only. */
+    /* Guarded by registry_lock, like the list itself. */
     int exit_seen;      /* shell exit observed unreaped; the zombie keeps the group signalable */
     int done;           /* shell reaped after pipe EOF; wait_status valid; no further signaling */
     int orphans_killed; /* descendants outlived the shell holding the pipe and were killed */
@@ -70,10 +70,40 @@ struct task {
     int notified;
     int collected;
     size_t delivered_bytes;
+    const void *owner; /* the conversation that started it; NULL when unscoped */
 };
 
+/* Concurrent agents share the registry. Public entry points take registry_lock, the static
+ * helpers assume it, and t->lock nests inside it; drainers take only t->lock. */
+static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct task *tasks;
 static int next_task_number = 1;
+/* Per thread: each agent's loop scopes the calls made on its own thread. */
+static _Thread_local const void *current_owner;
+
+const void *task_registry_set_owner(const void *owner)
+{
+    const void *previous = current_owner;
+    current_owner = owner;
+    return previous;
+}
+
+static void registry_lock_acquire(void)
+{
+    pthread_mutex_lock(&registry_lock);
+}
+
+static void registry_lock_release(void)
+{
+    pthread_mutex_unlock(&registry_lock);
+}
+
+/* Whether the current conversation may see `t`. A caller without an owner sees every task, and
+ * a task started without one is visible to every conversation. */
+static int task_visible(const struct task *t)
+{
+    return !current_owner || !t->owner || t->owner == current_owner;
+}
 
 struct task_shared_snapshot {
     size_t total_bytes;
@@ -257,7 +287,7 @@ static struct task *task_find(const char *id)
 {
     struct task *remembered = NULL;
     for (struct task *t = tasks; t; t = t->next) {
-        if (strcmp(t->id, id) != 0)
+        if (strcmp(t->id, id) != 0 || !task_visible(t))
             continue;
         if (!t->collected)
             return t;
@@ -284,7 +314,7 @@ static int name_is_reserved_shape(const char *name)
     return 1;
 }
 
-char *task_name_error(const char *name)
+static char *name_error_locked(const char *name)
 {
     if (!name || !*name)
         return xstrdup("'name' must not be empty");
@@ -304,12 +334,22 @@ char *task_name_error(const char *name)
     return NULL;
 }
 
-const char *task_adopt(pid_t pid, int pipe_fd, const char *command, const char *name,
-                       long started_ms, int spool_fd, char *spool_path, size_t spooled_bytes,
-                       int binary, int pipe_eof)
+char *task_name_error(const char *name)
+{
+    registry_lock_acquire();
+    char *error = name_error_locked(name);
+    registry_lock_release();
+    return error;
+}
+
+static size_t running_count_locked(void);
+
+static const char *adopt_locked(pid_t pid, int pipe_fd, const char *command, const char *name,
+                                long started_ms, int spool_fd, char *spool_path,
+                                size_t spooled_bytes, int binary, int pipe_eof)
 {
     /* The cap also keeps the fatal-cleanup pgid table from ever filling. */
-    if (task_running_count() >= (size_t)config_int("task.max_running"))
+    if (running_count_locked() >= (size_t)config_int("task.max_running"))
         return NULL;
     struct task *t = xcalloc(1, sizeof(*t));
     /* The counter advances for named tasks too, so unnamed ids stay positional. */
@@ -328,6 +368,7 @@ const char *task_adopt(pid_t pid, int pipe_fd, const char *command, const char *
     t->spooled_bytes = spooled_bytes;
     t->binary = binary;
     t->eof = pipe_eof;
+    t->owner = current_owner;
     pthread_mutex_init(&t->lock, NULL);
 
     /* Task descriptors outlive this tool call, so later commands must not inherit them. */
@@ -359,6 +400,17 @@ const char *task_adopt(pid_t pid, int pipe_fd, const char *command, const char *
         link = &(*link)->next;
     *link = t;
     return t->id;
+}
+
+const char *task_adopt(pid_t pid, int pipe_fd, const char *command, const char *name,
+                       long started_ms, int spool_fd, char *spool_path, size_t spooled_bytes,
+                       int binary, int pipe_eof)
+{
+    registry_lock_acquire();
+    const char *id = adopt_locked(pid, pipe_fd, command, name, started_ms, spool_fd, spool_path,
+                                  spooled_bytes, binary, pipe_eof);
+    registry_lock_release();
+    return id;
 }
 
 static void append_status_phrase(struct buf *out, struct task *t)
@@ -536,9 +588,8 @@ static void append_status_note(struct buf *out, struct task *t)
     }
 }
 
-char *task_report_output(const char *id, char **marker_out)
+static char *report_output_locked(const char *id, char **marker_out)
 {
-    *marker_out = NULL;
     struct task *t = task_find(id);
     if (!t)
         return NULL;
@@ -555,6 +606,15 @@ char *task_report_output(const char *id, char **marker_out)
     return buf_steal(&body);
 }
 
+char *task_report_output(const char *id, char **marker_out)
+{
+    *marker_out = NULL;
+    registry_lock_acquire();
+    char *body = report_output_locked(id, marker_out);
+    registry_lock_release();
+    return body;
+}
+
 /* Resolve requested ids into `targets`, skipping unknown ids and duplicates. With no ids,
  * every live task is a target. Returns the target count. */
 static size_t resolve_targets(const char *const *ids, size_t n_ids, struct task ***targets_out)
@@ -563,12 +623,12 @@ static size_t resolve_targets(const char *const *ids, size_t n_ids, struct task 
     struct task **targets;
     if (n_ids == 0) {
         for (struct task *t = tasks; t; t = t->next)
-            if (!t->collected)
+            if (!t->collected && task_visible(t))
                 count++;
         targets = xmalloc(count * sizeof(*targets));
         count = 0;
         for (struct task *t = tasks; t; t = t->next)
-            if (!t->collected)
+            if (!t->collected && task_visible(t))
                 targets[count++] = t;
     } else {
         targets = xmalloc(n_ids * sizeof(*targets));
@@ -588,9 +648,12 @@ static size_t resolve_targets(const char *const *ids, size_t n_ids, struct task 
     return count;
 }
 
-static void sleep_poll_interval(void)
+/* Sleep one poll interval with the registry released, so other agents' calls proceed. */
+static void sleep_poll_interval_unlocked(void)
 {
+    registry_lock_release();
     poll(NULL, 0, TASK_POLL_INTERVAL_MS);
+    registry_lock_acquire();
 }
 
 static long deadline_after(long now_ms, long duration_ms)
@@ -643,8 +706,11 @@ enum wait_stop {
     WAIT_INTERRUPTED,
 };
 
-char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
-                       tool_display_fn display, void *display_data, struct cancel_state *cancel)
+/* Tasks are freed only by task_registry_shutdown, so `t` stays valid across the unlocked sleeps;
+ * only this conversation collects it. */
+static char *wait_stream_locked(const char *id, long timeout_ms, int kill_on_timeout,
+                                tool_display_fn display, void *display_data,
+                                struct cancel_state *cancel)
 {
     task_poll_all();
     struct task *t = id && *id ? task_find(id) : NULL;
@@ -691,7 +757,7 @@ char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
         }
         int other_finished = 0;
         for (struct task *other = tasks; other; other = other->next)
-            if (other != t && other->done && !other->notified)
+            if (other != t && other->done && !other->notified && task_visible(other))
                 other_finished = 1;
         /* A signalled kill commits this wait to observing the exit. */
         if (other_finished && !kill_sent) {
@@ -702,7 +768,7 @@ char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
             stop = WAIT_INTERRUPTED;
             break;
         }
-        sleep_poll_interval();
+        sleep_poll_interval_unlocked();
     }
 
     /* Bytes spooled between the loop's last snapshot and the stop still belong on screen. */
@@ -776,6 +842,16 @@ char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
     return buf_steal(&out);
 }
 
+char *task_wait_stream(const char *id, long timeout_ms, int kill_on_timeout,
+                       tool_display_fn display, void *display_data, struct cancel_state *cancel)
+{
+    registry_lock_acquire();
+    char *report =
+        wait_stream_locked(id, timeout_ms, kill_on_timeout, display, display_data, cancel);
+    registry_lock_release();
+    return report;
+}
+
 /* SIGTERM (grace permitting), then wait for the batch to exit, escalating to SIGKILL through
  * task_poll when the grace deadline lapses. Returns the number of tasks signalled. */
 static size_t stop_targets(struct task **targets, size_t n_targets)
@@ -801,28 +877,30 @@ static size_t stop_targets(struct task **targets, size_t n_targets)
         }
         if (still_running == 0)
             break;
-        sleep_poll_interval();
+        sleep_poll_interval_unlocked();
     }
     return signalled;
 }
 
 size_t task_stop(const char *const *ids, size_t n_ids)
 {
+    registry_lock_acquire();
     task_poll_all();
     struct task **targets = NULL;
     size_t n_targets = resolve_targets(ids, n_ids, &targets);
     size_t stopped = stop_targets(targets, n_targets);
     free(targets);
+    registry_lock_release();
     return stopped;
 }
 
-char *task_collect_notes(void)
+static char *collect_notes_locked(void)
 {
     task_poll_all();
     struct buf out;
     buf_init(&out);
     for (struct task *t = tasks; t; t = t->next) {
-        if (t->notified || !t->done)
+        if (t->notified || !t->done || !task_visible(t))
             continue;
         if (out.len > 0)
             buf_append_str(&out, "\n");
@@ -833,17 +911,26 @@ char *task_collect_notes(void)
     return buf_steal(&out);
 }
 
+char *task_collect_notes(void)
+{
+    registry_lock_acquire();
+    char *notes = collect_notes_locked();
+    registry_lock_release();
+    return notes;
+}
+
 size_t task_list(struct task_info **rows_out)
 {
+    registry_lock_acquire();
     task_poll_all();
     size_t count = 0;
     for (struct task *t = tasks; t; t = t->next)
-        if (!t->collected)
+        if (!t->collected && task_visible(t))
             count++;
     struct task_info *rows = xcalloc(count ? count : 1, sizeof(*rows));
     size_t i = 0;
     for (struct task *t = tasks; t; t = t->next) {
-        if (t->collected)
+        if (t->collected || !task_visible(t))
             continue;
         struct task_shared_snapshot snap;
         task_snapshot(t, &snap);
@@ -857,17 +944,18 @@ size_t task_list(struct task_info **rows_out)
         rows[i].total_bytes = snap.total_bytes;
         i++;
     }
+    registry_lock_release();
     *rows_out = rows;
     return count;
 }
 
-char *task_exit_note(void)
+static char *exit_note_locked(void)
 {
     task_poll_all();
     struct buf out;
     buf_init(&out);
     for (struct task *t = tasks; t; t = t->next) {
-        if (t->collected)
+        if (t->collected || !task_visible(t))
             continue;
         if (out.len > 0)
             buf_append_str(&out, "\n");
@@ -898,7 +986,15 @@ char *task_exit_note(void)
     return buf_steal(&out);
 }
 
-size_t task_running_count(void)
+char *task_exit_note(void)
+{
+    registry_lock_acquire();
+    char *note = exit_note_locked();
+    registry_lock_release();
+    return note;
+}
+
+static size_t running_count_locked(void)
 {
     task_poll_all();
     size_t count = 0;
@@ -908,8 +1004,17 @@ size_t task_running_count(void)
     return count;
 }
 
+size_t task_running_count(void)
+{
+    registry_lock_acquire();
+    size_t count = running_count_locked();
+    registry_lock_release();
+    return count;
+}
+
 void task_registry_shutdown(void)
 {
+    registry_lock_acquire();
     /* Kill every tree before stopping any drainer, so each pipe closes and its drainer ends at EOF
      * rather than at its next poll timeout. Nothing is reaped yet, so signaling stays safe. */
     for (struct task *t = tasks; t; t = t->next)
@@ -937,4 +1042,5 @@ void task_registry_shutdown(void)
     /* Ids read as conversation-scoped, so a conversation started after a shutdown counts from
      * t1 again. */
     next_task_number = 1;
+    registry_lock_release();
 }

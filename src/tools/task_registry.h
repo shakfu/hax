@@ -22,6 +22,13 @@
  * nothing is pending; collection frees the name and delists the task, but its status remains
  * answerable by id. The spool file stays on disk as the overflow escape hatch. */
 
+/* Scope this thread's later calls to the conversation `owner`, returning the previous owner:
+ * tasks it adopts are its own, and lookups, waits, notes, listings, and exit notes see only those.
+ * NULL, the default, sees every task, and a task adopted under NULL is visible to every owner.
+ * agent_loop_run sets it for its session. Ids, names, and
+ * the running cap stay process-wide, and every function here is safe to call concurrently. */
+const void *task_registry_set_owner(const void *owner);
+
 /* Reject a proposed task name with an allocated recoverable error, or return NULL when it is
  * usable: short identifier characters only, not the reserved t<digits> shape, and not held by a
  * live task. Meant to run before the command starts, so a bad name has no side effects. */

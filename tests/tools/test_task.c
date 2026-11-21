@@ -479,6 +479,70 @@ static void test_finalize_tasks_resolves_record(void)
     unsetenv("HAX_BASH_BACKGROUND_YIELD");
 }
 
+/* An owner sees only its own tasks: another conversation gets no note, no listing, no wait, and
+ * no exit note for them. */
+static void test_owner_scopes_tasks(void)
+{
+    static char conversation_a, conversation_b;
+    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    task_registry_set_owner(&conversation_a);
+    char *gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo a-done", gate);
+    char *out = call_bash_background(cmd);
+    free(cmd);
+    char *id = extract_task_id(out);
+    EXPECT(id != NULL);
+    free(out);
+    gate_release(gate);
+    free(gate);
+
+    task_registry_set_owner(&conversation_b);
+    char *waited = wait_for_id(id ? id : "?", 5);
+    EXPECT(strstr(waited, "no such task") != NULL);
+    free(waited);
+    struct task_info *rows = NULL;
+    EXPECT(task_list(&rows) == 0);
+    free(rows);
+    EXPECT(task_collect_notes() == NULL);
+    EXPECT(task_exit_note() == NULL);
+    /* The stop-all of another conversation leaves the task alone. */
+    EXPECT(task_stop(NULL, 0) == 0);
+
+    task_registry_set_owner(&conversation_a);
+    waited = wait_for_id(id ? id : "?", 10);
+    EXPECT(strstr(waited, "a-done") != NULL);
+    free(waited);
+
+    task_registry_set_owner(NULL);
+    free(id);
+    unsetenv("HAX_BASH_BACKGROUND_YIELD");
+}
+
+/* A task started without an owner belongs to no conversation, so every one of them sees it. */
+static void test_unowned_task_is_shared(void)
+{
+    static char conversation;
+    setenv("HAX_BASH_BACKGROUND_YIELD", TEST_YIELD, 1);
+    char *gate = gate_create();
+    char *cmd = xasprintf("read -r _ <%s; echo shared-done", gate);
+    char *out = call_bash_background(cmd);
+    free(cmd);
+    char *id = extract_task_id(out);
+    EXPECT(id != NULL);
+    free(out);
+    gate_release(gate);
+    free(gate);
+
+    task_registry_set_owner(&conversation);
+    char *waited = wait_for_id(id ? id : "?", 10);
+    EXPECT(strstr(waited, "shared-done") != NULL);
+    free(waited);
+
+    task_registry_set_owner(NULL);
+    free(id);
+    unsetenv("HAX_BASH_BACKGROUND_YIELD");
+}
+
 /* Fatal-signal handlers cannot run registry code, so the published pgid table alone must be enough
  * to take live task groups down. */
 static void test_fatal_hook_kills_task_groups(void)
@@ -671,6 +735,8 @@ int main(void)
     test_task_list_snapshots_running_task();
     test_shutdown_kills_running_tasks();
     test_finalize_tasks_resolves_record();
+    test_owner_scopes_tasks();
+    test_unowned_task_is_shared();
     test_fatal_hook_kills_task_groups();
     test_running_task_cap_enforced();
     test_no_tasks_disables_background_and_tools();

@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -19,6 +20,8 @@ struct path_list {
     size_t capacity;
 };
 
+/* Guards every static below except atexit_enabled, which is set before first use. */
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct path_list tracked_files;
 static struct path_list retired_dirs;
 static char *active_dir;
@@ -52,6 +55,7 @@ static void forget_active_dir(void)
 
 void tempfiles_cleanup(void)
 {
+    pthread_mutex_lock(&lock);
     for (size_t i = 0; i < tracked_files.count; i++) {
         unlink(tracked_files.items[i]);
         free(tracked_files.items[i]);
@@ -65,6 +69,7 @@ void tempfiles_cleanup(void)
 
     if (active_dir && (rmdir(active_dir) == 0 || errno == ENOENT))
         forget_active_dir();
+    pthread_mutex_unlock(&lock);
 }
 
 static int atexit_enabled = 1;
@@ -85,12 +90,14 @@ static void track_file(const char *path)
 
 void tempfile_untrack(const char *path)
 {
+    pthread_mutex_lock(&lock);
     for (size_t i = 0; i < tracked_files.count; i++) {
         if (strcmp(tracked_files.items[i], path) == 0) {
             path_list_remove(&tracked_files, i);
-            return;
+            break;
         }
     }
+    pthread_mutex_unlock(&lock);
 }
 
 static int string_is_valid_utf8(const char *text)
@@ -129,14 +136,8 @@ static const char *ensure_temp_dir(void)
     return active_dir;
 }
 
-int tempfile_create(const char *prefix, const char *suffix, char **path_out)
+static int create_locked(const char *prefix, const char *suffix, char **path_out)
 {
-    *path_out = NULL;
-    if (!name_fragment_is_valid(prefix) || !name_fragment_is_valid(suffix)) {
-        errno = EINVAL;
-        return -1;
-    }
-
     const char *dir = ensure_temp_dir();
     if (!dir)
         return -1;
@@ -169,4 +170,19 @@ int tempfile_create(const char *prefix, const char *suffix, char **path_out)
 
     errno = EEXIST;
     return -1;
+}
+
+int tempfile_create(const char *prefix, const char *suffix, char **path_out)
+{
+    *path_out = NULL;
+    if (!name_fragment_is_valid(prefix) || !name_fragment_is_valid(suffix)) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&lock);
+    int fd = create_locked(prefix, suffix, path_out);
+    int saved_errno = errno;
+    pthread_mutex_unlock(&lock);
+    errno = saved_errno;
+    return fd;
 }

@@ -456,7 +456,9 @@ static void loop_run_active(const struct agent_loop_params *params,
 void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result)
 {
     keepawake_acquire();
+    const void *previous_owner = task_registry_set_owner(params->session);
     loop_run_active(params, result);
+    task_registry_set_owner(previous_owner);
     keepawake_release();
 }
 

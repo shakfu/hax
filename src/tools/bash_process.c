@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -481,34 +482,33 @@ char *bash_run_command(const char *command, long timeout_ms, int background, con
  * exists and publish cannot silently drop a shell. */
 #define SHELL_PGID_TABLE_SIZE 128
 
-/* Single-writer (the tool-dispatch thread); a fatal-signal handler may read concurrently, so
- * slots hold either zero or a pid whose process is still unreaped. */
-static volatile pid_t shell_pgids[SHELL_PGID_TABLE_SIZE];
+/* Agents on separate threads publish concurrently, so a slot is claimed and released by
+ * compare-and-swap. A fatal-signal handler may read at any time; lock-free atomic loads are
+ * async-signal-safe, and a slot holds either zero or a pid whose process is still unreaped. */
+static _Atomic pid_t shell_pgids[SHELL_PGID_TABLE_SIZE];
 
 void bash_shell_pgid_publish(pid_t pid)
 {
     for (size_t i = 0; i < SHELL_PGID_TABLE_SIZE; i++) {
-        if (shell_pgids[i] == 0) {
-            shell_pgids[i] = pid;
+        pid_t empty = 0;
+        if (atomic_compare_exchange_strong(&shell_pgids[i], &empty, pid))
             return;
-        }
     }
 }
 
 void bash_shell_pgid_retract(pid_t pid)
 {
     for (size_t i = 0; i < SHELL_PGID_TABLE_SIZE; i++) {
-        if (shell_pgids[i] == pid) {
-            shell_pgids[i] = 0;
+        pid_t expected = pid;
+        if (atomic_compare_exchange_strong(&shell_pgids[i], &expected, 0))
             return;
-        }
     }
 }
 
 void bash_shell_pgids_kill(void)
 {
     for (size_t i = 0; i < SHELL_PGID_TABLE_SIZE; i++) {
-        pid_t pid = shell_pgids[i];
+        pid_t pid = atomic_load(&shell_pgids[i]);
         if (pid > 0)
             kill(-pid, SIGKILL);
     }

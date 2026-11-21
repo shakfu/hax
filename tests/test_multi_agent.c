@@ -22,6 +22,7 @@
 #include "provider.h"
 #include "system/cancel.h"
 #include "system/clock.h"
+#include "tools/task_registry.h"
 
 struct fixture {
     const char *label;
@@ -219,6 +220,68 @@ static void test_four_agents_run_concurrently(void)
     hax_shutdown();
 }
 
+/* Start a background task named `<marker>_bg`, then sit in a foreground `sleep <hold>`, which
+ * outlasts it, so the next turn's task-note collection sees it done. */
+static void write_background_script(const char *path, const char *marker, const char *hold)
+{
+    FILE *file = fopen(path, "w");
+    EXPECT(file != NULL);
+    if (!file)
+        return;
+    fprintf(file,
+            "tool bash {\"command\":\"sleep 0.5; echo %s\",\"background\":true,"
+            "\"name\":\"%s_bg\"}\n",
+            marker, marker);
+    fprintf(file, "end-turn\n\n");
+    fprintf(file, "tool bash {\"command\":\"sleep %s\"}\n", hold);
+    fprintf(file, "end-turn\n\n");
+    fprintf(file, "text done\n");
+    fprintf(file, "end-turn\n");
+    fclose(file);
+}
+
+/* Each agent hears about its own background task and never its sibling's. ALPHA's shorter hold
+ * makes it collect task notes first, so a registry shared across agents hands it both. Under
+ * BUILD_DIR=build-tsan, one agent adopting a task while the other walks the list also races. */
+static void test_background_tasks_stay_with_their_agent(void)
+{
+    EXPECT(hax_init(NULL) == 0);
+    config_set_override("provider", "mock");
+    config_set_override("bash.background_yield", "100ms");
+
+    char *dir = t_tempdir();
+    char path_a[512], path_b[512];
+    snprintf(path_a, sizeof(path_a), "%s/bg-a.txt", dir);
+    snprintf(path_b, sizeof(path_b), "%s/bg-b.txt", dir);
+    write_background_script(path_a, "ALPHA", "1");
+    write_background_script(path_b, "BRAVO", "2");
+
+    struct fixture a = {
+        .label = "alpha", .script_path = path_a, .marker = "[task ALPHA_bg", .foreign = "BRAVO"};
+    struct fixture b = {
+        .label = "bravo", .script_path = path_b, .marker = "[task BRAVO_bg", .foreign = "ALPHA"};
+    fixture_construct(&a);
+    fixture_construct(&b);
+
+    pthread_t thread_a, thread_b;
+    EXPECT(pthread_create(&thread_a, NULL, fixture_run_thread, &a) == 0);
+    EXPECT(pthread_create(&thread_b, NULL, fixture_run_thread, &b) == 0);
+    pthread_join(thread_a, NULL);
+    pthread_join(thread_b, NULL);
+
+    struct fixture *agents[] = {&a, &b};
+    for (size_t i = 0; i < 2; i++) {
+        EXPECT(agents[i]->result.outcome == AGENT_LOOP_COMPLETE);
+        EXPECT(history_contains(&agents[i]->session, agents[i]->marker));
+        EXPECT(!history_contains(&agents[i]->session, agents[i]->foreign));
+    }
+
+    task_registry_shutdown();
+    fixture_destroy(&a);
+    fixture_destroy(&b);
+    hax_shutdown();
+}
+
 /* A script whose single tool call outlives the test's patience, so a cancel lands mid-tool. */
 static void write_stalling_script(const char *path)
 {
@@ -337,6 +400,7 @@ int main(void)
     test_two_agents_run_sequentially();
     test_two_agents_run_concurrently();
     test_four_agents_run_concurrently();
+    test_background_tasks_stay_with_their_agent();
     test_cancel_stops_one_agent_only();
     T_REPORT();
 }

@@ -219,6 +219,11 @@ void agent_flush_logs(struct transcript_log *tlog, struct session_log *slog,
 void agent_finalize_tasks(struct agent_session *session, struct transcript_log *tlog,
                           struct session_log *slog);
 
+/* agent_finalize_tasks without the kill, for a host that records several conversations' tasks
+ * before one shutdown. */
+void agent_record_task_exit(struct agent_session *session, struct transcript_log *tlog,
+                            struct session_log *slog);
+
 /* The latched interrupt requests as a stop signal. */
 enum agent_signal agent_interrupt_signal(void);
 

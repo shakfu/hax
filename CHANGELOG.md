@@ -76,6 +76,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   selection that child processes inherit; that selection is now owned per session and reaches the
   bash tool through the tool run context. Idle-sleep inhibition is serialized as well. See
   [docs/embedding.md](docs/embedding.md).
+- Concurrent `libhax` sessions can now run background bash tasks. Two sessions polling the shared
+  task registry could both reap one finished task, double-freeing its output reader and closing
+  its descriptor twice; each session also took the other's completion notes. The registry and
+  the temporary-file store are now locked, and each session sees only the tasks it started.
 - `system/browser` no longer fails intermittently during a parallel test run. It waited a fixed
   300 polls for the detached opener to record its URL, which is 3.6 seconds -- less than the
   detached grandchild plus three execs can take while the rest of the suite is spawning. The wait

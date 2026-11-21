@@ -4,7 +4,7 @@
 
 /* Process-wide registry for temporary files referenced by conversation items. Files are removed
  * explicitly by tempfiles_cleanup() or by an atexit handler registered on first creation. Calls
- * must be serialized. */
+ * are safe from concurrent threads, except tempfiles_set_atexit_enabled(). */
 
 /* Create and track a mode-0600 temporary file in a private mode-0700 directory under $TMPDIR.
  * Unset, empty, or invalid-UTF-8 TMPDIR values fall back to "/tmp" because paths must remain valid
