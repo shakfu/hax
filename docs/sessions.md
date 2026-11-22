@@ -77,8 +77,9 @@ Conversation records, in order. `kind` is one of:
 | `turn_usage` | Token usage, timing, and cost of one round-trip; see below. |
 
 `origin` marks synthetic records: `compact_seed` (a compaction summary), `continuation`,
-`interrupted`, `skipped`, `refused`, `summarized`, `task_note` (a background-task report), and
-`compaction` (a `turn_usage` record for a summarization request rather than an agent turn).
+`interrupted`, `skipped`, `refused`, `summarized`, `task_note` (a background-task report),
+`budget_note` (the request for a final answer once a subagent budget is spent), and `compaction` (a
+`turn_usage` record for a summarization request rather than an agent turn).
 Items without `origin` are ordinary typed or streamed content. `inherited: true` marks items
 `/fork` copied from the source session: context this conversation reads but did not pay for.
 
@@ -104,7 +105,7 @@ records:
 
 | Field | Meaning |
 | --- | --- |
-| `outcome` | `complete`, `error`, `interrupted`, `paused`, or `max_turns`. |
+| `outcome` | `complete`, `error`, `interrupted`, `paused`, `max_turns`, or `budget` (a subagent budget is spent; `error` says which, and `text` holds the final answer when one was given). |
 | `text` | The final assistant text on `complete`, verbatim — unlike plain output, no trailing newline is appended. |
 | `error` | Provider error message, when the run failed. |
 | `turns` | Provider round-trips used. |

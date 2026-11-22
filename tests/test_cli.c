@@ -424,29 +424,6 @@ static void test_resolve_session_by_latest_id_and_prefix(void)
     free(second_path);
 }
 
-static void test_subagent_depth_validation(void)
-{
-    const char *original = getenv("HAX_SUBAGENT_DEPTH");
-    char *saved = original ? strdup(original) : NULL;
-
-    unsetenv("HAX_SUBAGENT_DEPTH");
-    EXPECT(cli_check_subagent_depth() == 0);
-    setenv("HAX_SUBAGENT_DEPTH", "2", 1);
-    EXPECT(cli_check_subagent_depth() == 0);
-    setenv("HAX_SUBAGENT_DEPTH", "3", 1);
-    EXPECT(cli_check_subagent_depth() == -1);
-    setenv("HAX_SUBAGENT_DEPTH", "invalid", 1);
-    EXPECT(cli_check_subagent_depth() == -1);
-    setenv("HAX_SUBAGENT_DEPTH", "-1", 1);
-    EXPECT(cli_check_subagent_depth() == -1);
-
-    if (saved)
-        setenv("HAX_SUBAGENT_DEPTH", saved, 1);
-    else
-        unsetenv("HAX_SUBAGENT_DEPTH");
-    free(saved);
-}
-
 int main(void)
 {
     /* Outside any repository, so recorded sessions neither run git nor depend on the checkout. */
@@ -466,6 +443,5 @@ int main(void)
     test_interactive_prompt_from_arguments();
     test_resolve_missing_session();
     test_resolve_session_by_latest_id_and_prefix();
-    test_subagent_depth_validation();
     T_REPORT();
 }

@@ -989,6 +989,7 @@ static void set_resume_state(struct agent_state *state, const struct agent_loop_
         state->resume_reason = AGENT_RESUME_INTERRUPTED;
         return;
     case AGENT_LOOP_PROVIDER_ERROR:
+    case AGENT_LOOP_BUDGET:
         state->resume_reason = AGENT_RESUME_ERROR;
         return;
     }
@@ -1234,7 +1235,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options,
         struct agent_loop_result loop_result;
         agent_loop_run(&loop_params, &loop_result);
         int user_turn_errored = loop_result.outcome == AGENT_LOOP_PROVIDER_ERROR;
-        if (user_turn_errored)
+        if (user_turn_errored || loop_result.outcome == AGENT_LOOP_BUDGET)
             render_loop_error(&render, &loop_result);
         set_resume_state(&state, &loop_result);
         agent_loop_result_destroy(&loop_result);

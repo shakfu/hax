@@ -186,6 +186,8 @@ static const char *loop_outcome_name(enum agent_loop_outcome outcome)
         return "paused";
     case AGENT_LOOP_MAX_TURNS:
         return "max_turns";
+    case AGENT_LOOP_BUDGET:
+        return "budget";
     }
     return "error";
 }
@@ -217,7 +219,8 @@ static void emit_json_result(struct oneshot_state *state, const struct agent_loo
 
     json_object_set_new(record, "type", json_string("result"));
     json_object_set_new(record, "outcome", json_string(loop_outcome_name(result->outcome)));
-    if (result->outcome == AGENT_LOOP_COMPLETE) {
+    if (result->outcome == AGENT_LOOP_COMPLETE ||
+        (result->outcome == AGENT_LOOP_BUDGET && result->turns > 0)) {
         char *text = collect_final_text(state->session.items, result->final_items_from,
                                         result->final_items_to);
         json_set_string(record, "text", text);
@@ -339,6 +342,19 @@ static int handle_loop_result(const struct oneshot_state *state,
         return ONESHOT_EXIT_INTERRUPTED;
     case AGENT_LOOP_PAUSED:
         hax_err("paused at a turn boundary");
+        return 1;
+    case AGENT_LOOP_BUDGET:
+        /* Only a run that made requests got the final-answer turn. */
+        if (result->turns == 0) {
+            hax_err("%s; stopped before any request", result->error_message);
+            return 1;
+        }
+        if (!state->json && print_assistant_messages(state->session.items, result->final_items_from,
+                                                     result->final_items_to) < 0) {
+            hax_err("cannot write the final answer: %s", strerror(errno));
+            return 1;
+        }
+        hax_err("%s; stopped after a final answer", result->error_message);
         return 1;
     }
     return 1;

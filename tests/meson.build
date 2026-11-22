@@ -54,6 +54,7 @@ test_sources = [
     'test_session.c',
     'test_session_prune.c',
     'test_slash.c',
+    'test_subagent.c',
     'test_tool_schema.c',
     'test_trace.c',
     'test_transcript.c',
@@ -198,6 +199,7 @@ e2e_scenarios = [
     'repl_status',
     'repl_status_label',
     'repl_status_tools',
+    'subagent',
 ]
 
 e2e_env = environment({'HAX_BIN': hax_exe.full_path()})

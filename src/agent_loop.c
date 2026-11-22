@@ -12,6 +12,7 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "session.h"
+#include "subagent.h"
 #include "tool.h"
 #include "transcript.h"
 #include "turn.h"
@@ -243,13 +244,27 @@ static enum loop_compaction loop_compact(const struct agent_loop_params *params,
     return compacted ? LOOP_COMPACTED : LOOP_COMPACT_FAILED;
 }
 
+/* A spent subagent budget ends the run with one last request, so the model can report what it
+ * did and the parent receives an answer rather than nothing. */
+struct loop_budget {
+    char *spent;      /* owned reason, set once the budget is found spent */
+    int final_answer; /* the note is in history and the next response is the last */
+};
+
+static char *budget_note_text(const char *spent)
+{
+    return xasprintf("%s. Do not call any more tools: they will not run. Reply now with your "
+                     "final answer: what you found or changed, and what remains unfinished.",
+                     spent);
+}
+
 /* Requests accepted between two compactions that answer rejections: two mean a tool batch's
  * results fit. With fewer, the compacted window or the first batch after it overflowed, and
  * compacting again would likely end the same way. */
 #define RECOVERY_MIN_ACCEPTED 2
 
 static void loop_run_active(const struct agent_loop_params *params,
-                            struct agent_loop_result *result)
+                            struct agent_loop_result *result, struct loop_budget *budget)
 {
     struct agent_session *session = params->session;
     const struct agent_loop_hooks *hooks = &params->hooks;
@@ -262,6 +277,26 @@ static void loop_run_active(const struct agent_loop_params *params,
     int accepted_since_recovery = 0;
 
     for (int turn_n = 0; params->max_turns <= 0 || turn_n < params->max_turns; turn_n++) {
+        /* Before anything joins history, so a run that has made no request stops at the seam
+         * it started from. */
+        if (!budget->final_answer) {
+            if (!budget->spent)
+                budget->spent = subagent_budget_spent();
+            if (budget->spent && result->turns == 0) {
+                result->outcome = AGENT_LOOP_BUDGET;
+                return;
+            }
+            if (budget->spent) {
+                agent_session_append(session, (struct item){
+                                                  .kind = ITEM_USER_MESSAGE,
+                                                  .text = budget_note_text(budget->spent),
+                                                  .origin = ITEM_ORIGIN_BUDGET_NOTE,
+                                              });
+                loop_flush(params);
+                budget->final_answer = 1;
+            }
+        }
+
         /* The user message brought the first boundary, unless the run continues a previous seam;
          * follow-up turns and a retry after a compaction seed owe their own. It is appended only
          * when this turn's items land, so a turn that leaves nothing behind leaves no empty turn
@@ -392,7 +427,10 @@ static void loop_run_active(const struct agent_loop_params *params,
             loop_add_usage(params, &loop_turn, paused_empty);
             loop_flush(params);
             agent_stream_destroy(&loop_turn);
-            result->outcome = paused_empty ? AGENT_LOOP_PAUSED : AGENT_LOOP_COMPLETE;
+            if (paused_empty)
+                result->outcome = AGENT_LOOP_PAUSED;
+            else
+                result->outcome = budget->final_answer ? AGENT_LOOP_BUDGET : AGENT_LOOP_COMPLETE;
             return;
         }
 
@@ -407,7 +445,7 @@ static void loop_run_active(const struct agent_loop_params *params,
             if (sig == AGENT_SIGNAL_PAUSE)
                 pause_pending = 1;
             enum agent_loop_tool_action action = AGENT_LOOP_TOOL_RUN;
-            if (session->n_tools == 0)
+            if (session->n_tools == 0 || budget->final_answer)
                 action = AGENT_LOOP_TOOL_REFUSE;
             else if (sig == AGENT_SIGNAL_ABORT)
                 action = AGENT_LOOP_TOOL_SKIP;
@@ -432,6 +470,11 @@ static void loop_run_active(const struct agent_loop_params *params,
         }
         if (sig == AGENT_SIGNAL_PAUSE)
             pause_pending = 1;
+        /* Calls made despite the note were refused; no request follows them. */
+        if (budget->final_answer) {
+            result->outcome = AGENT_LOOP_BUDGET;
+            return;
+        }
 
         /* The seam is the pause point: calls, results, and usage record are durable and no
          * marker is owed — history reads as a finished provider turn a later run can continue
@@ -442,6 +485,10 @@ static void loop_run_active(const struct agent_loop_params *params,
             result->outcome = AGENT_LOOP_PAUSED;
             return;
         }
+        /* A spent budget pays for no compaction; the final request goes out as the window is. */
+        budget->spent = subagent_budget_spent();
+        if (budget->spent)
+            continue;
 
         /* Only at a seam another turn follows, once the usage record compact_due() reads is
          * appended; past the last allowed turn, the run that continues compacts before its first
@@ -457,7 +504,13 @@ void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_re
 {
     keepawake_acquire();
     const void *previous_owner = task_registry_set_owner(params->session);
-    loop_run_active(params, result);
+    struct loop_budget budget = {0};
+    loop_run_active(params, result, &budget);
+    if (result->outcome == AGENT_LOOP_BUDGET && !result->error_message) {
+        result->error_message = budget.spent;
+        budget.spent = NULL;
+    }
+    free(budget.spent);
     task_registry_set_owner(previous_owner);
     keepawake_release();
 }

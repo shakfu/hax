@@ -59,9 +59,6 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
  * owned by the caller. */
 enum cli_session_result cli_resolve_session(const struct cli_options *options, char **path);
 
-/* Refuse malformed depths as well as values at the recursion cap. */
-int cli_check_subagent_depth(void);
-
 void cli_print_help(void);
 
 #endif /* HAX_CLI_H */

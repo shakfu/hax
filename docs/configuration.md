@@ -310,11 +310,19 @@ estimated from token counts and this metadata; check provider billing for author
 | `bash.shell` | `HAX_BASH_SHELL` | bash/sh | Shell executable used by the bash tool. |
 | `task.wait_timeout` | `HAX_TASK_WAIT_TIMEOUT` | `10m` | Default wait for a background task. |
 | `task.max_running` | `HAX_TASK_MAX_RUNNING` | `32` | Maximum concurrent background tasks, up to 64. |
+| `subagent.max_depth` | `HAX_SUBAGENT_MAX_DEPTH` | `2` | Deepest generation of subagents, up to 8; `1` allows children only, `0` none. |
+| `subagent.max_agents` | `HAX_SUBAGENT_MAX_AGENTS` | — | Subagents one run may start in total, across every generation. |
+| `subagent.max_tokens` | `HAX_SUBAGENT_MAX_TOKENS` | — | Input plus output tokens all of a run's subagents may use. |
+| `subagent.max_cost` | `HAX_SUBAGENT_MAX_COST` | — | US dollars all of a run's subagents may spend, such as `0.50`. |
 | `http.max_retries` | `HAX_HTTP_MAX_RETRIES` | `4` | Additional retries for transient HTTP failures. |
 | `http.retry_base` | `HAX_HTTP_RETRY_BASE` | `1s` | Initial retry backoff. |
 | `http.idle_timeout` | `HAX_HTTP_IDLE_TIMEOUT` | `10m` | Streaming silence before failure; `0` disables. |
 
-When `no_tasks` is on, reaching `bash.timeout` kills the command instead of detaching it. Standard
+When `no_tasks` is on, reaching `bash.timeout` kills the command instead of detaching it.
+
+The `subagent.*` limits of the run you start bind every subagent below it; a subagent's own
+settings cannot raise them. The budgets count what subagents use, not the run that started them,
+and last until that run exits. See [Background tasks and delegation](./usage.md#background-tasks-and-delegation). Standard
 `CURL_CA_BUNDLE`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` variables can override TLS certificate lookup.
 
 ### Provider settings

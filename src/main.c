@@ -15,6 +15,7 @@
 #include "select.h"
 #include "session.h"
 #include "session_prune.h"
+#include "subagent.h"
 #include "providers/registry.h"
 #include "terminal/theme.h"
 
@@ -164,7 +165,7 @@ int main(int argc, char **argv)
         result = 0;
         goto cleanup_config;
     }
-    if (parse_result == CLI_PARSE_ERROR || cli_check_subagent_depth() != 0)
+    if (parse_result == CLI_PARSE_ERROR || subagent_admit() != 0)
         goto cleanup_config;
     if (cli_read_prompt(&options, argc, argv, stdin, isatty(fileno(stdin)), &prompt) != 0)
         goto cleanup_config;

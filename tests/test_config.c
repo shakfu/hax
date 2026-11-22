@@ -797,6 +797,32 @@ static void test_string_and_integer_value_validation(void)
     EXPECT_STR_EQ(hint, "a whole number");
 }
 
+static void test_usd_value_validation(void)
+{
+    char hint[64];
+    const struct config_setting *max_cost = config_setting_find("subagent.max_cost");
+    EXPECT(max_cost && max_cost->kind == CONFIG_KIND_USD);
+    EXPECT(config_value_valid(max_cost, "5"));
+    EXPECT(config_value_valid(max_cost, "$0.50"));
+    EXPECT(config_value_valid(max_cost, ".25"));
+    EXPECT(!config_value_valid(max_cost, "0"));
+    EXPECT(!config_value_valid(max_cost, "-1"));
+    EXPECT(!config_value_valid(max_cost, "nan"));
+    EXPECT(!config_value_valid(max_cost, "inf"));
+    EXPECT(!config_value_valid(max_cost, "1e999"));
+    EXPECT(!config_value_valid(max_cost, "2 dollars"));
+    EXPECT(!config_value_valid(max_cost, ""));
+    config_value_hint(max_cost, hint, sizeof(hint));
+    EXPECT_STR_EQ(hint, "a dollar amount like 5 or 0.50");
+
+    EXPECT(config_usd("subagent.max_cost") == 0);
+    setenv("HAX_SUBAGENT_MAX_COST", "$1.25", 1);
+    EXPECT(config_usd("subagent.max_cost") == 1.25);
+    setenv("HAX_SUBAGENT_MAX_COST", "lots", 1);
+    EXPECT(config_usd("subagent.max_cost") == 0);
+    unsetenv("HAX_SUBAGENT_MAX_COST");
+}
+
 static void test_bounded_and_scaled_value_validation(void)
 {
     char hint[64];
@@ -2221,6 +2247,7 @@ static void test_parse_duration_invalid(void)
 
 int main(void)
 {
+    test_usd_value_validation();
     test_load_validation();
     test_registry_introspection();
     test_source_reports_winning_tier();

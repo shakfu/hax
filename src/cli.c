@@ -21,10 +21,8 @@
 #include "terminal/theme.h"
 #include "terminal/ui.h"
 #include "terminal/width.h"
-#include "text/fmt.h"
 #include "text/trim.h"
 #include "text/width.h"
-#include "tools/bash_env.h"
 
 static const struct help_option {
     const char *flags;
@@ -413,23 +411,4 @@ enum cli_session_result cli_resolve_session(const struct cli_options *options, c
     if (*path)
         (void)session_touch(*path);
     return CLI_SESSION_READY;
-}
-
-int cli_check_subagent_depth(void)
-{
-    /* Depth is process ancestry supplied by the parent, not user configuration. */
-    const char *value = getenv("HAX_SUBAGENT_DEPTH");
-    if (!value || !*value)
-        return 0;
-
-    int depth;
-    if (!parse_int(value, &depth) || depth < 0)
-        depth = HAX_SUBAGENT_MAX_DEPTH;
-    if (depth < HAX_SUBAGENT_MAX_DEPTH)
-        return 0;
-
-    hax_err("subagent depth limit (%d) reached — run the task directly instead of spawning "
-            "another hax",
-            HAX_SUBAGENT_MAX_DEPTH);
-    return -1;
 }

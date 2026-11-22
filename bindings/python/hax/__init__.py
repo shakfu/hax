@@ -159,6 +159,7 @@ _ORIGINS = {
     lib.ITEM_ORIGIN_REFUSED: "refused",
     lib.ITEM_ORIGIN_SUMMARIZED: "summarized",
     lib.ITEM_ORIGIN_TASK_NOTE: "task_note",
+    lib.ITEM_ORIGIN_BUDGET_NOTE: "budget_note",
 }
 
 _OUTCOMES = {
@@ -167,6 +168,7 @@ _OUTCOMES = {
     lib.AGENT_LOOP_INTERRUPTED: "interrupted",
     lib.AGENT_LOOP_PAUSED: "paused",
     lib.AGENT_LOOP_MAX_TURNS: "max_turns",
+    lib.AGENT_LOOP_BUDGET: "budget",
 }
 
 # What the loop itself writes for a call it declined to dispatch. Both come from agent_core.h, so

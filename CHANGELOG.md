@@ -9,6 +9,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- Subagent limits: `subagent.max_depth` replaces the fixed nesting cap, and `subagent.max_agents`,
+  `subagent.max_tokens`, and `subagent.max_cost` bound everything a run delegates, across every
+  generation. A subagent that spends the budget gets one tool-free request to give its final
+  answer, so the parent receives what it found instead of nothing, then stops and stays
+  resumable; later subagents refuse to start. Depth alone could not bound fan-out: 32
+  concurrent tasks per process allowed over a thousand nested agents. See
+  [docs/usage.md](docs/usage.md#background-tasks-and-delegation).
 - `hax --acp` serves the Agent Client Protocol, version 1, on stdin and stdout, so an editor
   such as Zed can drive hax as an agent. It streams replies and tool calls, asks the client before
   each `bash`, `edit`, or `write` call, stops on the client's cancel, and reopens recorded sessions.

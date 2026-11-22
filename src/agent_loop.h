@@ -83,15 +83,17 @@ struct agent_loop_hooks {
     void (*task_note)(const char *text, void *user);
 };
 
-/* Every outcome except COMPLETE leaves an incomplete user turn behind. PAUSED and MAX_TURNS stop
- * at a clean turn seam (all calls paired, no markers), so re-running the loop against the same
- * history continues the turn; INTERRUPTED and PROVIDER_ERROR ran abort repair first. */
+/* Every outcome except COMPLETE leaves an incomplete user turn behind. PAUSED, MAX_TURNS, and
+ * BUDGET stop at a clean turn seam (all calls paired, no markers), so re-running the loop against
+ * the same history continues the turn; INTERRUPTED and PROVIDER_ERROR ran abort repair first.
+ * BUDGET means the subagent ledger this run is charged to is spent; error_message says how. */
 enum agent_loop_outcome {
     AGENT_LOOP_COMPLETE,
     AGENT_LOOP_PROVIDER_ERROR,
     AGENT_LOOP_INTERRUPTED,
     AGENT_LOOP_PAUSED,
     AGENT_LOOP_MAX_TURNS,
+    AGENT_LOOP_BUDGET,
 };
 
 struct agent_loop_result {

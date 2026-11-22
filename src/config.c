@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <jansson.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -150,6 +151,24 @@ static const struct config_setting REGISTRY[] = {
     {.key = "task.max_running", .env_var = "HAX_TASK_MAX_RUNNING", .default_value = "32",
      .description = "Maximum concurrently running background tasks",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 64, .editable = 1},
+
+    /* subagents: the root run's values bind every hax it starts */
+    {.key = "subagent.max_depth", .env_var = "HAX_SUBAGENT_MAX_DEPTH", .default_value = "2",
+     .description = "Deepest generation of nested hax runs; 1 allows children but not "
+                    "grandchildren, 0 refuses every subagent",
+     .kind = CONFIG_KIND_INT, .max = 8, .editable = 1},
+    {.key = "subagent.max_agents", .env_var = "HAX_SUBAGENT_MAX_AGENTS",
+     .description = "Subagents one run may start in total, counting every generation; unset is "
+                    "unlimited",
+     .kind = CONFIG_KIND_INT, .min = 1},
+    {.key = "subagent.max_tokens", .env_var = "HAX_SUBAGENT_MAX_TOKENS",
+     .description = "Input plus output tokens all of a run's subagents may use; unset is "
+                    "unlimited",
+     .kind = CONFIG_KIND_TOKENS},
+    {.key = "subagent.max_cost", .env_var = "HAX_SUBAGENT_MAX_COST",
+     .description = "US dollars all of a run's subagents may spend; a response with unknown cost "
+                    "exhausts it; unset is unlimited",
+     .kind = CONFIG_KIND_USD},
 
     /* http transport */
     {.key = "http.max_retries", .env_var = "HAX_HTTP_MAX_RETRIES", .default_value = "4",
@@ -873,6 +892,23 @@ char *config_prompt_expand(const char *value, char **error)
     return clean;
 }
 
+/* A non-negative finite dollar amount, or -1. */
+static double parse_usd(const char *value)
+{
+    if (!value || !*value)
+        return -1;
+    if (*value == '$')
+        value++;
+    if (!isdigit((unsigned char)*value) && *value != '.')
+        return -1;
+    char *end;
+    errno = 0;
+    double parsed = strtod(value, &end);
+    if (errno || *end || !isfinite(parsed) || parsed < 0)
+        return -1;
+    return parsed;
+}
+
 static int kind_value_valid(const struct config_setting *setting, const char *value)
 {
     switch (setting->kind) {
@@ -892,6 +928,8 @@ static int kind_value_valid(const struct config_setting *setting, const char *va
         long parsed = parse_duration_ms(value);
         return parsed >= 0 && value_in_bounds(setting, parsed);
     }
+    case CONFIG_KIND_USD:
+        return parse_usd(value) > 0;
     case CONFIG_KIND_STRING:
         return 1;
     }
@@ -960,6 +998,9 @@ static void kind_value_hint(const struct config_setting *setting, char *buffer, 
         break;
     case CONFIG_KIND_DURATION:
         snprintf(buffer, size, "a duration like 2s or 500ms");
+        break;
+    case CONFIG_KIND_USD:
+        snprintf(buffer, size, "a dollar amount like 5 or 0.50");
         break;
     case CONFIG_KIND_STRING:
         buffer[0] = '\0';
@@ -1035,6 +1076,12 @@ long config_duration_ms(const char *key)
         return value;
     value = setting ? parse_duration_ms(setting->default_value) : -1;
     return value < 0 ? 0 : value;
+}
+
+double config_usd(const char *key)
+{
+    double value = parse_usd(resolve(key, 1));
+    return value > 0 ? value : 0;
 }
 
 static void set_tier_value(json_t **tier, const char *key, const char *value)

@@ -14,6 +14,7 @@
 #include "model_meta.h"
 #include "provider.h"
 #include "session.h"
+#include "subagent.h"
 #include "tool.h"
 #include "transcript.h"
 #include "turn.h"
@@ -669,6 +670,9 @@ void agent_session_add_turn_usage(struct agent_session *session, const struct pr
         agent_turn_usage_new(usage, elapsed_ms, provider, session->model);
     if (!turn_usage)
         return;
+    /* Every billed response passes here, compaction summaries included. */
+    if (agent_usage_is_reported(usage))
+        subagent_charge(usage->input_tokens, usage->output_tokens, turn_usage->cost_total);
     fill_provenance(&turn_usage->provenance, session, provider, response);
     agent_session_append(
         session, (struct item){

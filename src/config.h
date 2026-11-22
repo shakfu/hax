@@ -58,6 +58,8 @@ int config_bool(const char *key);
 long config_size(const char *key);
 long config_tokens(const char *key);
 long config_duration_ms(const char *key);
+/* A positive dollar amount, or 0 when unset or invalid. */
+double config_usd(const char *key);
 
 /* Parsers for setting values, shared by the typed lookups and callers that hold an already-resolved
  * string. */
@@ -173,6 +175,7 @@ enum config_kind {
     CONFIG_KIND_SIZE,   /* bytes; binary k/m suffixes */
     CONFIG_KIND_TOKENS, /* token counts; decimal k/m suffixes */
     CONFIG_KIND_DURATION,
+    CONFIG_KIND_USD, /* US dollars; decimal, an optional leading '$' */
 };
 
 /* Named choice grammars shared by registry validation and the /config UI. */

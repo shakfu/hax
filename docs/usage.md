@@ -305,6 +305,23 @@ advertised to the model as named roles; favorite-only presets remain private pic
 delegation for independent work that benefits from parallel context — ordinary small tasks are
 faster and cheaper in one conversation.
 
+Delegation has limits. By default a subagent may start its own subagents, but theirs refuse to
+run (`subagent.max_depth`). You can also cap, for everything below one run, the number of
+subagents started (`subagent.max_agents`), the tokens they use (`subagent.max_tokens`), and their
+spend in US dollars (`subagent.max_cost`). Once a budget is spent:
+
+- A running subagent finishes its current tool calls, then gets one more model request. That
+  request tells it to stop using tools and give its final answer. Any tool call it makes anyway is
+  refused. It prints the answer on stdout and the reason on stderr, then exits 1 with its
+  conversation intact, so you can resume it. The extra request can overshoot the budget by one
+  response per running subagent.
+- A new subagent refuses to start, and the model is told to do the task itself.
+
+Spend comes from the provider's reported cost or the model catalog's prices. When a response's
+cost is unknown, a dollar budget counts as spent, so pair an unpriced model with
+`subagent.max_tokens` instead. These limits guard against runaway delegation; they do not confine
+a model that sets out to bypass them.
+
 ## Context, compaction, and usage
 
 After a turn, hax shows elapsed time, current context use, and spend when the provider or model

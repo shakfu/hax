@@ -2,9 +2,6 @@
 #ifndef HAX_TOOLS_BASH_ENV_H
 #define HAX_TOOLS_BASH_ENV_H
 
-/* The child environment stamp and startup guard must use the same recursion cap. */
-#define HAX_SUBAGENT_MAX_DEPTH 3
-
 #include <stddef.h>
 
 /* The provider selection a child process inherits. Owned by the agent whose subprocesses it

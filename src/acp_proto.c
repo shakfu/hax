@@ -322,6 +322,7 @@ const char *acp_stop_reason(enum agent_loop_outcome outcome, int cancelled, cons
     case AGENT_LOOP_COMPLETE:
         return "end_turn";
     case AGENT_LOOP_MAX_TURNS:
+    case AGENT_LOOP_BUDGET:
         return "max_turn_requests";
     case AGENT_LOOP_INTERRUPTED:
     case AGENT_LOOP_PAUSED:

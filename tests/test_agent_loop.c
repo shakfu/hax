@@ -13,6 +13,7 @@
 #include "harness.h"
 #include "provider.h"
 #include "session.h"
+#include "subagent.h"
 #include "tool.h"
 #include "turn.h"
 #include "xalloc.h"
@@ -643,6 +644,130 @@ static void test_loop_enforces_max_turns(void)
 
     agent_loop_result_destroy(&result);
     agent_session_free(&session);
+}
+
+/* Run `fn` admitted as a child charged to a ledger with `max_tokens`, then leave the ledger. */
+static void with_child_ledger(long max_tokens, void (*fn)(const char *path))
+{
+    struct subagent_budget budget = {.max_tokens = max_tokens};
+    char *path = NULL;
+    EXPECT(subagent_ledger_create(&budget, &path) == 0);
+    setenv("HAX_SUBAGENT_DEPTH", "1", 1);
+    setenv("HAX_SUBAGENT_LEDGER", path, 1);
+    EXPECT(subagent_admit() == 0);
+    fn(path);
+    unsetenv("HAX_SUBAGENT_DEPTH");
+    unsetenv("HAX_SUBAGENT_LEDGER");
+    EXPECT(subagent_admit() == 0);
+    free(path);
+}
+
+static enum item_origin last_request_origin;
+static int greedy_turn;
+
+/* Calls a tool on every turn, recording the origin of each request's newest item. */
+static int greedy_stream(struct provider *p, const struct context *ctx, const char *model,
+                         stream_cb cb, void *user, http_tick_cb tick, void *tick_user)
+{
+    (void)p;
+    (void)model;
+    (void)tick;
+    (void)tick_user;
+    greedy_turn++;
+    last_request_origin = ctx->n_items ? ctx->items[ctx->n_items - 1].origin : ITEM_ORIGIN_NONE;
+    emit_text(cb, user, "still working");
+    emit_tool_call(cb, user, greedy_turn == 1 ? "c1" : "c2");
+    emit_done(cb, user, usage_tokens(10, 2));
+    return 0;
+}
+
+static void budget_asks_for_final_answer(const char *path)
+{
+    (void)path;
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = chain_stream};
+    struct loop_test_ctx ctx = {.compact_succeeds = 1};
+    chain_turn = 0;
+    chain_two_tools = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 0);
+    /* The first turn spends all 12 tokens; one more request carries the note, and its text is
+     * the run's final answer. */
+    EXPECT(result.outcome == AGENT_LOOP_BUDGET);
+    EXPECT(result.turns == 2 && chain_turn == 2);
+    EXPECT(ctx.tools_run == 1 && ctx.compactions == 0);
+    EXPECT_STR_EQ(result.error_message, "subagent token budget spent (12 of 12)");
+    EXPECT(result.final_items_to == result.final_items_from + 1);
+    EXPECT_STR_EQ(session.items[result.final_items_from].text, "finished");
+
+    int notes = 0;
+    for (size_t i = 0; i < session.n_items; i++) {
+        if (session.items[i].origin != ITEM_ORIGIN_BUDGET_NOTE)
+            continue;
+        notes++;
+        EXPECT(session.items[i].kind == ITEM_USER_MESSAGE);
+        EXPECT(strstr(session.items[i].text, "subagent token budget spent (12 of 12). Do not "
+                                             "call any more tools") == session.items[i].text);
+    }
+    EXPECT(notes == 1);
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_CLEAN);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void budget_refuses_final_tool_calls(const char *path)
+{
+    (void)path;
+    struct agent_session session;
+    session_init(&session);
+    session_enable_tools(&session);
+    agent_session_add_user(&session, "start");
+    struct provider provider = {.name = "test", .stream = greedy_stream};
+    struct loop_test_ctx ctx = {0};
+    greedy_turn = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 0);
+    /* A tool call in the final turn is refused and ends the run: no third request. */
+    EXPECT(result.outcome == AGENT_LOOP_BUDGET);
+    EXPECT(result.turns == 2 && greedy_turn == 2);
+    EXPECT(last_request_origin == ITEM_ORIGIN_BUDGET_NOTE);
+    EXPECT(ctx.tools_run == 1 && ctx.tools_refused == 1);
+    EXPECT_STR_EQ(session.items[result.final_items_from].text, "still working");
+    EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_CLEAN);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void budget_spent_sends_nothing(const char *path)
+{
+    EXPECT(subagent_ledger_charge(path, 12, 0) == 0);
+    struct agent_session session;
+    session_init(&session);
+    agent_session_add_user(&session, "start");
+    size_t before = session.n_items;
+    struct provider provider = {.name = "test", .stream = chain_stream};
+    struct loop_test_ctx ctx = {0};
+    chain_turn = 0;
+
+    struct agent_loop_result result = run_chain(&session, &provider, &ctx, 0);
+    EXPECT(result.outcome == AGENT_LOOP_BUDGET);
+    EXPECT(result.turns == 0 && chain_turn == 0);
+    EXPECT(session.n_items == before);
+
+    agent_loop_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+static void test_loop_stops_when_budget_spent(void)
+{
+    with_child_ledger(12, budget_asks_for_final_answer);
+    with_child_ledger(12, budget_refuses_final_tool_calls);
+    with_child_ledger(12, budget_spent_sends_nothing);
 }
 
 static void test_loop_cancels_tool_batch(void)
@@ -1592,6 +1717,7 @@ int main(void)
     test_empty_cancel_leaves_no_trace();
     test_loop_runs_tool_chain();
     test_loop_enforces_max_turns();
+    test_loop_stops_when_budget_spent();
     test_loop_cancels_tool_batch();
     test_loop_cancel_still_refuses_disabled_tool();
     test_hookless_fallback_stamps_origins();
