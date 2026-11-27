@@ -2,6 +2,10 @@
 #ifndef HAX_RENDER_SPINNER_H
 #define HAX_RENDER_SPINNER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* The animated glyph and status label that the footer paints while work is in progress. Pure: the
  * footer owns the terminal, the animation thread, and locking. */
 
@@ -53,5 +57,9 @@ int spinner_label_request(struct spinner_label *label, const char *key, const ch
 
 /* Display a pending key that has stayed stable for settle_ms by now_ms. */
 void spinner_label_settle(struct spinner_label *label, long now_ms);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_SPINNER_H */

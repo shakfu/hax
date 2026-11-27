@@ -2,6 +2,10 @@
 #ifndef HAX_TRANSPORT_API_ERROR_H
 #define HAX_TRANSPORT_API_ERROR_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Extracts common JSON and SSE error shapes, or flattens a plain-text/HTML body. The result is
  * heap-owned, never NULL, and prefixed with the HTTP status when `status > 0`. */
 char *format_api_error(long status, const char *body);
@@ -38,5 +42,9 @@ enum api_error_kind {
  * limit ("length", "max_tokens", "max_output_tokens") is API_ERROR_LENGTH_LIMIT. */
 enum api_error_kind api_error_classify(long status, const char *code, const char *detail,
                                        const char *const *overflow_phrases);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TRANSPORT_API_ERROR_H */

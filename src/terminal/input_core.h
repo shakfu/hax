@@ -7,6 +7,10 @@
 
 #include "terminal/live_region.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Shared editor state and terminal-independent operations. */
 
 /* `match` performs no I/O and returns the replacement span [start, end). `complete` receives the
@@ -262,5 +266,9 @@ typedef int (*input_byte_reader)(void *user);
 /* Decode bytes following an already-consumed ESC. Reads are bounded; unknown, partial, or
  * abandoned sequences return INPUT_ACTION_NONE. */
 enum input_action input_core_decode_escape(input_byte_reader read, void *user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_INPUT_CORE_H */

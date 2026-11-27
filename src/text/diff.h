@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Generate a unified diff (three lines of context) between two in-memory buffers with the
  * in-tree line diff, so no external diff(1) is needed.
  *
@@ -19,5 +23,9 @@
  * affected regions coarsen into replacement blocks rather than growing the cost. */
 char *make_unified_diff(const char *a, size_t a_len, const char *b, size_t b_len,
                         const char *a_label, const char *b_label);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_DIFF_H */

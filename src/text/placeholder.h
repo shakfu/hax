@@ -2,6 +2,10 @@
 #ifndef HAX_TEXT_PLACEHOLDER_H
 #define HAX_TEXT_PLACEHOLDER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Brace placeholders in configuration strings: "{name}" stands for a value resolved later. */
 
 /* True when text contains "{name}". */
@@ -9,5 +13,9 @@ int placeholder_present(const char *text, const char *name);
 
 /* Owned copy of text with every "{name}" replaced by value. */
 char *placeholder_expand(const char *text, const char *name, const char *value);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_PLACEHOLDER_H */

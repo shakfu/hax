@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct provider_def; /* providers/registry.h */
 
 /* Hooks behind the llamacpp def: a local llama-server whose endpoint derives from a configured
@@ -54,5 +58,9 @@ char *llamacpp_model_label(struct provider *provider, const char *model);
 
 /* Return an allocated /props sibling URL, adding an encoded model query when nonempty. */
 char *llamacpp_props_url(const char *base_url, const char *model);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_LLAMACPP_H */

@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Append-only byte buffer, NUL-terminated whenever data is non-NULL. */
 struct buf {
     char *data;
@@ -18,5 +22,9 @@ void buf_append_str(struct buf *buf, const char *str);
 void buf_reset(struct buf *buf);
 /* Transfer an allocated NUL-terminated string to the caller and reset buf. */
 char *buf_steal(struct buf *buf);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_BUF_H */

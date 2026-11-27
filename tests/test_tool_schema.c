@@ -55,10 +55,36 @@ static void test_array_param_emits_item_type(void)
     json_decref(schema);
 }
 
+static void test_schema_json_is_sent_as_given(void)
+{
+    static const struct tool_param params[] = {{.name = "ignored", .type = "string"}};
+    struct tool_def def = {
+        .name = "nested",
+        .params = params,
+        .n_params = 1,
+        .schema_json = "{\"type\":\"object\",\"properties\":{\"where\":{\"type\":\"object\","
+                       "\"properties\":{\"city\":{\"enum\":[\"a\",\"b\"]}}}}}",
+    };
+    json_t *schema = tool_schema_build(&def);
+    json_t *properties = json_object_get(schema, "properties");
+    EXPECT(json_object_get(properties, "ignored") == NULL);
+    json_t *city = json_object_get(
+        json_object_get(json_object_get(properties, "where"), "properties"), "city");
+    EXPECT(json_array_size(json_object_get(city, "enum")) == 2);
+    json_decref(schema);
+
+    /* A schema that does not parse as an object falls back to the params. */
+    def.schema_json = "[1]";
+    schema = tool_schema_build(&def);
+    EXPECT(json_object_get(json_object_get(schema, "properties"), "ignored") != NULL);
+    json_decref(schema);
+}
+
 int main(void)
 {
     test_empty_def_yields_object_schema();
     test_primitive_params();
     test_array_param_emits_item_type();
+    test_schema_json_is_sent_as_given();
     T_REPORT();
 }

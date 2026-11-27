@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct provider_def; /* providers/registry.h */
 
 /* Generic streaming-HTTP provider: endpoint, credential, and configuration resolution, request
@@ -89,5 +93,9 @@ int http_provider_max_tokens(struct provider *provider, const char *model);
 void http_provider_prepare_base_url_availability(const char *base_url, const char *api_key,
                                                  char *const *extra_headers,
                                                  struct provider_availability *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_HTTP_PROVIDER_H */

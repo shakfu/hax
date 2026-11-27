@@ -113,6 +113,52 @@ line over 16 MiB is discarded with a parse error.
   cut off by an output limit ends with `max_tokens`, and a provider's refusal with `refusal`. After each prompt, hax reports
   context use and the session's total cost when the model's context window is known.
 - MCP servers named by the client are ignored, with a warning on stderr.
+- hax keeps reading the client's messages while its own output waits to be read, so a client
+  writing to hax never blocks on it. Once about 1 MiB of output is unread, the running prompt
+  pauses until the client reads again. Warnings go to stderr: a client that captures stderr must
+  read it too, or let hax inherit it, since a full stderr pipe stops hax.
+- The client can define tools of its own, as described below.
+
+A client defines tools by listing them in `_meta.hax.tools` on the request that opens or reopens
+a session. Each entry takes MCP's tool shape: a `name` of up to 64 letters, digits, `_` or `-`; an
+optional `description`; and an `inputSchema` JSON Schema object with `"type": "object"`. An
+invalid entry fails the request. Session files do not store the tools, so send them again when
+reopening a session in a new process. A session that is already open keeps its original tools.
+
+```json
+{"_meta": {"hax": {"tools": [{
+  "name": "lookup_order",
+  "description": "Return the contents of an order.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {"order_id": {"type": "string"}},
+    "required": ["order_id"]}}]}}}
+```
+
+When the model calls one, hax sends the client a `_hax/tool_call` request with `sessionId`,
+`toolCallId`, `name`, and `arguments`, and waits. The client answers with MCP's result shape,
+`{"content": [{"type": "text", "text": "..."}], "isError": false}`. hax joins the text parts for
+the model and ignores other content. Text over `tool_output_cap` is truncated, as hax's own tool
+output is. Setting `isError`, or sending a JSON-RPC error, passes the model `error:` and the
+message.
+
+- A client tool asks no permission: the client decides whether it runs.
+- A client tool named `bash`, `edit`, `read`, `write`, or `task_wait` replaces the built-in for
+  that session.
+- A cancel while the client holds a call leaves the call unrun, and a late answer is dropped.
+- A call the client has not answered within `acp.tool_timeout` (default 10 minutes) fails, and
+  the model is told the client did not answer. While hax waits, the client's other requests
+  queue behind the call.
+- The answer must carry the request's `id`. hax also takes the same number sent as a string, or
+  a null `id` on an error, and warns on stderr. It drops any other `id`, also with a warning.
+- A line hax cannot parse, or one over 16 MiB, arriving while a call waits fails that call at
+  once. So does an answer to the call that has neither `result` nor `error`, which gets no reply.
+  The model is told what was wrong with the client's answer.
+- When hax gives up on a call the client received, because of a cancel or the timeout, it sends
+  a `_hax/tool_call_abandoned` notification with `sessionId`, `toolCallId`, and `reason`
+  (`cancelled` or `timeout`). The client can stop the work; hax drops any answer that follows.
+- Subagents do not see client tools.
+- `initialize` reports `agentCapabilities._meta.hax.hostTools` when hax accepts client tools.
 
 ## REPL commands
 

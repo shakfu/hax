@@ -6,6 +6,10 @@
 
 #include "transport/sse.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct http_response {
     long status;
     char *error_body;    /* heap-owned; NULL on success or cancellation */
@@ -44,5 +48,9 @@ int http_post_json(const char *url, const char *const *headers, const char *body
 int http_post(const char *url, const char *const *headers, const char *content_type,
               const char *body, size_t body_len, long timeout_s, long max_bytes, http_tick_cb tick,
               void *tick_user, char **out, long *status_out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TRANSPORT_HTTP_H */

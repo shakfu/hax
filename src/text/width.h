@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Cell-accurate measurement, truncation, and wrapping of UTF-8 text. These helpers require
  * locale_init_utf8() for accurate non-ASCII widths. */
 
@@ -31,5 +35,9 @@ size_t wrap_row_bytes(const char *str, size_t max_cells, size_t *separator_bytes
  * moving past it. Returns an allocated string; NULL input becomes empty. */
 char *reflow_for_display(const char *str, int first_row_cells, int other_row_cells, int max_rows,
                          int last_row_reserve);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_WIDTH_H */

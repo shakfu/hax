@@ -183,6 +183,17 @@ foreach src : test_sources
     test(name, exe, env: test_env)
 endforeach
 
+# A C++ translation unit over the headers an embedder includes, linked against hax's C objects.
+if have_cpp
+    cxx_headers = executable('test_cxx_headers',
+        'test_cxx_headers.cpp',
+        cpp_args: ['-D_DARWIN_C_SOURCE', '-iquote', meson.project_source_root() / 'src'],
+        dependencies: [hax_dep],
+        override_options: ['cpp_std=c++17'],
+    )
+    test('cxx_headers', cxx_headers, env: test_env)
+endif
+
 # End-to-end scenarios: Python scripts under e2e/, one per user-facing area, driving the built
 # binary through the mock provider (see e2e/harness.py). Names mirror the C tests:
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
@@ -215,6 +226,41 @@ foreach name : e2e_scenarios
         timeout: 60,
     )
 endforeach
+
+# The C++ ACP host example, built only where a C++ compiler exists, run against the mock.
+if have_cpp
+    example_env = environment({'HAX_BIN': hax_exe.full_path(),
+        'ACP_HOST_EXAMPLE': acp_host_example.full_path()})
+    test('e2e/acp_host_example',
+        python,
+        args: [files('e2e/test_acp_host_example.py')],
+        env: example_env,
+        depends: [hax_exe, acp_host_example],
+        priority: 1,
+        timeout: 60,
+    )
+endif
+
+if have_cpp_hosts
+    parallel_args = ['--agents', '16', '--rounds', '4', '--cancel-every', '4']
+    # macOS TSan deadlocks when threads fork; see the example's header comment.
+    if 'thread' in get_option('b_sanitize') and host_machine.system() == 'darwin'
+        parallel_args += ['--no-bash']
+    endif
+    test('embed/parallel_agents',
+        cpp_hosts['parallel_agents'],
+        args: parallel_args,
+        timeout: 60,
+    )
+    test('e2e/decompose',
+        python,
+        args: [files('e2e/test_decompose.py')],
+        env: {'HAX_BIN': hax_exe.full_path(), 'DECOMPOSE': cpp_hosts['decompose'].full_path()},
+        depends: [hax_exe, cpp_hosts['decompose']],
+        priority: 1,
+        timeout: 60,
+    )
+endif
 
 # Runs against the meson-built cffi extension, which only -Dembed=true produces
 # and only an interpreter with cffi and headers can build. When that interpreter

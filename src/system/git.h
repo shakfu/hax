@@ -2,6 +2,10 @@
 #ifndef HAX_SYSTEM_GIT_H
 #define HAX_SYSTEM_GIT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Repository position at a point in time. Recorded with a session so a conversation whose opening
  * prompt is generic ("review the last commit") stays identifiable later. */
 struct git_state {
@@ -19,5 +23,9 @@ void git_state_free(struct git_state *state);
  * directory, a linked worktree's file, or a symlink, which is not followed. Returns NULL when there
  * is none; the result is allocated. */
 char *git_find_worktree_root(const char *dir);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_GIT_H */

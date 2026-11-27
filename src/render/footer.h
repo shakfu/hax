@@ -2,6 +2,10 @@
 #ifndef HAX_RENDER_FOOTER_H
 #define HAX_RENDER_FOOTER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Thread-safe live area below the conversation, written directly to stdout for interactive
  * terminals only: the spinner's status row, below rows of live tool output when there are any,
  * animated until hidden. Operations taking a footer pointer are NULL-safe no-ops.
@@ -92,5 +96,9 @@ int footer_rows_that_fit(int row_count, int terminal_rows);
  * respect to the terminal. */
 void footer_build_frame(struct buf *frame, struct live_region *region,
                         const struct footer_row *rows, int row_count, int terminal_cols);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_FOOTER_H */

@@ -2,6 +2,10 @@
 #ifndef HAX_TERMINAL_THEME_H
 #define HAX_TERMINAL_THEME_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Semantic SGR roles. THEME_CHROME_DIM includes its intensity styling; callers must not add
  * ANSI_DIM. Other bold, italic, and dim styling remains explicit at the call site. */
 enum theme_role {
@@ -48,5 +52,9 @@ const char *theme_tint_name(void);
  * unknown tint or when the active theme does not apply tints. Close with
  * theme_close(THEME_STANCE). */
 const char *theme_tint_open(const char *name);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_THEME_H */

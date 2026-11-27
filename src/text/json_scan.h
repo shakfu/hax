@@ -5,6 +5,10 @@
 #include <jansson.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Walk the members of a JSON object or the elements of an array without tree-parsing the whole
  * text, since Jansson's tree is several times the size of the text. The scan follows only strings
  * and brackets, so a scanned value is validated when it is loaded. */
@@ -39,5 +43,9 @@ int json_scan_find(const char *text, const char *key, struct json_scan_entry *me
 
 /* Parse an entry's value. Returns a new reference, or NULL when the value is invalid. */
 json_t *json_scan_load(const struct json_scan_entry *entry);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_JSON_SCAN_H */

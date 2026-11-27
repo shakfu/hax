@@ -4,6 +4,10 @@
 
 #include <stdatomic.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Latched cancellation, independent of how it was requested. Requests stay latched until they are
  * cleared, and abort implies pause. The flags are the whole state and each accessor is one atomic
  * operation, so producers may run on any thread.
@@ -47,5 +51,9 @@ int cancel_pause_requested(void);
 int cancel_abort_requested(void);
 
 void cancel_clear_requests(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_CANCEL_H */

@@ -302,6 +302,7 @@ static void tool_def_free(struct tool_def *def)
     free((struct tool_param *)def->params);
     free((char *)def->name);
     free((char *)def->description);
+    free((char *)def->schema_json);
     memset(def, 0, sizeof(*def));
 }
 
@@ -329,6 +330,7 @@ static void tool_def_copy(struct tool_def *dst, const struct tool_def *src)
     dst->description = dup_or_null(src->description);
     dst->params = params;
     dst->n_params = src->n_params;
+    dst->schema_json = dup_or_null(src->schema_json);
 }
 
 int agent_session_add_tool(struct agent_session *session, const struct tool_def *def)

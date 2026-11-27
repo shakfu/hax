@@ -18,7 +18,9 @@ TIMEOUT_S = 20
 
 class Client:
     """One `hax --acp` process. Every stdout line must parse as JSON-RPC 2.0; `answer` replies to
-    each session/request_permission with the optionId it returns, or cancels for None."""
+    each session/request_permission with the optionId it returns, or cancels for None.
+    `host_tool` answers each _hax/tool_call with the result it returns; None leaves it unanswered.
+    `reply_id` maps the request's id to the one the answer carries."""
 
     def __init__(
         self,
@@ -29,6 +31,8 @@ class Client:
         answer=None,
         cancel_on_ask=None,
         nonblocking_stdin=False,
+        host_tool=None,
+        reply_id=None,
     ):
         if home is None:
             home, workdir = harness.make_home()
@@ -58,6 +62,11 @@ class Client:
         self.lines = queue.Queue()
         self.updates = []
         self.permission_requests = []
+        self.host_tool = host_tool
+        self.reply_id = reply_id or (lambda request_id: request_id)
+        self.host_calls = []
+        self.notifications = []  # anything else hax sends with a method and no id
+        self.replies = []  # responses to ids `wait` was not waiting for
         self.bad_lines = []
         self.next_id = 0
         threading.Thread(target=self._read, daemon=True).start()
@@ -123,8 +132,17 @@ class Client:
                     self.send(cancel, response)
                 else:
                     self.send(response)
+            elif method == "_hax/tool_call":
+                self.host_calls.append(message)
+                result = self.host_tool(message["params"]) if self.host_tool else None
+                if result is not None:
+                    self.send({"id": self.reply_id(message["id"]), **result})
+            elif method and "id" not in message:
+                self.notifications.append(message)
             elif request_id is not None and message.get("id") == request_id:
                 return message
+            elif not method:
+                self.replies.append(message)
         raise harness.ScenarioFailure(
             f"no answer to request {request_id} within {TIMEOUT_S} s", self.finish().stderr
         )
@@ -434,6 +452,7 @@ def test_a_prompt_cancelled_before_it_starts_records_no_turn():
 
         text Slow reply.
         delay 300
+        space
         end-turn
         """
     )
@@ -500,6 +519,376 @@ def test_provider_error_is_a_json_rpc_error():
     harness.expect("error" in response, f"the prompt answered an error: {response}")
     harness.expect(response["error"]["code"] == -32603, "the error is -32603")
     client.finish()
+
+
+LOOKUP_ORDER = {
+    "name": "lookup_order",
+    "description": "Return the contents of an order.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"order_id": {"type": "string"}},
+        "required": ["order_id"],
+    },
+}
+HOST_BASH = {"name": "bash", "inputSchema": {"type": "object"}}
+
+
+def host_session(client, tools):
+    client.call("initialize", {"protocolVersion": 1})
+    return client.call(
+        "session/new",
+        {"cwd": str(client.workdir), "mcpServers": [], "_meta": {"hax": {"tools": tools}}},
+    )
+
+
+def test_host_tools_are_advertised_and_answered_by_the_client():
+    """Tools from session/new reach the model, and their calls go to the client without a
+    permission request; a host tool named bash replaces the built-in."""
+
+    def answer(params):
+        if params["name"] == "lookup_order":
+            return {"result": {"content": [{"type": "text", "text": "2x widget"}]}}
+        return {"result": {"content": [{"type": "text", "text": "sandboxed"}], "isError": True}}
+
+    home, workdir = harness.make_home()
+    transcript = home / "transcript.txt"
+    client = Client(
+        """
+        tool lookup_order {"order_id":"4417"}
+        end-turn
+
+        tool bash {"command":"echo ran > out.txt"}
+        end-turn
+
+        text Done.
+        end-turn
+        """,
+        home=home,
+        workdir=workdir,
+        extra_env={"HAX_TRANSCRIPT": str(transcript)},
+        host_tool=answer,
+    )
+    init = client.call("initialize", {"protocolVersion": 1})["result"]
+    harness.expect(
+        init["agentCapabilities"]["_meta"]["hax"]["hostTools"], "initialize offers host tools"
+    )
+    bad = client.call(
+        "session/new",
+        {"cwd": str(workdir), "mcpServers": [], "_meta": {"hax": {"tools": [{"name": "x"}]}}},
+    )
+    harness.expect(bad.get("error", {}).get("code") == -32602, f"a bad tool is -32602: {bad}")
+    session = client.call(
+        "session/new",
+        {
+            "cwd": str(workdir),
+            "mcpServers": [],
+            "_meta": {"hax": {"tools": [LOOKUP_ORDER, HOST_BASH]}},
+        },
+    )["result"]["sessionId"]
+    response = client.prompt(session, "what is in order 4417?")
+    harness.expect(response["result"]["stopReason"] == "end_turn", f"the turn ends: {response}")
+    calls = [(c["params"]["name"], c["params"]["arguments"]) for c in client.host_calls]
+    harness.expect(
+        calls == [("lookup_order", {"order_id": "4417"}), ("bash", {"command": "echo ran > out.txt"})],
+        f"both calls went to the client: {calls}",
+    )
+    harness.expect(not client.permission_requests, "host tools ask no permission")
+    harness.expect(not (workdir / "out.txt").exists(), "the built-in bash did not run")
+    statuses = [u["status"] for u in client.updates if u["sessionUpdate"] == "tool_call_update"]
+    harness.expect(
+        statuses == ["in_progress", "completed", "in_progress", "failed"], f"statuses: {statuses}"
+    )
+    client.finish()
+    text = transcript.read_text()
+    harness.expect("[lookup_order]" in text and '"order_id"' in text, "the model was offered it")
+    harness.expect("2x widget" in text, "the model read the client's result")
+    harness.expect("error: sandboxed" in text, "the model read the client's error")
+
+
+def expect_abandoned(client, session, reason):
+    """hax told the client, once, that it gave up on the one host call it sent."""
+    abandoned = [n for n in client.notifications if n["method"] == "_hax/tool_call_abandoned"]
+    expected = {
+        "sessionId": session,
+        "toolCallId": client.host_calls[0]["params"]["toolCallId"],
+        "reason": reason,
+    }
+    harness.expect(
+        [n["params"] for n in abandoned] == [expected], f"one abandon notice: {abandoned}"
+    )
+
+
+def test_a_cancel_during_a_host_tool_call_leaves_it_unrun():
+    """session/cancel while the client holds a call ends the prompt cancelled; the late answer is
+    dropped and the session takes its next prompt."""
+    client = Client(
+        """
+        tool lookup_order {"order_id":"4417"}
+        end-turn
+
+        text After.
+        end-turn
+        """
+    )
+    session = host_session(client, [LOOKUP_ORDER])["result"]["sessionId"]
+    request = client.start(
+        "session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}
+    )
+    client.wait(until=lambda u: u.get("status") == "in_progress")
+    client.notify("session/cancel", {"sessionId": session})
+    response = client.wait(request)
+    harness.expect(response["result"]["stopReason"] == "cancelled", "the prompt ends cancelled")
+    harness.expect(len(client.host_calls) == 1, f"the client got the call: {client.host_calls}")
+    late = {"result": {"content": [{"type": "text", "text": "too late"}]}}
+    client.send({"id": client.host_calls[0]["id"], **late})
+    statuses = [u["status"] for u in client.updates if u["sessionUpdate"] == "tool_call_update"]
+    harness.expect(statuses[-1] == "failed", f"the call failed unrun: {statuses}")
+    expect_abandoned(client, session, "cancelled")
+    after = client.prompt(session, "again")
+    harness.expect(after["result"]["stopReason"] == "end_turn", f"the session goes on: {after}")
+    result = client.finish()
+    harness.expect("too late" not in client.session_record(session), "the late answer was dropped")
+    harness.expect("dropped a response" not in result.stderr, "a late answer is not warned about")
+
+
+def test_a_client_that_never_answers_fails_the_call_after_the_timeout():
+    """acp.tool_timeout fails a host call the client never answers; the model reads why and the
+    prompt goes on. The answer that arrives afterwards is dropped quietly."""
+    client = Client(
+        """
+        tool lookup_order {"order_id":"4417"}
+        end-turn
+
+        text After.
+        end-turn
+        """,
+        extra_env={"HAX_ACP_TOOL_TIMEOUT": "1s"},
+    )
+    session = host_session(client, [LOOKUP_ORDER])["result"]["sessionId"]
+    started = time.monotonic()
+    response = client.prompt(session, "go")
+    harness.expect(response["result"]["stopReason"] == "end_turn", f"the prompt ends: {response}")
+    harness.expect(time.monotonic() - started < 10, "the wait ended at the timeout")
+    statuses = [u["status"] for u in client.updates if u["sessionUpdate"] == "tool_call_update"]
+    harness.expect(statuses == ["in_progress", "failed"], f"the call failed: {statuses}")
+    expect_abandoned(client, session, "timeout")
+    late = {"result": {"content": [{"type": "text", "text": "too late"}]}}
+    client.send({"id": client.host_calls[0]["id"], **late})
+    result = client.finish()
+    record = client.session_record(session)
+    harness.expect("error: the client did not answer within 1s" in record, "the model read why")
+    harness.expect("did not answer lookup_order within 1s" in result.stderr, "stderr says so")
+    harness.expect("too late" not in record, "the late answer was dropped", result)
+    harness.expect("dropped a response" not in result.stderr, "quietly", result)
+
+
+def test_an_unreadable_answer_fails_the_call_at_once():
+    """A line that is not JSON, or is over 16 MiB, arriving while hax waits on a host call fails
+    that call straight away instead of waiting out acp.tool_timeout."""
+
+    def answer(params):
+        if len(client.host_calls) == 1:
+            client.send_raw('{"id": 1, "result": {"content": [{"text": "\xff')
+        else:
+            client.send_raw("x" * (16 * 1024 * 1024 + 1))
+        return None
+
+    client = Client(
+        """
+        tool lookup_order {"order_id":"4417"}
+        end-turn
+
+        tool lookup_order {"order_id":"4418"}
+        end-turn
+
+        text Done.
+        end-turn
+        """,
+        host_tool=answer,
+    )
+    session = host_session(client, [LOOKUP_ORDER])["result"]["sessionId"]
+    started = time.monotonic()
+    response = client.prompt(session, "go")
+    harness.expect(response["result"]["stopReason"] == "end_turn", f"the prompt ends: {response}")
+    harness.expect(time.monotonic() - started < 10, "neither call waited for the timeout")
+    statuses = [u["status"] for u in client.updates if u["sessionUpdate"] == "tool_call_update"]
+    harness.expect(statuses.count("failed") == 2, f"both calls failed: {statuses}")
+    result = client.finish()
+    record = client.session_record(session)
+    harness.expect("error: the client's answer could not be parsed as JSON" in record, "bad JSON")
+    harness.expect("error: the client's answer exceeds 16 MiB" in record, "the overlong line")
+    harness.expect(result.stderr.count("failing request") == 2, "both warned", result)
+
+
+def test_an_answer_without_result_or_error_fails_the_call_at_once():
+    """An answer to the waiting call that carries neither `result` nor `error` fails the call
+    and gets no reply. A malformed answer to an id hax never sent still gets -32600."""
+
+    def answer(params):
+        client.send({"id": client.host_calls[-1]["id"], "output": "2x widget"})
+        return None
+
+    client = Client(
+        """
+        tool lookup_order {"order_id":"4417"}
+        end-turn
+
+        text Done.
+        end-turn
+        """,
+        host_tool=answer,
+    )
+    session = host_session(client, [LOOKUP_ORDER])["result"]["sessionId"]
+    started = time.monotonic()
+    response = client.prompt(session, "go")
+    harness.expect(response["result"]["stopReason"] == "end_turn", f"the prompt ends: {response}")
+    harness.expect(time.monotonic() - started < 10, "the call did not wait for the timeout")
+    called = client.host_calls[0]["id"]
+    harness.expect(
+        not [r for r in client.replies if r.get("id") == called], f"no reply: {client.replies}"
+    )
+    client.send({"id": 999, "output": "x"})
+    stray = client.wait(999)
+    harness.expect(stray.get("error", {}).get("code") == -32600, f"a stray one is -32600: {stray}")
+    result = client.finish()
+    record = client.session_record(session)
+    harness.expect(
+        "error: the client's answer has neither a result nor an error" in record, "the model read why"
+    )
+    harness.expect("failing request" in result.stderr, "stderr says so", result)
+
+
+def test_answers_with_mismatched_ids_are_taken_with_a_warning():
+    """hax has one request out at a time, so an answer carrying the same number as a string, or a
+    null id on an error, still answers it. An id hax never sent is dropped. Each is warned."""
+
+    def answer(params):
+        if len(client.host_calls) == 1:
+            return {"result": {"content": [{"type": "text", "text": "2x widget"}]}}
+        return {"error": {"code": -32700, "message": "cannot parse the request"}}
+
+    def reply_id(request_id):
+        return str(request_id) if len(client.host_calls) == 1 else None
+
+    client = Client(
+        """
+        tool lookup_order {"order_id":"4417"}
+        end-turn
+
+        tool lookup_order {"order_id":"4418"}
+        end-turn
+
+        text Done.
+        end-turn
+        """,
+        host_tool=answer,
+        reply_id=reply_id,
+    )
+    session = host_session(client, [LOOKUP_ORDER])["result"]["sessionId"]
+    response = client.prompt(session, "go")
+    harness.expect(response["result"]["stopReason"] == "end_turn", f"the prompt ends: {response}")
+    client.send({"id": 999, "result": {}})
+    result = client.finish()
+    record = client.session_record(session)
+    harness.expect("2x widget" in record, "the string-id answer was taken", result)
+    harness.expect("error: cannot parse the request" in record, "the null-id error was taken")
+    harness.expect(result.stderr.count("took a response with id") == 2, "both warned", result)
+    harness.expect("dropped a response with id 999" in result.stderr, "the stray one", result)
+
+
+def test_a_host_result_over_the_cap_is_truncated():
+    """tool_output_cap holds a client's result as it holds hax's own tools."""
+    lines = [f"order line {i:04d}" for i in range(400)]
+    client = Client(
+        """
+        tool lookup_order {"order_id":"4417"}
+        end-turn
+
+        text Done.
+        end-turn
+        """,
+        extra_env={"HAX_TOOL_OUTPUT_CAP": "1k"},
+        host_tool=lambda params: {"result": {"content": [{"type": "text", "text": "\n".join(lines)}]}},
+    )
+    session = host_session(client, [LOOKUP_ORDER])["result"]["sessionId"]
+    client.prompt(session, "go")
+    client.finish()
+    record = client.session_record(session)
+    harness.expect("[output truncated: kept " in record, "the result carries the marker")
+    harness.expect("order line 0000" in record and "order line 0399" in record, "head and tail")
+    harness.expect("order line 0200" not in record, "the middle was dropped")
+
+
+def test_a_client_that_stops_reading_cannot_deadlock_hax():
+    """While a long reply fills hax's stdout and the client reads nothing, hax keeps reading its
+    stdin, so the client's own writes never block on it. Reading again lets the reply finish.
+
+    Drives the process directly: Client drains stdout on a thread, so it cannot stop reading."""
+    filler = "x" * 4000
+    script = "".join(f"text {filler}\n" for _ in range(300)) + "end-turn\n"
+    home, workdir = harness.make_home()
+    env = harness.mock_env(home, script, RECORD)
+    env["XDG_STATE_HOME"] = str(home / "state")
+    proc = subprocess.Popen(
+        [str(harness.hax_binary()), "--acp"],
+        cwd=workdir,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        encoding="utf-8",
+    )
+
+    def send(message):
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n")
+        proc.stdin.flush()
+
+    def read_until(request_id):
+        """Messages up to and including the response to `request_id`."""
+        seen = []
+        for line in proc.stdout:
+            seen.append(json.loads(line))
+            if seen[-1].get("id") == request_id and "method" not in seen[-1]:
+                return seen
+        raise harness.ScenarioFailure(f"hax exited before answering {request_id}", "")
+
+    send({"id": 1, "method": "initialize", "params": {"protocolVersion": 1}})
+    read_until(1)
+    send({"id": 2, "method": "session/new", "params": {"cwd": str(workdir), "mcpServers": []}})
+    session = read_until(2)[-1]["result"]["sessionId"]
+    prompt = {"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}
+    send({"id": 3, "method": "session/prompt", "params": prompt})
+    time.sleep(0.5)  # let the reply fill the pipe
+
+    # Each malformed line makes hax's reader reply; a reader that waits on output stops reading.
+    flood = threading.Thread(
+        target=lambda: [send_raw_line(proc, "{" + filler) for _ in range(512)], daemon=True
+    )
+    flood.start()
+    flood.join(10)
+    stuck = flood.is_alive()
+    if stuck:
+        proc.kill()
+    harness.expect(not stuck, "hax kept reading stdin while its stdout was full")
+
+    seen = read_until(3)
+    harness.expect(seen[-1]["result"]["stopReason"] == "end_turn", "the reply then finished")
+    errors = [m for m in seen if m.get("error", {}).get("code") == -32700]
+    harness.expect(len(errors) == 512, f"each malformed line was answered: {len(errors)}")
+    text = "".join(
+        m["params"]["update"]["content"]["text"]
+        for m in seen
+        if m.get("method") == "session/update"
+        and m["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    )
+    harness.expect(text == filler * 300, f"no reply text was lost: {len(text)} chars")
+    proc.stdin.close()
+    proc.wait(timeout=TIMEOUT_S)
+
+
+def send_raw_line(proc, line):
+    proc.stdin.write(line + "\n")
+    proc.stdin.flush()
 
 
 def test_session_load_replays_history_in_a_new_process():

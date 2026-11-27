@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct item;
 
 /* The model-visible window as labeled plain text, for a summary request that no longer fits as
@@ -22,5 +26,9 @@ int compact_text_fit(const struct item *items, size_t n_items, long max_tokens,
                      struct compact_text *out);
 
 void compact_text_destroy(struct compact_text *text);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_COMPACT_TEXT_H */

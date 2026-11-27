@@ -8,6 +8,10 @@
 #include "render/ctrl_strip.h"
 #include "text/utf8_sanitize.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct disp;
 struct footer;
 
@@ -75,5 +79,9 @@ void tool_render_write_marker_gutter(struct disp *disp);
 
 /* Tool display callback; data must point to an initialized struct tool_render. */
 void tool_render_emit(const char *bytes, size_t len, void *data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_TOOL_RENDER_H */

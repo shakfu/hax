@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Accounting for one provider response: usage arithmetic, the attempts one stream() call
  * served, and the priced usage record appended to the conversation. Conversation totals are
  * agent_stats; display formatting is text/fmt. */
@@ -59,5 +63,9 @@ void agent_usage_add(struct stream_usage *sum, const struct stream_usage *extra)
  * reported. The total uses reported cost when available; category costs are always estimates. */
 struct turn_usage *agent_turn_usage_new(const struct stream_usage *usage, long elapsed_ms,
                                         const struct provider *provider, const char *model);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_USAGE_H */

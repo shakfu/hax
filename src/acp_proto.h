@@ -9,6 +9,10 @@
 #include "buf.h"
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Translation between hax's records and Agent Client Protocol v1 messages
  * (https://agentclientprotocol.com/protocol/). Pure: no I/O, so the server in acp.c and the tests
  * share one mapping. Every json_t returned is a new reference. */
@@ -98,5 +102,33 @@ enum acp_permission {
 
 /* Read a session/request_permission result. Anything but a selected, offered option denies. */
 enum acp_permission acp_permission_decision(const json_t *result);
+
+/* The host-defined tools in a session/new or session/load request's `_meta.hax.tools`, as owned
+ * defs carrying `schema_json`. Absent tools yield *n = 0. Returns 0, or -1 with an owned message
+ * in `error` that names the offending tool. */
+int acp_host_tools_parse(const json_t *params, struct tool_def **defs, size_t *n, char **error);
+void acp_host_tools_free(struct tool_def *defs, size_t n);
+
+/* How a client's response relates to the one agent-to-client request that can be outstanding. */
+enum acp_response_match {
+    ACP_RESPONSE_AWAITED, /* answers the outstanding request */
+    ACP_RESPONSE_COERCED, /* answers it, but by the same number of another type, or by a null id
+                           * on an error, as JSON-RPC prescribes when the request did not parse */
+    ACP_RESPONSE_STALE,   /* answers an earlier request, such as one a cancel abandoned */
+    ACP_RESPONSE_UNKNOWN, /* answers no request hax sent */
+};
+
+/* Classify `response` against `awaited`, the outstanding request's id or 0 when none, given that
+ * ids 1 through `issued` have been sent. */
+enum acp_response_match acp_response_match(const json_t *response, long awaited, long issued);
+
+/* The model-facing output for the JSON-RPC `response` to a _hax/tool_call: its text content parts
+ * joined by newlines. A JSON-RPC error, a missing result, or `isError` sets *failed and yields
+ * "error: " and the message. Returns an owned string. */
+char *acp_host_tool_output(const json_t *response, int *failed);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_ACP_PROTO_H */

@@ -5,6 +5,10 @@
 #include "effort.h"
 #include "transport/http.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* The model catalog resolves per-model pricing, token limits, image support, and reasoning-effort
  * metadata. User `catalog.models` configuration takes precedence over a cached models.dev
  * snapshot; missing providers, models, and fields remain unknown. Lookups take two keys: the
@@ -141,5 +145,9 @@ void catalog_drain(long max_wait_ms);
 /* Cancel and join the background refresh, then clear memoized lookups. Must run before
  * curl_global_cleanup(). */
 void catalog_shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_CATALOG_H */

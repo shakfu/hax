@@ -2,6 +2,10 @@
 #ifndef HAX_COMMANDS_LOGIN_H
 #define HAX_COMMANDS_LOGIN_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct agent_state;
 
 /* /login: pick a login-capable provider (or take its id as `argument`) and run its flow. On
@@ -18,5 +22,9 @@ void logout_command(struct agent_state *state, const char *argument);
 struct completion;
 void login_choices(struct completion *choices);
 void logout_choices(struct completion *choices);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_COMMANDS_LOGIN_H */

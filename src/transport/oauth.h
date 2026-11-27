@@ -6,6 +6,10 @@
 
 #include "transport/http.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* OAuth authorization-code mechanics shared by provider login flows: PKCE material and a one-shot
  * loopback HTTP listener that catches the provider's browser redirect. Foreground-thread state. */
 
@@ -60,5 +64,9 @@ int oauth_split_request_line(const char *request, char **path_out, char **query_
 /* The percent-decoded value of `key` in a query string, with `+` as space. Invalid escapes pass
  * through literally. Returns NULL when the key is absent; the caller frees. */
 char *oauth_query_param(const char *query, const char *key);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TRANSPORT_OAUTH_H */

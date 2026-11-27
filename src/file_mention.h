@@ -2,6 +2,10 @@
 #ifndef HAX_FILE_MENTION_H
 #define HAX_FILE_MENTION_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct input_completer;
 
 /* Open fzf with `query_text` as its initial filter. Absolute, home-relative, and parent-relative
@@ -19,5 +23,9 @@ extern const struct input_completer file_mention_completer;
 
 /* Return an allocated /bin/sh command for the given query; NULL is equivalent to an empty query. */
 char *file_mention_build_fzf_command(const char *query_text);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_FILE_MENTION_H */

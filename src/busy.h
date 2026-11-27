@@ -2,6 +2,10 @@
 #ifndef HAX_BUSY_H
 #define HAX_BUSY_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Foreground busy window: one spinner plus an armed Esc watcher around a
  * blocking network fetch on the REPL foreground path (the /model catalog
  * fetch, /usage). Thread busy_tick into the fetch as its http_tick_cb so
@@ -23,5 +27,9 @@ int busy_tick(void *user);
  * printed the dim "[interrupted]" marker line, so callers just abandon
  * the command without emitting anything else. */
 int busy_end(struct busy *b);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_BUSY_H */

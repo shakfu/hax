@@ -7,6 +7,10 @@
 #include "buf.h"
 #include "text/utf8.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Private eager terminal wrapper for Markdown output. Visible bytes are emitted
  * immediately while the current row is shadowed for retroactive word wrapping.
  * The parser supplies semantic style state and selects wrapped or verbatim output. */
@@ -73,5 +77,9 @@ void md_wrap_commit_pending(struct md_wrap *w, const struct md_wrap_context *ctx
 /* Drain partial UTF-8 and end the current row without adding a newline. The caller owns the
  * line terminator; the next emit starts a fresh row. */
 void md_wrap_flush(struct md_wrap *w, const struct md_wrap_context *ctx);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_MARKDOWN_WRAP_H */

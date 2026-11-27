@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct buf;
 
 /* Rows repainted in place, from column 0 of the region's first row downward. The region records
@@ -50,5 +54,9 @@ void live_region_leave(struct live_region *region, struct buf *out, int terminal
 
 /* Give up the region without output, for when something else has already cleared it. */
 void live_region_forget(struct live_region *region);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_LIVE_REGION_H */

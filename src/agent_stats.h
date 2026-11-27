@@ -6,6 +6,10 @@
 
 #include "catalog.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Session accounting derived from the recorded conversation rather than tracked alongside it, so
  * a live run, a resumed file, a fork, and an undone branch all report the same numbers for the
  * same record. */
@@ -73,5 +77,9 @@ int agent_format_stats_segments(char segments[][AGENT_STATS_SEGMENT_LEN], long c
  * strings in `out` stay valid until the session's items change. */
 void agent_stats_collect(const struct agent_session *session, size_t from_item, size_t from_retired,
                          const struct provider *provider, struct agent_stats *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_STATS_H */

@@ -6,6 +6,10 @@
 
 #include "buf.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Private GFM table collector and terminal renderer. Tables buffer every row because column sizing
  * and the aligned-versus-reflowed decision require the complete block. The parser supplies inline
  * cell rendering and wrapped output through md_table_context. */
@@ -67,5 +71,9 @@ int md_table_bail_partial(struct md_table *t, const struct md_table_context *ctx
 
 /* Resolve a deferred header or final row, then render any table still collecting at EOF. */
 void md_table_finish(struct md_table *t, const struct md_table_context *ctx, struct buf *tail);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_MARKDOWN_TABLE_H */

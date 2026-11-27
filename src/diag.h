@@ -2,6 +2,10 @@
 #ifndef HAX_DIAG_H
 #define HAX_DIAG_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Emit one `hax: <message>` line to stderr, without changing control flow. Callers supply no prefix
  * or newline. hax_err uses the error color and hax_warn the warning color on terminals. */
 __attribute__((format(printf, 1, 2))) void hax_err(const char *format, ...);
@@ -23,5 +27,9 @@ enum hax_diag_level {
  * reported without inspecting the text. */
 typedef void (*hax_diag_fn)(enum hax_diag_level level, const char *message, void *user);
 void hax_set_diag_sink(hax_diag_fn fn, void *user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_DIAG_H */

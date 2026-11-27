@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Parse a complete base-10 integer into out. Returns 1 on success and 0 otherwise. */
 int parse_int(const char *str, int *out);
 /* Parse exactly count hex digits, one to eight, from a buffer with at least count readable bytes.
@@ -28,5 +32,9 @@ void format_tokens(char *out, size_t out_size, long tokens);
 /* Include the usage percentage when context_limit is positive; negative context_tokens means
  * unknown usage ("? / 256k", no percentage). */
 void format_context(char *out, size_t out_size, long context_tokens, long context_limit);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_FMT_H */

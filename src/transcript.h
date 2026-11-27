@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct item;
 struct tool_def;
 
@@ -48,5 +52,9 @@ void transcript_log_reset(struct transcript_log *log, const char *system_prompt,
 
 /* Flush, close, and free the log. NULL-safe. */
 void transcript_log_close(struct transcript_log *log);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TRANSCRIPT_H */

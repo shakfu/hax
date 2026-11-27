@@ -4,6 +4,10 @@
 
 #include <curl/curl.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Runtime discovery of the system TLS root certificate store, for binaries running on a
  * different distribution than libcurl's build baked its store path for (static or relocated
  * builds). */
@@ -41,5 +45,9 @@ enum ca_store_source ca_resolve(const char *root, const char *env_bundle, const 
                                 const char *env_dir, const char *ssl_version,
                                 const char *const *features, const char *curl_file,
                                 const char *curl_dir, char **file, char **dir);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TRANSPORT_CA_H */

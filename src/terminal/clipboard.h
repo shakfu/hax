@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Terminals may silently discard larger OSC 52 payloads. */
 #define CLIPBOARD_OSC52_MAX_BYTES 100000
 
@@ -31,5 +35,9 @@ char *clipboard_paste_image(size_t *out_len, long deadline_ms);
  * NUL-terminated bytes and set `out_len` to their length excluding the terminator. Return NULL on
  * failure or for an empty clipboard. The bytes are otherwise unnormalized. */
 char *clipboard_paste_text(size_t *out_len, long deadline_ms);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_CLIPBOARD_H */

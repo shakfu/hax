@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Physical terminal width on stdout, or 100 (matching DISPLAY_WIDTH_CAP) when stdout is not a
  * terminal or the size query fails. */
 int term_width(void);
@@ -35,5 +39,9 @@ struct buf;
  * use_utf8) in its place, and a clipped row ends with a reset, as the cut may leave styling open.
  * Returns the cells appended, for reflow-aware repaints. */
 int clip_styled_row(struct buf *out, const char *row, size_t len, int max_cells, int use_utf8);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_WIDTH_H */

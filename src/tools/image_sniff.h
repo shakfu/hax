@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct image_info {
     const char *mime; /* borrowed static string; do not free */
     long width;       /* pixels; 0 when unavailable */
@@ -17,5 +21,9 @@ struct image_info {
  * `complete` is meaningful only when `buf` contains the whole file and validates framing, not
  * compressed image data or checksums. */
 int image_sniff(const void *buf, size_t buf_len, struct image_info *info);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TOOLS_IMAGE_SNIFF_H */

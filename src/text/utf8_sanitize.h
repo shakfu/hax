@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Each invalid input byte becomes the three-byte U+FFFD encoding. A feed may also release up to
  * three bytes carried from the previous chunk. */
 #define UTF8_SANITIZE_FEED_MAX(input_len) ((input_len) * 3 + 9)
@@ -30,5 +34,9 @@ size_t utf8_sanitizer_flush(struct utf8_sanitizer *sanitizer, char *output);
 /* Return an allocated, NUL-terminated copy with valid UTF-8 preserved and every NUL or malformed
  * byte replaced by U+FFFD. The caller frees the result. */
 char *utf8_sanitize(const char *input, size_t input_len);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_UTF8_SANITIZE_H */

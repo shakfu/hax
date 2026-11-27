@@ -6,6 +6,10 @@
 
 #include "buf.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* `event_name` is empty when the event has no `event:` field. Consecutive `data:` fields are joined
  * with newlines. Both strings are parser-owned and valid only during the callback. Returning
  * non-zero suppresses later callbacks from the stream. */
@@ -28,5 +32,9 @@ void sse_parser_feed(struct sse_parser *parser, const char *data, size_t len);
 
 /* Emit an event buffered without a terminating blank line. */
 void sse_parser_finalize(struct sse_parser *parser);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TRANSPORT_SSE_H */

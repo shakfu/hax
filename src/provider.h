@@ -10,6 +10,10 @@
 #include "transport/api_error.h"
 #include "transport/http.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Flat, provider-independent conversation records. Adapters may group adjacent records when their
  * wire format requires compound assistant messages or tool-result blocks. */
 enum item_kind {
@@ -137,6 +141,9 @@ struct tool_def {
     const char *description;
     const struct tool_param *params;
     size_t n_params;
+    /* A complete JSON Schema object sent in place of one built from `params`, for schemas
+     * `tool_param` cannot express. NULL builds from `params`. */
+    const char *schema_json;
 };
 
 struct context {
@@ -439,5 +446,9 @@ const char *provider_stable_id(const struct provider *provider);
 /* Whether an item's recorded provenance names this provider/model pair. Sessions written by
  * earlier versions may carry a former provider id, so both sides are canonicalized. */
 int provider_provenance_matches(const struct item *item, const char *provider, const char *model);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDER_H */

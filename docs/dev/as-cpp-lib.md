@@ -106,6 +106,22 @@ constraint is identical in C and in C++.
 
 ## Measured: two agents in one process
 
+`examples/parallel_agents.cpp` now carries this measurement as a test (`embed/parallel_agents`).
+It is a C++ host linking the shared `libhax`. It runs N agents for R rounds on their own threads,
+with host and built-in tool calls in the same response, and cancels every K-th agent inside a
+host tool before it resumes. Results on 2026-11-27, macOS arm64:
+
+- 64 agents x 8 rounds (534 sends, 22 cancel-and-resume cycles): all invariants hold in the
+  default, ASan, and TSan builds. TSan reports no races.
+- With `bash` calls, the TSan build deadlocks in about 1 run in 3 from 4 agents up. The cycle is
+  inside the sanitizer: TSan's `fork` interceptor holds its slot locks while libc's atfork
+  handler waits on an `os_unfair_lock`, which a thread in `snprintf` holds while it waits on a
+  slot lock. No hax lock is involved. `--no-bash` avoids it, and the test passes it under macOS
+  TSan. `tests/test_multi_agent.c` forks from 4 threads too, so it can hit the same deadlock.
+
+The rest of this section is the original spike.
+
+
 The claim above was tested rather than argued. A 126-line spike links against `libhax` from
 `meson setup build-embed -Dembed=true`, constructs multiple providers and `agent_session`s under a
 single `hax_init()`, and runs them. It was run both normally and against a

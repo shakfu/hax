@@ -2,6 +2,10 @@
 #ifndef HAX_RENDER_PROGRESS_H
 #define HAX_RENDER_PROGRESS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Render a single-line progress bar to stdout (no trailing newline).
  *
  * `frac` is clamped to [0,1]; `width` is the bar's cell count.
@@ -11,5 +15,9 @@
  * '#'/'-' in the ASCII fallback). Quiet by design, intended for
  * status output that should recede behind conversation text. */
 void progress_bar_print(double frac, int width);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_PROGRESS_H */

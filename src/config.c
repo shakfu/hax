@@ -151,6 +151,10 @@ static const struct config_setting REGISTRY[] = {
     {.key = "task.max_running", .env_var = "HAX_TASK_MAX_RUNNING", .default_value = "32",
      .description = "Maximum concurrently running background tasks",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 64, .editable = 1},
+    {.key = "acp.tool_timeout", .env_var = "HAX_ACP_TOOL_TIMEOUT", .default_value = "10m",
+     .description = "How long --acp waits for the client to answer a call to one of its own "
+                    "tools before failing the call; 0 waits until cancelled",
+     .kind = CONFIG_KIND_DURATION, .editable = 1},
 
     /* subagents: the root run's values bind every hax it starts */
     {.key = "subagent.max_depth", .env_var = "HAX_SUBAGENT_MAX_DEPTH", .default_value = "2",

@@ -2,6 +2,10 @@
 #ifndef HAX_TERMINAL_INTERRUPT_H
 #define HAX_TERMINAL_INTERRUPT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Initialize bare-Esc detection and terminal restoration. Detection is available only when stdin
  * and stdout are TTYs; otherwise the watcher API is inert and request queries return false. */
 void interrupt_init(void);
@@ -53,5 +57,9 @@ int interrupt_classifier_feed(struct interrupt_classifier *classifier, unsigned 
 
 /* Return true when the timeout confirms a pending Esc was bare. */
 int interrupt_classifier_timeout(struct interrupt_classifier *classifier);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_INTERRUPT_H */

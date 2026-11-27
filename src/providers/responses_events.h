@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct responses_tool_call;
 
 /* Stateful translation from OpenAI Responses SSE payloads to provider events. The parser maps
@@ -36,5 +40,9 @@ void responses_events_feed(struct responses_events *events, const char *data);
 
 /* Emit EV_ERROR if the transport closes before a terminal response event. */
 void responses_events_finalize(struct responses_events *events);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_RESPONSES_EVENTS_H */

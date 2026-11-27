@@ -75,6 +75,7 @@ static void test_abi_reports_this_build(void)
     EXPECT(abi->sizeof_agent_loop_params == sizeof(struct agent_loop_params));
     EXPECT(abi->sizeof_agent_loop_result == sizeof(struct agent_loop_result));
     EXPECT(abi->sizeof_agent_loop_hooks == sizeof(struct agent_loop_hooks));
+    EXPECT(abi->sizeof_tool_def == sizeof(struct tool_def));
 }
 
 int main(void)

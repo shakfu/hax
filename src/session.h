@@ -7,6 +7,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Append-only conversation persistence. Each session is a JSONL file under the current
  * directory's bucket in the XDG state tree. The first line is a header; subsequent lines are
  * items or control records: complete provider/model/effort/preset selections, /undo cuts, and
@@ -198,5 +202,9 @@ char *session_prompt_history_path(const char *cwd);
  * a zeroed or freed struct; unreadable files leave it zeroed. */
 void session_label_read(const char *path, int max_cells, struct session_label *out);
 void session_label_free(struct session_label *label);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SESSION_H */

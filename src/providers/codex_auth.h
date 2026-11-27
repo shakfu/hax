@@ -4,6 +4,10 @@
 
 #include <jansson.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum codex_auth_source {
     CODEX_AUTH_SOURCE_HAX,       /* hax's own credential store; hax manages refresh */
     CODEX_AUTH_SOURCE_CODEX_CLI, /* borrowed read-only from ~/.codex/auth.json */
@@ -92,5 +96,9 @@ long codex_jwt_exp(const char *jwt);
 /* The ChatGPT account id claim (`https://api.openai.com/auth`.chatgpt_account_id), owned, or
  * NULL when absent. */
 char *codex_jwt_account_id(const char *jwt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_CODEX_AUTH_H */

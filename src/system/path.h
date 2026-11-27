@@ -2,6 +2,10 @@
 #ifndef HAX_SYSTEM_PATH_H
 #define HAX_SYSTEM_PATH_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Textual path transforms: no filesystem access or dot-segment normalization. Non-NULL results are
  * allocated and owned by the caller. */
 
@@ -29,5 +33,9 @@ int path_climb_to_parent(char *dir);
 char *xdg_hax_config_path(const char *relative_path); /* XDG_CONFIG_HOME or HOME/.config */
 char *xdg_hax_state_path(const char *relative_path);  /* XDG_STATE_HOME or HOME/.local/state */
 char *xdg_hax_cache_path(const char *relative_path);  /* XDG_CACHE_HOME or HOME/.cache */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_PATH_H */

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "harness.h"
 #include "tools/output_cap.h"
 
@@ -105,8 +106,58 @@ static void test_whole_lines_tail(void)
     EXPECT(lines == 0);
 }
 
+static void test_clip_keeps_text_that_fits(void)
+{
+    char *out = output_cap_clip("short\n", 64);
+    EXPECT_STR_EQ(out, "short\n");
+    free(out);
+}
+
+/* Over budget: an eighth of it from the start and the rest from the end, on line boundaries, with
+ * a marker naming what was kept. */
+static void test_clip_keeps_head_and_tail_lines(void)
+{
+    struct buf text;
+    buf_init(&text);
+    for (int i = 0; i < 200; i++) {
+        char line[16];
+        snprintf(line, sizeof(line), "line %03d\n", i);
+        buf_append_str(&text, line);
+    }
+    char *out = output_cap_clip(text.data, 160);
+    buf_free(&text);
+    const char *head = "line 000\nline 001\n\n[output truncated: kept ";
+    EXPECT(strncmp(out, head, strlen(head)) == 0);
+    EXPECT(strstr(out, " of 1800 bytes]\n") != NULL);
+    size_t length = strlen(out);
+    EXPECT(length > 9 && strcmp(out + length - 9, "line 199\n") == 0);
+    /* The tail starts on a whole line. */
+    const char *tail = strstr(out, "bytes]\n") + 7;
+    EXPECT(strncmp(tail, "line ", 5) == 0);
+    free(out);
+}
+
+/* One long line has no line boundary to cut at, so the cut lands on a character boundary. */
+static void test_clip_splits_a_long_line_on_characters(void)
+{
+    char text[301];
+    for (int i = 0; i < 100; i++)
+        memcpy(text + 3 * i, "\xE2\x86\x92", 3); /* U+2192, three bytes */
+    text[300] = '\0';
+    char *out = output_cap_clip(text, 32);
+    const char *marker = strstr(out, "\n[output truncated: kept ");
+    EXPECT(marker != NULL);
+    EXPECT((marker - out) % 3 == 0);
+    const char *tail = strstr(out, "bytes]\n") + 7;
+    EXPECT(strlen(tail) % 3 == 0);
+    free(out);
+}
+
 int main(void)
 {
+    test_clip_keeps_text_that_fits();
+    test_clip_keeps_head_and_tail_lines();
+    test_clip_splits_a_long_line_on_characters();
     test_cap_lines_no_long_lines();
     test_cap_lines_empty();
     test_cap_lines_truncates_long_line();

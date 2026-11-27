@@ -8,6 +8,10 @@
 #include "compact.h"
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct transcript_log;
 struct session_log;
 struct render_ctx;
@@ -88,5 +92,9 @@ void agent_display_refresh(struct agent_state *state);
  * summary starts streaming and otherwise stays latched for the caller; a second cancels. Returns 1
  * only when a seed was appended. */
 int agent_compact(struct agent_state *state, const char *instructions, enum compact_reason reason);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_H */

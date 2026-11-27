@@ -70,7 +70,9 @@ struct tool_def def = {.name = "lookup_order", .description = "Return the conten
 agent_session_add_tool(&session, &def);
 ```
 
-The session deep-copies the def, so the caller keeps ownership of everything it passed. A name
+Set `schema_json` to a complete JSON Schema object when `params` cannot express it (nested
+objects, `enum`); it is then sent in their place. The session deep-copies the def, so the caller
+keeps ownership of everything it passed. A name
 already advertised is replaced rather than added twice, which is how a host redefines a built-in.
 Raw mode advertises no tools and rejects the call.
 
@@ -85,6 +87,11 @@ static struct item on_tool_call(const struct item *call, enum agent_loop_tool_ac
 
 struct agent_loop_hooks hooks = {.user = my_state, .tool_call = on_tool_call};
 ```
+
+Pass text the host produced through `output_cap_clip(text, output_cap_bytes())` from
+`tools/output_cap.h` before making the result. hax's own tools cap their output; host text
+arrives uncapped and would otherwise be resent whole on every later request. The Python binding
+does this for every host tool.
 
 Return an owned result on every path, including failure. The loop pairs each call with a result,
 and history that ends on an unpaired call is malformed for the next request. Leaving `tool_call`
@@ -122,6 +129,24 @@ not the presentation path, decides both.
 An embedder calls `cancel_request_abort()` from a signal handler or another thread; the terminal's
 Esc watcher is just another producer. Do not call `interrupt_init()` from a library — it claims
 SIGINT and the terminal.
+
+## C++ hosts
+
+The headers declare C linkage for C++ themselves, so a C++ host includes them directly.
+`system/cancel.h` includes `<stdatomic.h>`. Before C++23, libc++ accepts `<atomic>` only ahead of
+it, so a host that uses `std::atomic` includes `<atomic>` before hax's headers; from C++23 the
+order does not matter. This was checked against libc++; libstdc++ was not tried.
+
+```cpp
+#include <atomic>
+
+#include "agent_loop.h"
+#include "hax_embed.h"
+```
+
+`examples/embed_host.hpp` packages an agent's lifecycle, a blocking send, and the tool
+hook. `examples/decompose.cpp` uses it to split a Markdown objective across parallel agents and
+answer from their reports; `examples/parallel_agents.cpp` stress-tests concurrent sessions.
 
 ## Struct layouts
 

@@ -2,6 +2,10 @@
 #ifndef HAX_TERMINAL_ANSI_H
 #define HAX_TERMINAL_ANSI_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* String-literal terminal controls, suitable for compile-time concatenation. */
 #define ANSI_ESC               "\x1b"
 #define ANSI_BEL               "\x07"
@@ -52,5 +56,9 @@
 /* DECTCEM cursor visibility; tty restoration must always emit SHOW. */
 #define ANSI_CURSOR_HIDE ANSI_CSI "?25l"
 #define ANSI_CURSOR_SHOW ANSI_CSI "?25h"
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_ANSI_H */

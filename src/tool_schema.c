@@ -8,6 +8,13 @@
 
 json_t *tool_schema_build(const struct tool_def *def)
 {
+    if (def && def->schema_json) {
+        json_t *given = json_loads(def->schema_json, 0, NULL);
+        if (json_is_object(given))
+            return given;
+        json_decref(given);
+    }
+
     json_t *properties = json_object();
     json_t *required = json_array();
 

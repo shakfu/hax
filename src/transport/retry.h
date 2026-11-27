@@ -4,6 +4,10 @@
 
 #include "transport/http.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct retry_policy {
     int max_attempts; /* includes the initial request; 1 disables retries */
     long base_delay_ms;
@@ -24,5 +28,9 @@ long retry_delay_ms(const struct retry_policy *policy, int attempt);
 
 /* Waits in short slices so `tick` can cancel promptly. Returns non-zero when cancelled. */
 int retry_sleep_with_tick(long delay_ms, http_tick_cb tick, void *user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TRANSPORT_RETRY_H */

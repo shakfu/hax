@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Pragmatic streaming Markdown renderer, not a CommonMark implementation. Supports emphasis,
  * inline and fenced code, line-start headings and lists, thematic breaks, and leading-pipe GFM
  * tables. Wide tables reflow to bulleted label/value records. Prose newlines normally become
@@ -45,5 +49,9 @@ void md_set_styled(struct md_renderer *m, int on);
 
 /* True while a GFM table is buffered for whole-table layout and no rows are emitted. */
 int md_in_table(const struct md_renderer *m);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_MARKDOWN_H */

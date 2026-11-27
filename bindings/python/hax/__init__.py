@@ -130,6 +130,7 @@ def _check_abi() -> None:
             abi.sizeof_agent_loop_hooks,
             ffi.sizeof("struct agent_loop_hooks"),
         ),
+        "struct tool_def": (abi.sizeof_tool_def, ffi.sizeof("struct tool_def")),
     }
     bad = [f"{name}: library {theirs}, extension {mine}" for name, (theirs, mine) in sizes.items() if theirs != mine]
     if bad:
@@ -246,7 +247,13 @@ def hax_py_tool_call(call, action, image_input, user):
 
         output = fn(**arguments)
         text = "" if output is None else _stringify(output)
-        return lib.agent_tool_result_make(call, text.encode(), ffi.NULL)
+        # Held to tool_output_cap, as hax's own tools are: a large return would otherwise go
+        # whole into every later request.
+        capped = lib.output_cap_clip(text.encode(), lib.output_cap_bytes())
+        try:
+            return lib.agent_tool_result_make(call, capped, ffi.NULL)
+        finally:
+            lib.free(capped)
     except BaseException:
         # A Python exception cannot unwind through agent_loop_run. Stash it, ask this agent's
         # loop to stop — a sibling's run is not implicated — and still hand back a well-formed

@@ -7,6 +7,10 @@
 #include "providers/codex_auth.h"
 #include "transport/http.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ChatGPT login lifecycle for the codex provider, independent of the codex CLI: an OAuth flow
  * obtains tokens, the credential store persists them under "codex", and refresh keeps them
  * rotating. Runs on the foreground thread. */
@@ -99,5 +103,9 @@ int codex_login_token_expiring(const char *access_token, long margin_s);
  * proof justifies treating a login as dead and removing it: proxies and gateways fabricate 4xx
  * statuses that say nothing about the token itself. */
 int codex_login_refresh_rejected(long http_status, const char *body);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_CODEX_LOGIN_H */

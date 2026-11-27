@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Categorical reasoning-effort values accepted on the wire. `known` distinguishes an explicitly
  * empty set from absent metadata. The fixed bounds keep catalog entries allocation-free; excess
  * or overlong values are ignored. */
@@ -32,5 +36,9 @@ int effort_set_has(const struct effort_set *set, const char *level);
  * higher level when none is lower. Returns NULL for an empty set or an unrecognized request. The
  * result is borrowed from `set`, except when returning `requested` unchanged. */
 const char *effort_clamp(const struct effort_set *set, const char *requested);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_EFFORT_H */

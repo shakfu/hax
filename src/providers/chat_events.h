@@ -8,6 +8,10 @@
 #include "buf.h"
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Stateful translator from Chat Completions SSE payloads to stream events. Only the modern
  * tool_calls shape is supported; legacy function_call deltas are ignored. */
 struct chat_tool_call {
@@ -68,5 +72,9 @@ int chat_events_complete(const struct chat_events *parser);
 
 /* Finish a cleanly closed transport; emit an error if no terminal state was received. */
 void chat_events_finalize(struct chat_events *parser);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_CHAT_EVENTS_H */

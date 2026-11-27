@@ -11,6 +11,10 @@
 #include "providers/chat_events.h"
 #include "providers/responses_events.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* A wire dialect: the request path a protocol serves under a provider's base URL, the request
  * body serializer, and the translator from its SSE payloads to provider-independent stream
  * events. Adapters resolve provider policy (config, model metadata, credentials) and hand the
@@ -84,5 +88,9 @@ const struct wire *wire_find(const char *api);
 char *wire_build_body(const struct wire *wire, const struct context *context,
                       const char *provider_id, const char *model,
                       const struct wire_body_opts *opts);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_WIRE_H */

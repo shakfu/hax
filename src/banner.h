@@ -4,6 +4,10 @@
 
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct agent_session;
 struct provider;
 
@@ -40,5 +44,9 @@ void banner_identity(FILE *out, const struct provider *provider,
 
 /* Print the startup identity and key-tip rows to stdout; the caller supplies any leading gap. */
 void banner_print(const struct provider *provider, const struct agent_session *session);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_BANNER_H */

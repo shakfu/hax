@@ -117,6 +117,7 @@ const struct hax_abi *hax_abi(void)
         .sizeof_agent_loop_params = sizeof(struct agent_loop_params),
         .sizeof_agent_loop_result = sizeof(struct agent_loop_result),
         .sizeof_agent_loop_hooks = sizeof(struct agent_loop_hooks),
+        .sizeof_tool_def = sizeof(struct tool_def),
     };
     return &abi;
 }

@@ -310,6 +310,7 @@ estimated from token counts and this metadata; check provider billing for author
 | `bash.shell` | `HAX_BASH_SHELL` | bash/sh | Shell executable used by the bash tool. |
 | `task.wait_timeout` | `HAX_TASK_WAIT_TIMEOUT` | `10m` | Default wait for a background task. |
 | `task.max_running` | `HAX_TASK_MAX_RUNNING` | `32` | Maximum concurrent background tasks, up to 64. |
+| `acp.tool_timeout` | `HAX_ACP_TOOL_TIMEOUT` | `10m` | How long `--acp` waits for the client to answer a call to one of its tools; `0` waits until cancelled. |
 | `subagent.max_depth` | `HAX_SUBAGENT_MAX_DEPTH` | `2` | Deepest generation of subagents, up to 8; `1` allows children only, `0` none. |
 | `subagent.max_agents` | `HAX_SUBAGENT_MAX_AGENTS` | — | Subagents one run may start in total, across every generation. |
 | `subagent.max_tokens` | `HAX_SUBAGENT_MAX_TOKENS` | — | Input plus output tokens all of a run's subagents may use. |

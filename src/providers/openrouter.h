@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Parse one OpenRouter /models entry into initialized `info`. Newly allocated fields are owned by
  * `info`; unreported fields retain their unknown values. */
 void openrouter_parse_model(const json_t *entry, struct model_info *info);
@@ -20,5 +24,9 @@ int openrouter_probe_model(struct provider *provider, const char *model, struct 
 
 /* /usage backend: API-key spend and account credits. */
 int openrouter_query_usage(struct provider *provider);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_OPENROUTER_H */

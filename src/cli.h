@@ -6,6 +6,10 @@
 
 #include "agent_core.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum cli_resume_mode {
     CLI_RESUME_NONE = 0,
     CLI_RESUME_LATEST,
@@ -60,5 +64,9 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
 enum cli_session_result cli_resolve_session(const struct cli_options *options, char **path);
 
 void cli_print_help(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_CLI_H */

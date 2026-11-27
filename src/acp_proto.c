@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include "acp_proto.h"
 
+#include <errno.h>
 #include <jansson.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,6 +18,9 @@
 
 /* A title or location longer than this says nothing more to a person reading it. */
 #define TITLE_MAX_BYTES 200
+
+/* Provider APIs accept tool names of this shape only; anything else fails every request. */
+#define TOOL_NAME_MAX_BYTES 64
 
 json_t *acp_text(const char *text)
 {
@@ -428,4 +433,147 @@ enum acp_permission acp_permission_decision(const json_t *result)
         if (strcmp(chosen, OPTIONS[i].id) == 0)
             return OPTIONS[i].decision;
     return ACP_PERMISSION_REJECT_ONCE;
+}
+
+static int valid_tool_name(const char *name)
+{
+    size_t length = strlen(name);
+    return length > 0 && length <= TOOL_NAME_MAX_BYTES &&
+           strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") ==
+               length;
+}
+
+static char *host_tool_problem(const json_t *tools, size_t index)
+{
+    const json_t *tool = json_array_get(tools, index);
+    const char *name = json_string_value(json_object_get(tool, "name"));
+    if (!name || !valid_tool_name(name))
+        return xasprintf("_meta.hax.tools[%zu]: name must be 1-%d letters, digits, '_' or '-'",
+                         index, TOOL_NAME_MAX_BYTES);
+    const json_t *description = json_object_get(tool, "description");
+    if (description && !json_is_string(description))
+        return xasprintf("tool %s: description must be a string", name);
+    const json_t *schema = json_object_get(tool, "inputSchema");
+    const char *type = json_string_value(json_object_get(schema, "type"));
+    if (!json_is_object(schema) || !type || strcmp(type, "object") != 0)
+        return xasprintf("tool %s: inputSchema must be an object with \"type\": \"object\"", name);
+    for (size_t i = 0; i < index; i++) {
+        const char *earlier = json_string_value(json_object_get(json_array_get(tools, i), "name"));
+        if (earlier && strcmp(earlier, name) == 0)
+            return xasprintf("tool %s is listed twice", name);
+    }
+    return NULL;
+}
+
+int acp_host_tools_parse(const json_t *params, struct tool_def **defs, size_t *n, char **error)
+{
+    *defs = NULL;
+    *n = 0;
+    *error = NULL;
+    const json_t *meta = json_object_get(json_object_get(params, "_meta"), "hax");
+    const json_t *tools = json_object_get(meta, "tools");
+    if (!tools)
+        return 0;
+    if (!json_is_array(tools)) {
+        *error = xstrdup("_meta.hax.tools must be an array");
+        return -1;
+    }
+
+    size_t count = json_array_size(tools);
+    for (size_t i = 0; i < count; i++) {
+        *error = host_tool_problem(tools, i);
+        if (*error)
+            return -1;
+    }
+    struct tool_def *out = count ? xcalloc(count, sizeof(*out)) : NULL;
+    for (size_t i = 0; i < count; i++) {
+        const json_t *tool = json_array_get(tools, i);
+        const char *description = json_string_value(json_object_get(tool, "description"));
+        out[i].name = xstrdup(json_string_value(json_object_get(tool, "name")));
+        out[i].description = description ? xstrdup(description) : NULL;
+        out[i].schema_json = json_dumps(json_object_get(tool, "inputSchema"), JSON_COMPACT);
+        if (!out[i].schema_json) {
+            *error = xasprintf("tool %s: inputSchema cannot be serialized", out[i].name);
+            acp_host_tools_free(out, i + 1);
+            return -1;
+        }
+    }
+    *defs = out;
+    *n = count;
+    return 0;
+}
+
+void acp_host_tools_free(struct tool_def *defs, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        free((char *)defs[i].name);
+        free((char *)defs[i].description);
+        free((char *)defs[i].schema_json);
+    }
+    free(defs);
+}
+
+char *acp_host_tool_output(const json_t *response, int *failed)
+{
+    const json_t *result = json_object_get(response, "result");
+    if (!json_is_object(result)) {
+        const char *message =
+            json_string_value(json_object_get(json_object_get(response, "error"), "message"));
+        *failed = 1;
+        return xasprintf("error: %s", message && *message ? message : "the host tool failed");
+    }
+
+    struct buf text;
+    buf_init(&text);
+    *failed = json_is_true(json_object_get(result, "isError"));
+    if (*failed)
+        buf_append_str(&text, "error: ");
+    size_t start = text.len;
+    size_t i;
+    const json_t *part;
+    json_array_foreach(json_object_get(result, "content"), i, part)
+    {
+        const char *type = json_string_value(json_object_get(part, "type"));
+        const char *value = json_string_value(json_object_get(part, "text"));
+        if (!type || strcmp(type, "text") != 0 || !value)
+            continue;
+        if (text.len > start)
+            buf_append_str(&text, "\n");
+        buf_append_str(&text, value);
+    }
+    return buf_steal(&text);
+}
+
+/* The request number `id` names, or 0 when it names none. `exact` says it was a JSON integer. */
+static long response_id_number(const json_t *id, int *exact)
+{
+    *exact = json_is_integer(id);
+    if (*exact)
+        return (long)json_integer_value(id);
+    if (json_is_real(id)) {
+        double value = json_real_value(id);
+        return value >= 1 && value <= (double)LONG_MAX && value == (double)(long)value ? (long)value
+                                                                                       : 0;
+    }
+    const char *text = json_string_value(id);
+    if (!text || !*text || strspn(text, "0123456789") != strlen(text))
+        return 0;
+    errno = 0;
+    long value = strtol(text, NULL, 10);
+    return errno ? 0 : value;
+}
+
+enum acp_response_match acp_response_match(const json_t *response, long awaited, long issued)
+{
+    const json_t *id = json_object_get(response, "id");
+    if (!id || json_is_null(id))
+        return awaited && json_object_get(response, "error") ? ACP_RESPONSE_COERCED
+                                                             : ACP_RESPONSE_UNKNOWN;
+    int exact;
+    long number = response_id_number(id, &exact);
+    if (number >= 1 && number == awaited)
+        return exact ? ACP_RESPONSE_AWAITED : ACP_RESPONSE_COERCED;
+    if (number >= 1 && number <= issued)
+        return ACP_RESPONSE_STALE;
+    return ACP_RESPONSE_UNKNOWN;
 }

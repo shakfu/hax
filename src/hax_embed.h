@@ -6,6 +6,10 @@
 
 #include "diag.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Lifecycle for callers that are not main(): language bindings, test harnesses, and any host
  * process that owns its own locale, libcurl, and exit handling. hax_init() must complete before
  * any other hax call, and returns -1 when called twice.
@@ -61,11 +65,16 @@ struct hax_abi {
     size_t sizeof_agent_loop_params;
     size_t sizeof_agent_loop_result;
     size_t sizeof_agent_loop_hooks;
+    size_t sizeof_tool_def;
 };
 
 /* Borrowed; static storage. */
 const struct hax_abi *hax_abi(void);
 
-#define HAX_ABI_VERSION 2u
+#define HAX_ABI_VERSION 3u
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_HAX_EMBED_H */

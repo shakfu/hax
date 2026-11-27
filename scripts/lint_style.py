@@ -10,6 +10,10 @@ Checked over src/ and tests/:
   uses HAX_RENDER_DISP_H (the src/ prefix is dropped, tests/ is kept), with
   a matching ``#endif /* GUARD */`` as the last line. The guard opens the
   header — only comments may precede it — so it covers every declaration.
+- Headers under src/ wrap their declarations in ``extern "C"`` behind
+  ``#ifdef __cplusplus``, opened after their last include, so a C++ host can
+  include them directly. An include inside the block would give C linkage to
+  a C++ standard header, which <stdatomic.h> rejects in C++23.
 - Quote includes name files relative to an -iquote root (src/ or tests/),
   never relative to the including file's directory, never through ``..`` or
   an absolute path. A meson-generated header is named by its ``.in``
@@ -94,6 +98,19 @@ def check_guard(path: Path, text: str) -> Iterator[Finding]:
     lines = text.rstrip("\n").splitlines()
     if lines[-1] != f"#endif /* {want} */":
         yield Finding(path, len(lines), f"last line should be '#endif /* {want} */'")
+
+
+CXX_OPEN: Final = '#ifdef __cplusplus\nextern "C" {\n#endif\n'
+CXX_CLOSE: Final = "#ifdef __cplusplus\n}\n#endif\n"
+
+
+def check_cxx_linkage(path: Path, text: str) -> Iterator[Finding]:
+    if (start := text.find(CXX_OPEN)) < 0 or CXX_CLOSE not in text[start:]:
+        yield Finding(path, 1, 'missing #ifdef __cplusplus extern "C" block around declarations')
+        return
+    if (stray := text.find("\n#include", start)) >= 0:
+        line = text.count("\n", 0, stray) + 2
+        yield Finding(path, line, 'include inside the extern "C" block; move it above the block')
 
 
 def read_column_limit() -> int:
@@ -192,6 +209,8 @@ def check_file(path: Path, column_limit: int) -> Iterator[Finding]:
     yield from check_line_length(path, text, column_limit)
     if path.suffix == ".h":
         yield from check_guard(path, text)
+        if path.parts[0] == "src":
+            yield from check_cxx_linkage(path, text)
     yield from check_includes(path, text)
     yield from check_include_comments(path, text)
     yield from check_comment_delimiters(path, text)

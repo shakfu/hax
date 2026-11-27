@@ -7,6 +7,10 @@
 
 #include "providers/usage_render.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct provider;
 
 /* OpenCode gateway extras beyond the shared defs: the Go subscription reports rate-limit
@@ -23,5 +27,9 @@ char **opencode_usage_headers(const struct provider *provider);
 
 /* /usage backend for the opencode-go def. */
 int opencode_go_query_usage(struct provider *provider);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_OPENCODE_H */

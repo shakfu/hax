@@ -5,6 +5,10 @@
 #include <signal.h>
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct spawn_signal_state {
     struct sigaction sigint;
     struct sigaction sigquit;
@@ -83,5 +87,9 @@ int spawn_pipe_open_read(struct spawn_pipe *pipe, const char *shell_cmd);
 /* Close the stream, wait for the child, restore parent signals, and return waitpid status. A NULL
  * or zeroed pipe is a successful no-op. */
 int spawn_pipe_close(struct spawn_pipe *pipe);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_SPAWN_H */

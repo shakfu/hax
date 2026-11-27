@@ -5,6 +5,10 @@
 #include <jansson.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* The providers.<name> config vocabulary: the field inventory, the unused-field lint, and
  * per-field resolution helpers, shared by the generic constructor (http_provider_new) and the
  * hook modules. The API key is the one value read from the environment, via a def- or
@@ -95,5 +99,9 @@ char **provider_headers_merge(char *const *defaults, char *const *overrides);
 /* Owned copy of `templates` (may be NULL) with every "{session_id}" replaced by `session_id`
  * (non-NULL). Free with string_array_free. */
 char **provider_headers_expand(char *const *templates, const char *session_id);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_PROVIDER_CONFIG_H */

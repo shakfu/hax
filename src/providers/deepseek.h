@@ -7,6 +7,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* DeepSeek API extras beyond the shared def: a /models listing that reports capabilities, and
  * the account balance behind /usage. */
 
@@ -33,5 +37,9 @@ char *deepseek_balance_format(const struct deepseek_balance *balance);
 
 /* /usage backend: the account balance. */
 int deepseek_query_usage(struct provider *provider);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_DEEPSEEK_H */

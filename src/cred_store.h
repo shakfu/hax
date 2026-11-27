@@ -4,6 +4,10 @@
 
 #include <jansson.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* hax-owned credentials: one JSON object per provider id, stored with mode 0600 in the XDG state
  * tree. Entry contents are provider-defined; the store does not interpret them. Every call reads
  * the file afresh so concurrent hax processes observe each other's updates, and every write
@@ -47,5 +51,9 @@ typedef enum cred_store_verdict (*cred_store_update_fn)(json_t *entry, json_t **
  * to write, so the entry `update` sees cannot change underneath its decision. Returns 1 when the
  * store changed (an entry written or removed), 0 when it was kept, -1 on write failure. */
 int cred_store_update(const char *provider_id, cred_store_update_fn update, void *ctx);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_CRED_STORE_H */

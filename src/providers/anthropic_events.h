@@ -7,6 +7,10 @@
 #include "buf.h"
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum anthropic_content_kind {
     ANTHROPIC_CONTENT_TEXT = 0,
     ANTHROPIC_CONTENT_THINKING,
@@ -56,5 +60,9 @@ void anthropic_events_feed(struct anthropic_events *parser, const char *event_na
 
 /* Finish a cleanly closed transport; emit an error if no terminal state was received. */
 void anthropic_events_finalize(struct anthropic_events *parser);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_ANTHROPIC_EVENTS_H */

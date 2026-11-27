@@ -67,6 +67,7 @@ struct tool_def {
     const char *description;
     const struct tool_param *params;
     size_t n_params;
+    const char *schema_json;
 };
 
 /* --- tool.h --- */
@@ -242,6 +243,7 @@ struct hax_abi {
     size_t sizeof_agent_loop_params;
     size_t sizeof_agent_loop_result;
     size_t sizeof_agent_loop_hooks;
+    size_t sizeof_tool_def;
 };
 
 const struct hax_abi *hax_abi(void);
@@ -253,6 +255,11 @@ extern "Python" struct item hax_py_tool_call(const struct item *, enum agent_loo
 extern "Python" enum agent_signal hax_py_signal(void *);
 extern "Python" int hax_py_compact(enum compact_reason, void *);
 extern "Python" void hax_py_diag(enum hax_diag_level, const char *, void *);
+
+/* --- tools/output_cap.h --- */
+/* A host tool's text arrives uncapped; built-ins cap their own. */
+size_t output_cap_bytes(void);
+char *output_cap_clip(const char *text, size_t budget);
 
 /* free() for the strings hax hands back. */
 void free(void *);
@@ -275,6 +282,7 @@ def configure() -> None:
         #include "provider.h"
         #include "system/cancel.h"
         #include "tool.h"
+        #include "tools/output_cap.h"
         #include <stdlib.h>
         """,
     )

@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct picker_item {
     const char *label;  /* filter target and primary row text */
     const char *detail; /* optional terse metadata shown on the same row */
@@ -30,5 +34,9 @@ struct picker_opts {
  * on cancellation, an empty list, or non-TTY input/output. All pointers are borrowed for the
  * duration of the call. */
 long picker_run(const struct picker_opts *options);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_PICKER_H */

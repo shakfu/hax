@@ -6,6 +6,10 @@
 
 #include "render/render_ctx.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct item;
 
 enum history_detail {
@@ -20,5 +24,9 @@ enum history_detail {
  * markdown renderer emits unwrapped text. */
 void history_render(struct render_ctx *render, enum history_detail detail, const struct item *items,
                     size_t n_items, size_t start_idx);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_HISTORY_H */

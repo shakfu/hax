@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* The Anthropic-style metadata dialect: the cursor-paginated /models listing, the model
  * probe, and per-entry capability parsing. Installed by http_provider on providers whose
  * metadata_api resolves to the Anthropic side; operates on http_provider instances. */
@@ -17,5 +21,9 @@ int anthropic_probe_model(struct provider *provider, const char *model, struct m
 
 /* `out` is initialized and already owns the entry's id. */
 void anthropic_parse_model(const json_t *entry, struct model_info *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_ANTHROPIC_MODELS_H */

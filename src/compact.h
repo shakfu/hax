@@ -5,6 +5,10 @@
 #include "agent_stream.h"
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct agent_session;
 struct session_log;
 struct transcript_log;
@@ -89,5 +93,9 @@ int compact_auto_enabled(const struct agent_session *session);
  * limit, while compact_auto_enabled() holds. `provider` and `pending_prompt` may be NULL. */
 int compact_due(const struct agent_session *session, struct provider *provider,
                 const char *pending_prompt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_COMPACT_H */

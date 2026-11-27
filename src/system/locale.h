@@ -2,6 +2,10 @@
 #ifndef HAX_SYSTEM_LOCALE_H
 #define HAX_SYSTEM_LOCALE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Set LC_CTYPE, and only LC_CTYPE, to a UTF-8 locale: LC_NUMERIC under the user's locale can put a
  * decimal comma in serialized JSON. Publishes the choice to the environment unless a non-UTF-8
  * LC_ALL is pinned there. Call before other initialization, and before any thread reads the
@@ -14,5 +18,9 @@ int locale_have_utf8(void);
  * LC_ALL, which outranks the published LC_CTYPE, makes this necessary. Valid until the next
  * setlocale(). */
 const char *locale_child_ctype_override(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_LOCALE_H */

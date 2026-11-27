@@ -9,6 +9,10 @@
 #include "tool.h"
 #include "tools/bash_env.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* State and conversation-record bookkeeping shared by the interactive and one-shot frontends:
  * the canonical flat item log (struct agent_session) with its views and mutators, and the
  * helpers that keep the record consistent with its logs and background tasks. Anything here
@@ -226,5 +230,9 @@ void agent_record_task_exit(struct agent_session *session, struct transcript_log
 
 /* The latched interrupt requests as a stop signal. */
 enum agent_signal agent_interrupt_signal(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_CORE_H */

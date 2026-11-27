@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Limits on the tree of hax processes a run starts through the bash tool. These are guard rails
  * against runaway delegation, not a security boundary: the model controls the child's shell.
  *
@@ -56,5 +60,9 @@ int subagent_ledger_charge(const char *path, long tokens, double cost);
 
 /* *spent_out receives NULL while the token and cost budgets remain, or an allocated reason. */
 int subagent_ledger_spent(const char *path, char **spent_out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SUBAGENT_H */

@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Preparation of untrusted UTF-8 for writing to a terminal. These helpers require
  * locale_init_utf8() to keep valid non-ASCII text. */
 
@@ -15,5 +19,9 @@ char *sanitize_for_display(const char *text, size_t len);
  * direction-changing codepoints, and bound combining-mark runs. Returns an allocated string; NULL
  * input becomes empty. */
 char *flatten_for_display(const char *str);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_DISPLAY_SAFE_H */

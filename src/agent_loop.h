@@ -9,6 +9,10 @@
 #include "compact.h"
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Continuation engine shared by the frontends: drive one user turn through provider
  * round-trips — stream a response, absorb it into the session, dispatch the requested tools,
  * repeat until the model stops calling tools — including abort repair and finished-task notes
@@ -138,5 +142,9 @@ struct agent_loop_params {
  * complete continuation run. */
 void agent_loop_run(const struct agent_loop_params *params, struct agent_loop_result *result);
 void agent_loop_result_destroy(struct agent_loop_result *result);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_LOOP_H */

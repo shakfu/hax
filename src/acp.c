@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "acp_proto.h"
@@ -34,12 +35,27 @@
 #include "system/rand.h"
 #include "terminal/interrupt.h"
 #include "tools/bash_process.h"
+#include "tools/output_cap.h"
 #include "tools/task_registry.h"
 
 #define DENIED_RESULT "error: the user denied permission for this tool call"
 
 /* A longer input line is discarded with a parse error. */
 #define ACP_LINE_MAX_BYTES ((size_t)16 << 20)
+
+/* Output queued beyond this makes the dispatcher wait for the client to read, so a client that
+ * stops reading costs bounded memory. The reader thread's replies never wait. */
+#define ACP_OUTPUT_QUEUE_BYTES ((size_t)1 << 20)
+
+/* One serialized message waiting for the writer thread. */
+struct acp_output {
+    struct acp_output *next;
+    char *line; /* owned, newline-terminated */
+    size_t length;
+};
+
+/* Set on the reader thread, whose writes must never wait: see send_message(). */
+static _Thread_local int on_reader_thread;
 
 /* A client request or notification waiting for the main thread. */
 struct acp_message {
@@ -63,6 +79,9 @@ struct acp_session {
     struct transcript_log *transcript;
     struct session_log *session_log;
     struct acp_grant *grants;
+    /* Tools the client defined and answers through _hax/tool_call; owned names. */
+    char **host_tools;
+    size_t n_host_tools;
 };
 
 struct acp_server {
@@ -78,8 +97,14 @@ struct acp_server {
     struct acp_echo thought_echo;
     const char *stop_cause;
 
-    FILE *out;
-    pthread_mutex_t out_lock; /* the reader thread writes parse errors too */
+    FILE *out;                /* the writer thread's alone once it starts */
+    pthread_mutex_t out_lock; /* guards the output queue below */
+    pthread_cond_t out_changed;
+    struct acp_output *out_head;
+    struct acp_output *out_tail;
+    size_t out_queued; /* bytes queued or being written */
+    int out_closing;   /* no more output is coming; drain and stop */
+    int out_broken;    /* a write failed; further output is discarded */
 
     int in_fd;
     pthread_mutex_t lock; /* guards the fields below, shared with the reader thread */
@@ -96,6 +121,10 @@ struct acp_server {
 
 /* Output */
 
+/* Queue `message` for the writer thread; stolen. The dispatcher waits while the queue is full,
+ * which is back-pressure from a client that is not reading. The reader thread never waits: it must
+ * keep reading stdin, or a client blocked writing to hax while hax waits to write to it would
+ * deadlock against it. */
 static void send_message(struct acp_server *server, json_t *message)
 {
     json_object_set_new(message, "jsonrpc", json_string("2.0"));
@@ -104,12 +133,64 @@ static void send_message(struct acp_server *server, json_t *message)
     json_decref(message);
     if (!text)
         return;
+    struct acp_output *output = xcalloc(1, sizeof(*output));
+    output->length = strlen(text) + 1;
+    output->line = xrealloc(text, output->length + 1);
+    output->line[output->length - 1] = '\n';
+    output->line[output->length] = '\0';
+
     pthread_mutex_lock(&server->out_lock);
-    fputs(text, server->out);
-    fputc('\n', server->out);
-    fflush(server->out);
+    /* A message over the cap still goes out, alone. */
+    while (!on_reader_thread && !server->out_broken && server->out_queued > 0 &&
+           server->out_queued + output->length > ACP_OUTPUT_QUEUE_BYTES)
+        pthread_cond_wait(&server->out_changed, &server->out_lock);
+    if (server->out_broken) {
+        pthread_mutex_unlock(&server->out_lock);
+        free(output->line);
+        free(output);
+        return;
+    }
+    if (server->out_tail)
+        server->out_tail->next = output;
+    else
+        server->out_head = output;
+    server->out_tail = output;
+    server->out_queued += output->length;
+    pthread_cond_broadcast(&server->out_changed);
     pthread_mutex_unlock(&server->out_lock);
-    free(text);
+}
+
+/* Write queued messages in order until output closes and the queue is empty. */
+static void *writer_main(void *user)
+{
+    struct acp_server *server = user;
+    pthread_mutex_lock(&server->out_lock);
+    for (;;) {
+        while (!server->out_head && !server->out_closing)
+            pthread_cond_wait(&server->out_changed, &server->out_lock);
+        struct acp_output *output = server->out_head;
+        if (!output)
+            break;
+        server->out_head = output->next;
+        if (!server->out_head)
+            server->out_tail = NULL;
+        const int skip = server->out_broken;
+        pthread_mutex_unlock(&server->out_lock);
+
+        const int failed =
+            !skip && (fwrite(output->line, 1, output->length, server->out) != output->length ||
+                      fflush(server->out) != 0);
+
+        pthread_mutex_lock(&server->out_lock);
+        server->out_queued -= output->length;
+        if (failed)
+            server->out_broken = 1;
+        pthread_cond_broadcast(&server->out_changed);
+        free(output->line);
+        free(output);
+    }
+    pthread_mutex_unlock(&server->out_lock);
+    return NULL;
 }
 
 /* `id` is borrowed; `result` is stolen. */
@@ -179,6 +260,35 @@ static void cancel_session(struct acp_server *server, const char *session_id)
         cancel_request_abort();
 }
 
+/* Fail the request hax waits on with `why` as the client's error, when that request is `only`
+ * (0: whichever is waiting). A line hax cannot read can only answer the one outstanding request,
+ * and waiting on would end at the timeout, with the wrong reason. */
+static void fail_awaited(struct acp_server *server, const char *why, long only)
+{
+    pthread_mutex_lock(&server->lock);
+    const long awaited = server->awaited_id;
+    const int taken = awaited && !server->response && (!only || only == awaited);
+    if (taken) {
+        server->response = json_pack("{s:I, s:{s:i, s:s}}", "id", (json_int_t)awaited, "error",
+                                     "code", ACP_PARSE_ERROR, "message", why);
+        pthread_cond_broadcast(&server->changed);
+    }
+    pthread_mutex_unlock(&server->lock);
+    if (taken)
+        hax_warn("failing request %ld: %s", awaited, why);
+}
+
+/* The id of the waiting request when `message` answers it, else 0. */
+static long answered_request(struct acp_server *server, const json_t *message)
+{
+    pthread_mutex_lock(&server->lock);
+    const long awaited = server->awaited_id;
+    const enum acp_response_match match =
+        acp_response_match(message, awaited, server->next_request_id);
+    pthread_mutex_unlock(&server->lock);
+    return match == ACP_RESPONSE_AWAITED || match == ACP_RESPONSE_COERCED ? awaited : 0;
+}
+
 static void take_line(struct acp_server *server, const char *line, size_t length)
 {
     size_t blank = strspn(line, " \t\r");
@@ -188,25 +298,44 @@ static void take_line(struct acp_server *server, const char *line, size_t length
     json_t *message = json_loadb(line, length, 0, NULL);
     if (!message) {
         reply_error(server, NULL, ACP_PARSE_ERROR, "parse error");
+        fail_awaited(server, "the client's answer could not be parsed as JSON", 0);
         return;
     }
     json_t *id = json_object_get(message, "id");
     json_t *method = json_object_get(message, "method");
     if (!json_is_object(message) || (method && !json_is_string(method)) ||
         (!method && !json_object_get(message, "result") && !json_object_get(message, "error"))) {
-        reply_error(server, id, ACP_INVALID_REQUEST, "invalid request");
+        /* An answer to the waiting request that carries neither member fails it, and gets no
+         * reply: an error under the client's own id could be read as an answer to one of its
+         * requests. */
+        const long answered =
+            json_is_object(message) && !method ? answered_request(server, message) : 0;
+        if (answered)
+            fail_awaited(server, "the client's answer has neither a result nor an error", answered);
+        else
+            reply_error(server, id, ACP_INVALID_REQUEST, "invalid request");
         json_decref(message);
         return;
     }
 
     int answer_cancel = 0;
+    enum acp_response_match match = ACP_RESPONSE_STALE;
+    long awaited = 0;
+    int duplicate = 0;
+    /* Held for the warning below: a taken response, and `id` inside it, is the dispatcher's to
+     * free once the lock is released. */
+    json_t *response_id = method ? NULL : json_incref(id);
     pthread_mutex_lock(&server->lock);
     if (!method) {
-        /* A response nothing awaits any longer, such as one to a cancelled request, is dropped. */
-        if (server->awaited_id && json_integer_value(id) == server->awaited_id &&
-            !server->response) {
-            server->response = message;
-            message = NULL;
+        /* A response to an abandoned request, such as a cancelled one, is dropped quietly. */
+        awaited = server->awaited_id;
+        match = acp_response_match(message, awaited, server->next_request_id);
+        if (match == ACP_RESPONSE_AWAITED || match == ACP_RESPONSE_COERCED) {
+            duplicate = server->response != NULL;
+            if (!duplicate) {
+                server->response = message;
+                message = NULL;
+            }
         }
     } else if (message_is(message, "session/cancel")) {
         /* A cancel sent as a request still cancels, and gets an answer. */
@@ -226,11 +355,28 @@ static void take_line(struct acp_server *server, const char *line, size_t length
     pthread_mutex_unlock(&server->lock);
     if (answer_cancel)
         reply(server, id, json_object());
+    /* Warned rather than dropped silently: a mismatched id would otherwise leave hax waiting. */
+    if (!method && (match == ACP_RESPONSE_COERCED || match == ACP_RESPONSE_UNKNOWN || duplicate)) {
+        char *shown =
+            json_dumps(response_id ? response_id : json_null(), JSON_ENCODE_ANY | JSON_COMPACT);
+        if (duplicate)
+            hax_warn("dropped a second response to request %ld", awaited);
+        else if (match == ACP_RESPONSE_COERCED)
+            hax_warn("took a response with id %s as the answer to request %ld; the client should "
+                     "echo the request's id unchanged",
+                     shown ? shown : "?", awaited);
+        else
+            hax_warn("dropped a response with id %s, which answers no request hax sent",
+                     shown ? shown : "?");
+        free(shown);
+    }
+    json_decref(response_id);
     json_decref(message);
 }
 
 static void *reader_main(void *user)
 {
+    on_reader_thread = 1;
     struct acp_server *server = user;
     struct buf line;
     buf_init(&line);
@@ -256,6 +402,7 @@ static void *reader_main(void *user)
             size_t piece = (size_t)((newline ? newline : end) - cursor);
             if (!skipping && line.len + piece > ACP_LINE_MAX_BYTES) {
                 reply_error(server, NULL, ACP_PARSE_ERROR, "message exceeds 16 MiB");
+                fail_awaited(server, "the client's answer exceeds 16 MiB", 0);
                 buf_free(&line);
                 skipping = 1;
             }
@@ -311,10 +458,25 @@ static struct acp_message *next_message(struct acp_server *server)
     return message;
 }
 
-/* Send a request to the client and wait for its result. NULL when it answers with an error, when
- * input ends, or when the running prompt is cancelled first. `params` is stolen. */
-static json_t *client_call(struct acp_server *server, const char *method, json_t *params)
+/* How a client_request wait ended. */
+enum client_outcome {
+    CLIENT_ANSWERED,
+    CLIENT_NOT_SENT, /* a cancel or the end of input came first; the client never saw it */
+    CLIENT_CANCELLED,
+    CLIENT_TIMED_OUT,
+    CLIENT_ENDED, /* input ended while hax waited */
+};
+
+/* Send a request to the client and wait for its whole response, result or error. NULL unless
+ * `outcome` (may be NULL) is CLIENT_ANSWERED; `timeout_ms` 0 waits without a deadline. A late
+ * answer is then dropped as stale. `params` is stolen. */
+static json_t *client_request(struct acp_server *server, const char *method, json_t *params,
+                              long timeout_ms, enum client_outcome *outcome)
 {
+    enum client_outcome ignored;
+    if (!outcome)
+        outcome = &ignored;
+    *outcome = CLIENT_NOT_SENT;
     pthread_mutex_lock(&server->lock);
     /* A cancel that already landed abandons the request before the client sees it. */
     if (cancel_abort_requested() || server->eof) {
@@ -333,13 +495,34 @@ static json_t *client_call(struct acp_server *server, const char *method, json_t
     send_message(server, message);
 
     pthread_mutex_lock(&server->lock);
-    while (!server->response && !server->eof && !cancel_abort_requested())
-        pthread_cond_wait(&server->changed, &server->lock);
+    const struct timespec deadline = realtime_deadline_ms(timeout_ms);
+    int expired = 0;
+    while (!server->response && !server->eof && !cancel_abort_requested() && !expired) {
+        if (timeout_ms > 0)
+            expired =
+                pthread_cond_timedwait(&server->changed, &server->lock, &deadline) == ETIMEDOUT;
+        else
+            pthread_cond_wait(&server->changed, &server->lock);
+    }
+    if (server->response)
+        *outcome = CLIENT_ANSWERED;
+    else if (expired)
+        *outcome = CLIENT_TIMED_OUT;
+    else if (server->eof)
+        *outcome = CLIENT_ENDED;
+    else
+        *outcome = CLIENT_CANCELLED;
     json_t *response = server->response;
     server->response = NULL;
     server->awaited_id = 0;
     pthread_mutex_unlock(&server->lock);
+    return response;
+}
 
+/* client_request's result alone: NULL also when the client answers with an error. */
+static json_t *client_call(struct acp_server *server, const char *method, json_t *params)
+{
+    json_t *response = client_request(server, method, params, 0, NULL);
     json_t *result = json_incref(json_object_get(response, "result"));
     json_decref(response);
     return result;
@@ -366,16 +549,21 @@ static void session_destroy(struct acp_session *session)
         free(grant->tool);
         free(grant);
     }
+    for (size_t i = 0; i < session->n_host_tools; i++)
+        free(session->host_tools[i]);
+    free(session->host_tools);
     free(session->id);
     free(session->cwd);
     free(session);
 }
 
 /* Build a session in `cwd`, resuming the file at `resume_path` when non-NULL. `id` names a
- * resumed session; a fresh one takes its session file's id. Returns NULL with an owned message in
- * `error`. */
+ * resumed session; a fresh one takes its session file's id. `host_tools` are advertised beside,
+ * or in place of, the built-ins. Returns NULL with an owned message in `error`. */
 static struct acp_session *session_open(struct acp_server *server, const char *cwd,
-                                        const char *resume_path, const char *id, char **error)
+                                        const char *resume_path, const char *id,
+                                        const struct tool_def *host_tools, size_t n_host_tools,
+                                        char **error)
 {
     struct provider *provider = server->provider;
     if (chdir(cwd) != 0) {
@@ -391,6 +579,16 @@ static struct acp_session *session_open(struct acp_server *server, const char *c
         *error =
             xasprintf("no model selected for provider '%s'", provider->name ? provider->name : "?");
         goto fail;
+    }
+    /* Before the transcript opens, so its header lists what the model is offered. */
+    if (n_host_tools)
+        session->host_tools = xcalloc(n_host_tools, sizeof(*session->host_tools));
+    for (size_t i = 0; i < n_host_tools; i++) {
+        if (agent_session_add_tool(&session->agent, &host_tools[i]) != 0) {
+            *error = xasprintf("cannot add tool %s to a session without tools", host_tools[i].name);
+            goto fail;
+        }
+        session->host_tools[session->n_host_tools++] = xstrdup(host_tools[i].name);
     }
 
     struct session_loaded loaded = {0};
@@ -539,25 +737,88 @@ static struct item synthetic_result(const struct item *call, const char *output,
     return result;
 }
 
+static int is_host_tool(const struct acp_session *session, const char *name)
+{
+    for (size_t i = 0; name && i < session->n_host_tools; i++)
+        if (strcmp(session->host_tools[i], name) == 0)
+            return 1;
+    return 0;
+}
+
+/* Hand `call` to the client, which defined the tool and decides whether it runs. A cancel or the
+ * end of input before the answer leaves the call unrun. */
+static struct item host_tool_run(struct acp_server *server, const struct item *call, int *failed)
+{
+    struct acp_session *session = server->active;
+    const char *raw = call->tool_arguments_json;
+    json_t *arguments = raw && *raw ? json_loads(raw, 0, NULL) : json_object();
+    if (!json_is_object(arguments)) {
+        json_decref(arguments);
+        *failed = 1;
+        return synthetic_result(call, "error: the arguments are not a JSON object",
+                                ITEM_ORIGIN_NONE);
+    }
+
+    send_update(server, session->id, acp_tool_call_update(call->call_id, "in_progress", NULL));
+    json_t *params = json_pack("{s:o, s:o, s:o, s:o}", "sessionId", acp_text(session->id),
+                               "toolCallId", acp_text(call->call_id), "name",
+                               acp_text(call->tool_name), "arguments", arguments);
+    enum client_outcome outcome;
+    json_t *response = client_request(server, "_hax/tool_call", params,
+                                      config_duration_ms("acp.tool_timeout"), &outcome);
+    /* A client that saw the call may still be running it; say it no longer has to. */
+    if (outcome == CLIENT_TIMED_OUT || outcome == CLIENT_CANCELLED)
+        send_message(server,
+                     json_pack("{s:s, s:{s:o, s:o, s:s}}", "method", "_hax/tool_call_abandoned",
+                               "params", "sessionId", acp_text(session->id), "toolCallId",
+                               acp_text(call->call_id), "reason",
+                               outcome == CLIENT_TIMED_OUT ? "timeout" : "cancelled"));
+    if (outcome == CLIENT_TIMED_OUT) {
+        /* The call ran as far as hax can tell, so the model reads a failure, not a skip. */
+        *failed = 1;
+        const char *limit = config_str("acp.tool_timeout");
+        hax_warn("the client did not answer %s within %s; failing the call", call->tool_name,
+                 limit);
+        char *output = xasprintf("error: the client did not answer within %s", limit);
+        struct item result = agent_tool_result_make(call, output, NULL);
+        free(output);
+        return result;
+    }
+    if (!response) {
+        *failed = 1;
+        return synthetic_result(call, INTERRUPT_MARKER, ITEM_ORIGIN_SKIPPED);
+    }
+    char *output = acp_host_tool_output(response, failed);
+    json_decref(response);
+    /* Unlike a built-in, the client's text arrives uncapped. */
+    char *capped = output_cap_clip(output, output_cap_bytes());
+    free(output);
+    struct item result = agent_tool_result_make(call, capped, NULL);
+    free(capped);
+    return result;
+}
+
 static struct item acp_tool_run(const struct item *call, enum agent_loop_tool_action action,
                                 int image_input, void *user)
 {
     struct acp_server *server = user;
     struct acp_session *session = server->active;
     struct item result;
-    int denied = 0;
+    int failed = 0;
 
     if (action == AGENT_LOOP_TOOL_REFUSE) {
         result = synthetic_result(call, REFUSED_RESULT, ITEM_ORIGIN_REFUSED);
     } else if (action == AGENT_LOOP_TOOL_SKIP) {
         result = synthetic_result(call, INTERRUPT_MARKER, ITEM_ORIGIN_SKIPPED);
+    } else if (is_host_tool(session, call->tool_name)) {
+        result = host_tool_run(server, call, &failed);
     } else if (!permitted(server, call) || cancel_abort_requested()) {
         /* A cancel during the question leaves the call unrun, not refused, whatever the answer. */
         if (cancel_abort_requested()) {
             result = synthetic_result(call, INTERRUPT_MARKER, ITEM_ORIGIN_SKIPPED);
         } else {
             result = synthetic_result(call, DENIED_RESULT, ITEM_ORIGIN_NONE);
-            denied = 1;
+            failed = 1;
         }
     } else {
         send_update(server, session->id, acp_tool_call_update(call->call_id, "in_progress", NULL));
@@ -573,7 +834,7 @@ static struct item acp_tool_run(const struct item *call, enum agent_loop_tool_ac
         agent_tool_call_destroy(&prepared);
     }
 
-    const char *status = denied || acp_result_failed(&result) ? "failed" : "completed";
+    const char *status = failed || acp_result_failed(&result) ? "failed" : "completed";
     send_update(server, session->id, acp_tool_call_update(call->call_id, status, &result));
     return result;
 }
@@ -607,10 +868,10 @@ static int acp_compact(enum compact_reason reason, void *user)
 
 static void handle_initialize(struct acp_server *server, json_t *id)
 {
-    json_t *capabilities =
-        json_pack("{s:b, s:{s:b, s:b, s:b}, s:{s:b, s:b}}", "loadSession", server->recording,
-                  "promptCapabilities", "image", 0, "audio", 0, "embeddedContext", 0,
-                  "mcpCapabilities", "http", 0, "sse", 0);
+    json_t *capabilities = json_pack(
+        "{s:b, s:{s:b, s:b, s:b}, s:{s:b, s:b}, s:{s:{s:b}}}", "loadSession", server->recording,
+        "promptCapabilities", "image", 0, "audio", 0, "embeddedContext", 0, "mcpCapabilities",
+        "http", 0, "sse", 0, "_meta", "hax", "hostTools", 1);
     json_t *result = json_pack("{s:i, s:o, s:{s:s, s:s}, s:[]}", "protocolVersion",
                                ACP_PROTOCOL_VERSION, "agentCapabilities", capabilities, "agentInfo",
                                "name", "hax", "version", HAX_VERSION, "authMethods");
@@ -640,8 +901,16 @@ static void handle_new(struct acp_server *server, json_t *id, const json_t *para
     }
     note_mcp_servers(params);
 
+    struct tool_def *tools;
+    size_t n_tools;
     char *error = NULL;
-    struct acp_session *session = session_open(server, cwd, NULL, NULL, &error);
+    if (acp_host_tools_parse(params, &tools, &n_tools, &error) != 0) {
+        reply_error(server, id, ACP_INVALID_PARAMS, error);
+        free(error);
+        return;
+    }
+    struct acp_session *session = session_open(server, cwd, NULL, NULL, tools, n_tools, &error);
+    acp_host_tools_free(tools, n_tools);
     if (!session) {
         reply_error(server, id, ACP_INTERNAL_ERROR, error);
         free(error);
@@ -662,6 +931,16 @@ static void handle_load(struct acp_server *server, json_t *id, const json_t *par
     }
     note_mcp_servers(params);
 
+    struct tool_def *tools;
+    size_t n_tools;
+    char *error = NULL;
+    if (acp_host_tools_parse(params, &tools, &n_tools, &error) != 0) {
+        reply_error(server, id, ACP_INVALID_PARAMS, error);
+        free(error);
+        return;
+    }
+
+    /* A session already open keeps the tools it was opened with. */
     struct acp_session *session = find_session(server, session_id);
     if (!session) {
         /* Session files are bucketed by the physical directory, which a symlinked cwd hides. */
@@ -673,15 +952,14 @@ static void handle_load(struct acp_server *server, json_t *id, const json_t *par
             char *message = xasprintf("no session %s in %s", session_id, cwd);
             reply_error(server, id, ACP_NOT_FOUND, message);
             free(message);
-            return;
+            goto done;
         }
-        char *error = NULL;
-        session = session_open(server, cwd, path, session_id, &error);
+        session = session_open(server, cwd, path, session_id, tools, n_tools, &error);
         free(path);
         if (!session) {
             reply_error(server, id, ACP_INTERNAL_ERROR, error);
             free(error);
-            return;
+            goto done;
         }
     }
 
@@ -692,6 +970,8 @@ static void handle_load(struct acp_server *server, json_t *id, const json_t *par
     json_array_foreach(updates, i, update) send_update(server, session->id, json_incref(update));
     json_decref(updates);
     reply(server, id, json_object());
+done:
+    acp_host_tools_free(tools, n_tools);
 }
 
 /* Report window use and the session's cumulative spend, when the window is known. */
@@ -860,15 +1140,22 @@ int acp_serve(struct provider *provider, const struct hax_opts *options, int in_
     acp_echo_init(&server.message_echo);
     acp_echo_init(&server.thought_echo);
     pthread_mutex_init(&server.out_lock, NULL);
+    pthread_cond_init(&server.out_changed, NULL);
     pthread_mutex_init(&server.lock, NULL);
     pthread_cond_init(&server.changed, NULL);
 
-    pthread_t reader;
     int result = 0;
+    pthread_t writer;
+    if (pthread_create(&writer, NULL, writer_main, &server) != 0) {
+        hax_err("cannot start the ACP writer thread");
+        result = 1;
+        goto destroy;
+    }
+    pthread_t reader;
     if (pthread_create(&reader, NULL, reader_main, &server) != 0) {
         hax_err("cannot start the ACP reader thread");
         result = 1;
-        goto cleanup;
+        goto stop_writer;
     }
 
     struct acp_message *message;
@@ -897,11 +1184,19 @@ int acp_serve(struct provider *provider, const struct hax_opts *options, int in_
     }
     json_decref(server.response);
 
-cleanup:
+stop_writer:
+    /* Everything queued goes out before hax exits. */
+    pthread_mutex_lock(&server.out_lock);
+    server.out_closing = 1;
+    pthread_cond_broadcast(&server.out_changed);
+    pthread_mutex_unlock(&server.out_lock);
+    pthread_join(writer, NULL);
+destroy:
     acp_echo_free(&server.message_echo);
     acp_echo_free(&server.thought_echo);
     pthread_cond_destroy(&server.changed);
     pthread_mutex_destroy(&server.lock);
+    pthread_cond_destroy(&server.out_changed);
     pthread_mutex_destroy(&server.out_lock);
     return result;
 }

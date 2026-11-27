@@ -8,6 +8,10 @@
 #include "transport/http.h"
 #include "transport/sse.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Drives one provider stream() call to completion: http_sse_post attempts under the shared
  * retry policy, EV_RETRY between attempts, and a terminal EV_ERROR or a finalized parser.
  * Adapters supply the request bytes and the protocol hooks; the loop stays protocol-agnostic. */
@@ -45,5 +49,9 @@ struct stream_retry {
 /* Returns the last attempt's http_sse_post result. Emits nothing after cancellation. */
 int stream_retry_run(const struct stream_retry *request, stream_cb callback, void *callback_user,
                      http_tick_cb tick, void *tick_user);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_STREAM_RETRY_H */

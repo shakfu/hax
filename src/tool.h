@@ -4,6 +4,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Synchronous display-only sink; bytes are borrowed for the callback. */
 typedef void (*tool_display_fn)(const char *bytes, size_t n, void *data);
 
@@ -85,5 +89,9 @@ extern const struct tool TOOL_EDIT;
 extern const struct tool TOOL_WRITE;
 extern const struct tool TOOL_BASH;
 extern const struct tool TOOL_TASK_WAIT;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TOOL_H */

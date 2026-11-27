@@ -278,6 +278,42 @@ hax_exe = executable('hax',
     install: true,
 )
 
+# The ACP host example is C++. Building it wherever a C++ compiler exists keeps it from rotting
+# unseen; tests/meson.build runs it against the mock provider.
+have_cpp = add_languages('cpp', required: false, native: false)
+if have_cpp
+    acp_host_example = executable('acp_host',
+        'examples/acp_host.cpp',
+        dependencies: [jansson],
+        override_options: ['cpp_std=c++17'],
+    )
+endif
+
+# C++ hosts that link the shared libhax and run agents concurrently: parallel_agents stresses the
+# multi-agent design under whichever sanitizer this build uses, and decompose puts it to work.
+# C++23 so they may include <atomic> after hax's headers: before C++23, libc++ rejects <atomic>
+# after the <stdatomic.h> that system/cancel.h includes.
+have_cpp_hosts = have_cpp and get_option('embed')
+if have_cpp_hosts
+    have_cpp_hosts = meson.get_compiler('cpp').has_argument('-std=c++23')
+endif
+cpp_hosts = {}
+if have_cpp_hosts
+    foreach name : ['parallel_agents', 'decompose']
+        cpp_hosts += {name: executable(name,
+            'examples' / name + '.cpp',
+            cpp_args: ['-D_DARWIN_C_SOURCE', '-iquote', meson.project_source_root() / 'src'],
+            link_with: hax_shared,
+            dependencies: [
+                jansson,
+                libcurl.partial_dependency(compile_args: true, includes: true),
+                threads,
+            ],
+            override_options: ['cpp_std=c++23'],
+        )}
+    endforeach
+endif
+
 python = import('python').find_installation()
 
 # Man pages rendered from docs/ by scripts/md2man.py, which owns the page list and checks this

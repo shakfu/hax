@@ -7,6 +7,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct http_auth_source; /* providers/http_provider.h */
 
 /* Provider definitions.
@@ -146,5 +150,9 @@ struct provider *provider_construct(const struct provider_def *def);
  * a construct override, else the generic data-driven check. `out` need not be initialized. */
 void provider_prepare_availability(const struct provider_def *def,
                                    struct provider_availability *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_REGISTRY_H */

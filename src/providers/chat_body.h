@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Request-body construction for the OpenAI Chat Completions dialect, and the reasoning and
  * cache-marker request shapes that vary across its compatible backends. */
 
@@ -73,5 +77,9 @@ struct wire_body_opts; /* wire.h */
  * layer merges last. The caller must json_decref the result. */
 json_t *chat_build_body(const struct context *context, const char *provider_id, const char *model,
                         const struct wire_body_opts *opts);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_CHAT_BODY_H */

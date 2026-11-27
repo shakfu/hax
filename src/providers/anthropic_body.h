@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Request-body construction for the Anthropic Messages dialect. */
 
 /* Adaptive thinking uses output_config.effort; budget thinking uses a token count. */
@@ -39,5 +43,9 @@ struct wire_body_opts; /* wire.h */
  * layer merges last. The caller must json_decref the result. */
 json_t *anthropic_build_body(const struct context *context, const char *provider_id,
                              const char *model, const struct wire_body_opts *opts);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_ANTHROPIC_BODY_H */

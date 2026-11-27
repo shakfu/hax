@@ -383,20 +383,6 @@ void footer_hide(struct footer *footer)
     pthread_mutex_unlock(&footer->mutex);
 }
 
-/* pthread_cond_timedwait portably uses CLOCK_REALTIME; macOS cannot select CLOCK_MONOTONIC. */
-static struct timespec deadline_after_ms(long wait_ms)
-{
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += wait_ms / 1000;
-    deadline.tv_nsec += (wait_ms % 1000) * 1000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec += deadline.tv_nsec / 1000000000L;
-        deadline.tv_nsec %= 1000000000L;
-    }
-    return deadline;
-}
-
 static void *footer_thread(void *arg)
 {
     struct footer *footer = arg;
@@ -422,14 +408,14 @@ static void *footer_thread(void *arg)
                 show_locked(footer, FOOTER_STATUS, 0);
                 continue;
             }
-            struct timespec show_deadline = deadline_after_ms(wait_ms);
+            struct timespec show_deadline = realtime_deadline_ms(wait_ms);
             pthread_cond_timedwait(&footer->wake, &footer->mutex, &show_deadline);
             continue;
         }
 
         spinner_label_settle(&footer->label, monotonic_ms());
         draw_frame_locked(footer);
-        struct timespec deadline = deadline_after_ms(SPINNER_FRAME_INTERVAL_MS);
+        struct timespec deadline = realtime_deadline_ms(SPINNER_FRAME_INTERVAL_MS);
         pthread_cond_timedwait(&footer->wake, &footer->mutex, &deadline);
     }
     pthread_mutex_unlock(&footer->mutex);

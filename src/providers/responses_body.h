@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Request-body construction for the OpenAI Responses dialect. */
 
 /* Translate transcript items into a newly allocated Responses API input array. Encrypted reasoning
@@ -28,5 +32,9 @@ struct wire_body_opts; /* wire.h */
  * own auth-, routing-, and vendor-specific fields, and must json_decref the result. */
 json_t *responses_build_body(const struct context *context, const char *provider, const char *model,
                              const struct wire_body_opts *opts);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_RESPONSES_BODY_H */

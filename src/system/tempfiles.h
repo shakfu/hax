@@ -2,6 +2,10 @@
 #ifndef HAX_SYSTEM_TEMPFILES_H
 #define HAX_SYSTEM_TEMPFILES_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Process-wide registry for temporary files referenced by conversation items. Files are removed
  * explicitly by tempfiles_cleanup() or by an atexit handler registered on first creation. Calls
  * are safe from concurrent threads, except tempfiles_set_atexit_enabled(). */
@@ -25,5 +29,9 @@ void tempfiles_cleanup(void);
  * responsibility. An embedder that may be unloaded calls this before creating any temporary file:
  * an atexit handler outliving its module runs against unmapped code. */
 void tempfiles_set_atexit_enabled(int enabled);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_TEMPFILES_H */

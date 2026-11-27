@@ -7,6 +7,10 @@
 #include "buf.h"
 #include "terminal/picker.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define PICKER_MARKER_CELLS               2
 #define PICKER_CURRENT_TAG_CELLS          11
 #define PICKER_DETAIL_SEPARATOR_CELLS     2
@@ -53,5 +57,9 @@ void picker_core_select_last(struct picker_core *core);
 
 /* Selects and centers `item_index` if it is present in `matches`. */
 void picker_core_select_item(struct picker_core *core, size_t item_index);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_PICKER_CORE_H */

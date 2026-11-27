@@ -427,8 +427,11 @@ static void test_session_add_tool_appends(void)
     struct tool_param params[] = {
         {.name = "order_id", .type = "string", .description = "which order", .required = 1},
     };
-    struct tool_def def = {
-        .name = "lookup_order", .description = "look one up", .params = params, .n_params = 1};
+    struct tool_def def = {.name = "lookup_order",
+                           .description = "look one up",
+                           .params = params,
+                           .n_params = 1,
+                           .schema_json = "{\"type\":\"object\"}"};
     EXPECT(agent_session_add_tool(&s, &def) == 0);
     EXPECT(s.n_tools == builtins + 1);
 
@@ -442,6 +445,8 @@ static void test_session_add_tool_appends(void)
     EXPECT_STR_EQ(s.tools[builtins].params[0].type, "string");
     EXPECT(s.tools[builtins].params[0].required == 1);
     EXPECT(s.tools[builtins].params[0].item_type == NULL);
+    EXPECT(s.tools[builtins].schema_json != def.schema_json);
+    EXPECT_STR_EQ(s.tools[builtins].schema_json, "{\"type\":\"object\"}");
 
     struct context ctx = agent_session_context(&s);
     EXPECT(ctx.n_tools == builtins + 1);

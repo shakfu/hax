@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Capture the clipboard for insertion at the REPL cursor. A valid image is persisted to a tracked
  * temporary file and returned as a "[pasted image: <path>] " marker; otherwise clipboard text is
  * returned. The caller owns the returned string. Return NULL when neither form is available. */
@@ -16,5 +20,9 @@ size_t paste_image_normalize_text(char *text, size_t text_len);
  * extensions become pasted-image markers without accessing the filesystem. Return an allocated
  * replacement, or NULL when `text` is not a non-empty URI list. */
 char *paste_image_uris_to_paths(const char *text);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PASTE_IMAGE_H */

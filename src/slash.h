@@ -2,6 +2,10 @@
 #ifndef HAX_SLASH_H
 #define HAX_SLASH_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct agent_state;
 
 enum slash_result {
@@ -25,5 +29,9 @@ char *slash_hint(const char *line);
  * `state`, which must outlive it. */
 struct input_completer;
 void slash_completer_init(struct input_completer *completer, struct agent_state *state);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SLASH_H */

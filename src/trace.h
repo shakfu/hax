@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Wire-level diagnostics. trace_init resolves HAX_TRACE and truncates its file before
  * background HTTP jobs start. Output is line-buffered so `tail -f` works. Until trace_init,
  * and when HAX_TRACE is unset, every other entry point is a no-op. */
@@ -39,5 +43,9 @@ void trace_response_status(long status, const char *error_body);
 
 /* Emit one parsed SSE event (event name + pretty-printed data payload). */
 void trace_sse_event(const char *event_name, const char *data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TRACE_H */

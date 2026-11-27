@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct buf;
 
 #define BASH_OUTPUT_DRAIN_LIMIT (16L * 1024 * 1024)
@@ -64,5 +68,9 @@ int bash_read_tail_slice(int fd, off_t range_start, size_t range_bytes, size_t c
                          size_t *kept_lines_out);
 
 void bash_output_destroy(struct bash_output *output);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TOOLS_BASH_OUTPUT_H */

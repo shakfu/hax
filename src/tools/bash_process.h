@@ -6,6 +6,10 @@
 
 #include "tool.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Run the command and return owned model-facing output, streaming display bytes through `ctx`
  * (NULL disables display). When background is set, the command detaches into a task after the
  * configured yield window instead of the timeout. `name` (pre-validated by task_name_error, or
@@ -29,5 +33,9 @@ int bash_process_exit_seen(pid_t pid, int *exit_seen);
 void bash_shell_pgid_publish(pid_t pid);
 void bash_shell_pgid_retract(pid_t pid);
 void bash_shell_pgids_kill(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TOOLS_BASH_PROCESS_H */

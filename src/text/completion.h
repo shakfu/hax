@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* The words a word being completed may become, owned and in insertion order. Zero-initialize. */
 struct completion {
     char **candidates;
@@ -32,5 +36,9 @@ char *completion_extend(const struct completion *completion, const char *word);
 void completion_to_parts(struct completion *completion, const char *word);
 
 void completion_free(struct completion *completion);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_COMPLETION_H */

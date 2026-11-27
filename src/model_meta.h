@@ -5,6 +5,10 @@
 #include "effort.h"
 #include "transport/http.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct catalog_entry;
 struct model_info;
 struct provider;
@@ -92,5 +96,9 @@ int model_meta_image_input(const struct provider *provider, const char *model);
  * when metadata settled the set and 0 when `out` is the provider's full ladder, offered
  * unverified. */
 int model_meta_efforts(const struct provider *provider, const char *model, struct effort_set *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_MODEL_META_H */

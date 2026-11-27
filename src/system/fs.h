@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Create `path` and missing parent directories with mode 0755, subject to the process umask.
  * Existing directories and symlinks to directories are accepted. NULL and empty paths are no-ops.
  * Returns 0 on success and -1 with errno set on failure. */
@@ -60,5 +64,9 @@ char *fs_read_file(const char *path, size_t *out_len);
  * optional outputs report the returned length and whether more data exists. The allocation grows
  * with the bytes read rather than cap. Returns NULL with errno set on failure. */
 char *fs_read_file_capped(const char *path, size_t cap, size_t *out_len, int *out_truncated);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_FS_H */

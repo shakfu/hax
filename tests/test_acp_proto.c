@@ -383,6 +383,128 @@ static void test_history_replays_a_cut_reply_as_it_streamed(void)
     json_decref(updates);
 }
 
+static void test_host_tools_parse(void)
+{
+    struct tool_def *defs;
+    size_t n;
+    char *error;
+
+    json_t *none = parse("{\"cwd\":\"/w\"}");
+    EXPECT(acp_host_tools_parse(none, &defs, &n, &error) == 0);
+    EXPECT(n == 0 && defs == NULL && error == NULL);
+    json_decref(none);
+
+    json_t *two = parse("{\"_meta\":{\"hax\":{\"tools\":["
+                        "{\"name\":\"lookup_order\",\"description\":\"Find one.\","
+                        "\"inputSchema\":{\"type\":\"object\",\"required\":[\"id\"]}},"
+                        "{\"name\":\"bash\",\"inputSchema\":{\"type\":\"object\"}}]}}}");
+    EXPECT(acp_host_tools_parse(two, &defs, &n, &error) == 0);
+    EXPECT(n == 2);
+    if (n == 2) {
+        EXPECT_STR_EQ(defs[0].name, "lookup_order");
+        EXPECT_STR_EQ(defs[0].description, "Find one.");
+        EXPECT_STR_EQ(defs[0].schema_json, "{\"type\":\"object\",\"required\":[\"id\"]}");
+        EXPECT_STR_EQ(defs[1].name, "bash");
+        EXPECT(defs[1].description == NULL);
+        EXPECT(defs[1].n_params == 0);
+    }
+    acp_host_tools_free(defs, n);
+    json_decref(two);
+
+    static const struct {
+        const char *params;
+        const char *error;
+    } bad[] = {
+        {"{\"_meta\":{\"hax\":{\"tools\":{}}}}", "_meta.hax.tools must be an array"},
+        {"{\"_meta\":{\"hax\":{\"tools\":[{\"inputSchema\":{\"type\":\"object\"}}]}}}",
+         "_meta.hax.tools[0]: name must be 1-64 letters, digits, '_' or '-'"},
+        {"{\"_meta\":{\"hax\":{\"tools\":[{\"name\":\"a b\","
+         "\"inputSchema\":{\"type\":\"object\"}}]}}}",
+         "_meta.hax.tools[0]: name must be 1-64 letters, digits, '_' or '-'"},
+        {"{\"_meta\":{\"hax\":{\"tools\":[{\"name\":\"t\",\"description\":1,"
+         "\"inputSchema\":{\"type\":\"object\"}}]}}}",
+         "tool t: description must be a string"},
+        {"{\"_meta\":{\"hax\":{\"tools\":[{\"name\":\"t\"}]}}}",
+         "tool t: inputSchema must be an object with \"type\": \"object\""},
+        {"{\"_meta\":{\"hax\":{\"tools\":[{\"name\":\"t\",\"inputSchema\":{\"type\":\"array\"}}]}}"
+         "}",
+         "tool t: inputSchema must be an object with \"type\": \"object\""},
+        {"{\"_meta\":{\"hax\":{\"tools\":[{\"name\":\"t\",\"inputSchema\":{\"type\":\"object\"}},"
+         "{\"name\":\"t\",\"inputSchema\":{\"type\":\"object\"}}]}}}",
+         "tool t is listed twice"},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        json_t *params = parse(bad[i].params);
+        EXPECT(acp_host_tools_parse(params, &defs, &n, &error) == -1);
+        EXPECT(n == 0 && defs == NULL);
+        EXPECT_STR_EQ(error, bad[i].error);
+        free(error);
+        json_decref(params);
+    }
+}
+
+static void test_host_tool_output(void)
+{
+    static const struct {
+        const char *response;
+        const char *output;
+        int failed;
+    } cases[] = {
+        {"{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"a\"},"
+         "{\"type\":\"image\",\"data\":\"x\"},{\"type\":\"text\",\"text\":\"b\"}]}}",
+         "a\nb", 0},
+        {"{\"result\":{}}", "", 0},
+        {"{\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"no such "
+         "order\"}]}}",
+         "error: no such order", 1},
+        {"{\"error\":{\"code\":-32601,\"message\":\"unknown tool\"}}", "error: unknown tool", 1},
+        {"{\"error\":{\"code\":-32603}}", "error: the host tool failed", 1},
+        {"{\"result\":5}", "error: the host tool failed", 1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        json_t *response = parse(cases[i].response);
+        int failed = -1;
+        char *output = acp_host_tool_output(response, &failed);
+        EXPECT_STR_EQ(output, cases[i].output);
+        EXPECT(failed == cases[i].failed);
+        free(output);
+        json_decref(response);
+    }
+}
+
+static void test_response_match(void)
+{
+    static const struct {
+        const char *response;
+        long awaited;
+        enum acp_response_match match;
+    } cases[] = {
+        {"{\"id\":3,\"result\":{}}", 3, ACP_RESPONSE_AWAITED},
+        /* The same number of another type still answers the one outstanding request. */
+        {"{\"id\":\"3\",\"result\":{}}", 3, ACP_RESPONSE_COERCED},
+        {"{\"id\":3.0,\"result\":{}}", 3, ACP_RESPONSE_COERCED},
+        /* JSON-RPC's answer when the client could not parse the request at all. */
+        {"{\"id\":null,\"error\":{\"code\":-32700}}", 3, ACP_RESPONSE_COERCED},
+        {"{\"id\":null,\"error\":{\"code\":-32700}}", 0, ACP_RESPONSE_UNKNOWN},
+        {"{\"id\":null,\"result\":{}}", 3, ACP_RESPONSE_UNKNOWN},
+        {"{\"result\":{}}", 3, ACP_RESPONSE_UNKNOWN},
+        /* An earlier request's late answer, after a cancel or a timeout. */
+        {"{\"id\":2,\"result\":{}}", 3, ACP_RESPONSE_STALE},
+        {"{\"id\":2,\"result\":{}}", 0, ACP_RESPONSE_STALE},
+        {"{\"id\":9,\"result\":{}}", 3, ACP_RESPONSE_UNKNOWN},
+        {"{\"id\":0,\"result\":{}}", 0, ACP_RESPONSE_UNKNOWN},
+        {"{\"id\":\"3x\",\"result\":{}}", 3, ACP_RESPONSE_UNKNOWN},
+        {"{\"id\":\"\",\"result\":{}}", 3, ACP_RESPONSE_UNKNOWN},
+        {"{\"id\":3.5,\"result\":{}}", 3, ACP_RESPONSE_UNKNOWN},
+        {"{\"id\":[3],\"result\":{}}", 3, ACP_RESPONSE_UNKNOWN},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        json_t *response = parse(cases[i].response);
+        EXPECT(acp_response_match(response, cases[i].awaited, 3) == cases[i].match);
+        json_decref(response);
+    }
+}
+
 int main(void)
 {
     test_tool_kinds_and_permission();
@@ -397,5 +519,8 @@ int main(void)
     test_text_survives_malformed_utf8();
     test_history_replays_visible_conversation();
     test_history_replays_a_cut_reply_as_it_streamed();
+    test_host_tools_parse();
+    test_host_tool_output();
+    test_response_match();
     T_REPORT();
 }

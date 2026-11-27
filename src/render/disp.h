@@ -9,6 +9,10 @@
 #include "terminal/sgr.h"
 #include "text/utf8.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Block-aware output for separating visual blocks with exactly one blank line.
  *
  * Content writes defer trailing line endings so disp_block_separator() can collapse them to the
@@ -92,5 +96,9 @@ __attribute__((format(printf, 2, 3), nonnull(2))) void disp_printf(struct disp *
 
 /* End the previous block with exactly one blank line, collapsing pending line endings. */
 void disp_block_separator(struct disp *disp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_DISP_H */

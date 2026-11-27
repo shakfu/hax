@@ -7,6 +7,10 @@
 
 #include "tool.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Process-local registry of background tasks: shell commands that outlived their foreground
  * window and keep running detached from the tool call that started them. Each task owns the
  * child's process tree, the read end of its output pipe, and a spool file that accumulates the
@@ -102,5 +106,9 @@ size_t task_running_count(void);
  * numbering restarts at t1. Idempotent. Called at process exit and whenever the conversation
  * that started the tasks is left, so tasks outlive neither. */
 void task_registry_shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TOOLS_TASK_REGISTRY_H */

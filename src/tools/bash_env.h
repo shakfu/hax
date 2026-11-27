@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* The provider selection a child process inherits. Owned by the agent whose subprocesses it
  * describes: two agents in one process resolve different models, and a shared copy would publish
  * whichever wrote last — or free the other's strings underneath it. */
@@ -23,5 +27,9 @@ void bash_env_selection_free(struct bash_env_selection *selection);
 /* Return a malloc'd environment vector whose entries remain borrowed — including `selection`'s,
  * which must outlive the vector. A NULL `selection` exports no provider selection. */
 char **bash_build_child_env(const struct bash_env_selection *selection);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TOOLS_BASH_ENV_H */

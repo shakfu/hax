@@ -2,6 +2,10 @@
 #ifndef HAX_AGENT_ENV_H
 #define HAX_AGENT_ENV_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Build the enabled model-facing context sections:
  *
  * - background-task and subagent operating guidance;
@@ -16,5 +20,9 @@
  * Global AGENTS.md precedes project files from repository root to cwd. Nearer project skills shadow
  * global skills. Without a Git root, project discovery is limited to cwd. */
 char *agent_env_build_suffix(const char *model);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_ENV_H */

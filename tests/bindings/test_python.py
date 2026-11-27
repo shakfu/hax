@@ -340,6 +340,28 @@ def test_structured_return_values_are_json() -> None:
         )
 
 
+def test_a_large_return_value_is_held_to_the_cap() -> None:
+    """A host tool's text is capped like hax's own tools: an eighth of the budget from its start,
+    the rest from its end."""
+    use_mock("python_tool.txt")
+    os.environ["HAX_TOOL_OUTPUT_CAP"] = "1k"  # read when hax initializes for this Agent
+    try:
+        with hax.Agent(provider="mock") as agent:
+
+            @agent.tool
+            def lookup_order(order_id):
+                return "\n".join(f"order line {i:04d}" for i in range(400))
+
+            agent.send("order 4417?")
+            outputs = [i["output"] for i in agent.items if i["kind"] == "tool_result"]
+    finally:
+        del os.environ["HAX_TOOL_OUTPUT_CAP"]
+    output = outputs[0] if outputs else ""
+    expect("[output truncated: kept " in output, f"the result carries the marker: {output[:80]!r}")
+    expect(output.startswith("order line 0000") and output.endswith("order line 0399"), "ends")
+    expect(len(output) < 1200, f"the result is near the 1 KiB cap (got {len(output)} bytes)")
+
+
 def test_cancel_from_another_thread_stops_the_turn() -> None:
     """The GIL is released for the loop, so a second thread can reach cancel() mid-stream."""
     use_mock("python_tool_cancel.txt")
@@ -912,6 +934,7 @@ test_host_exception_propagates_and_history_stays_paired()
 test_skipped_calls_carry_hax_markers()
 test_malformed_arguments_are_recoverable()
 test_structured_return_values_are_json()
+test_a_large_return_value_is_held_to_the_cap()
 test_cancel_from_another_thread_stops_the_turn()
 test_cancel_stops_only_the_targeted_agent()
 test_asyncio_runs_agents_concurrently()

@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Shared rendering for /usage reports, so every provider's report aligns the same way. */
 
 /* Label column width shared by window and value rows. */
@@ -30,5 +34,9 @@ void usage_window_print(const struct usage_window *window);
  * The value is printed as given; strip server text before formatting it in. */
 __attribute__((format(printf, 2, 3))) void usage_value_print(const char *label, const char *fmt,
                                                              ...);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_USAGE_RENDER_H */

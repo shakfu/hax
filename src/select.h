@@ -2,6 +2,10 @@
 #ifndef HAX_SELECT_H
 #define HAX_SELECT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct agent_state;
 struct provider;
 struct model_info;
@@ -56,5 +60,9 @@ char *model_desc_line(const struct model_info *model, const struct catalog_entry
 
 /* Return the first available provider in autoselect priority order, newly constructed, or NULL. */
 struct provider *provider_autoselect(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SELECT_H */

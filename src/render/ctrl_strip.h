@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Stateful sanitizer for untrusted terminal output. It removes 7-bit ECMA-48 escape sequences and
  * C0 controls other than HT and LF. DEL is also removed; bytes at or above 0x80 are preserved to
  * avoid corrupting UTF-8. LF, CAN, and SUB cancel an incomplete escape sequence.
@@ -35,5 +39,9 @@ char *ctrl_strip_dup(const char *input);
 /* ctrl_strip_dup for single-line contexts: HT and LF become spaces, so an untrusted value
  * cannot break the line it is embedded in. Caller frees the copy. */
 char *ctrl_strip_line_dup(const char *input);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_CTRL_STRIP_H */

@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Return the encoded length for an ASCII byte or a possible UTF-8 leader. Malformed leaders and
  * continuation bytes are treated as one-byte units. */
 size_t utf8_sequence_length(unsigned char byte);
@@ -56,5 +60,9 @@ int utf8_cell_stream_feed(struct utf8_cell_stream *stream, unsigned char byte, c
 /* Emit an incomplete tail as one cell per byte. Returns zero when nothing is pending. */
 int utf8_cell_stream_flush(struct utf8_cell_stream *stream, const char **bytes, size_t *length,
                            int *cells);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_UTF8_H */

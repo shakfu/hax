@@ -22,6 +22,25 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   It is a separate frontend over the same agent loop, tools, and session files, so the REPL and
   `-p` are unchanged; a wrapper that translated `--json` output could not take part in permission
   requests or cancellation. See [docs/usage.md](docs/usage.md#acp-mode).
+- An ACP client can define its own tools in `_meta.hax.tools`, and the model calls them through a
+  `_hax/tool_call` request to the client. A tool with a built-in's name replaces it. A host in any
+  language can now give the model tools backed by its own state without linking `libhax`. The
+  standard ACP route, MCP servers, would need an MCP client in hax. The tool and result shapes
+  follow MCP's, so one could reuse them later. [examples/acp_host.cpp](examples/acp_host.cpp) is
+  a minimal C++ host. See [docs/usage.md](docs/usage.md#acp-mode).
+
+  A call the client leaves unanswered for `acp.tool_timeout` (default 10 minutes) fails, and the
+  model is told why; while hax waits, the client's other requests queue behind it. An answer
+  whose id is the right number of the wrong type, or null on an error, is taken with a warning
+  on stderr, and any other mismatch is dropped with one, so a client's id bug shows up instead of
+  hanging the call. A line hax cannot parse, or an answer with neither `result` nor `error`,
+  fails the waiting call at once. When hax gives up on
+  a call the client received, it sends `_hax/tool_call_abandoned`, so the client can stop the
+  work. The client's text is truncated at `tool_output_cap`, like hax's own tools. hax keeps
+  reading the client's messages while its own output waits to be read, so a client that falls
+  behind reading can no longer deadlock against it.
+- hax's headers declare C linkage under C++, so a C++ host includes them directly instead of
+  wrapping them in `extern "C"`. See [docs/embedding.md](docs/embedding.md#c-hosts).
 - `bindings/python/hermetic.py` withdraws hax's ambient context from an embedded agent.
   `Agent(system_prompt=...)` replaces only the base prompt, so a worker still carried the
   Environment section, the skills listing and any `AGENTS.md` above the working directory, and
@@ -108,7 +127,8 @@ notes (see [docs/releasing.md](docs/releasing.md)).
   derived from the signature — annotations pick JSON types, a default makes a parameter optional,
   the docstring's first paragraph is the description — and `agent.tools` reports the advertised
   list. A `**kwargs` function still shadows a built-in's dispatch without altering its published
-  arguments. See [bindings/python/README.md](bindings/python/README.md).
+  arguments. A host tool's return value is truncated at `tool_output_cap`, like hax's own tools.
+  See [bindings/python/README.md](bindings/python/README.md).
 - `hax_embed.h` and `AGENTS.md` no longer claim one embedded agent per process; several
   `agent_session`s run under one `hax_init()`, as [docs/embedding.md](docs/embedding.md) says.
 

@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Pure classification of a physical line prefix. An incomplete result may still carry a definite
  * block kind: for example, `* ` is already a bullet but could become a thematic break. */
 enum md_line_kind {
@@ -31,5 +35,9 @@ struct md_line_info {
 
 /* final resolves ambiguous prefixes against EOF instead of requesting more input. */
 struct md_line_info md_scan_line(const char *line, size_t length, int final);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_MARKDOWN_SCAN_H */

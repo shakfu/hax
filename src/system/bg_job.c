@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "xalloc.h"
+#include "system/clock.h"
 
 struct bg_job {
     pthread_t thread;
@@ -55,14 +56,7 @@ int bg_job_wait_ms(struct bg_job *job, long timeout_ms)
     if (!job)
         return 1;
 
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += timeout_ms / 1000;
-    deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec++;
-        deadline.tv_nsec -= 1000000000L;
-    }
+    struct timespec deadline = realtime_deadline_ms(timeout_ms);
 
     pthread_mutex_lock(&job->done_lock);
     /* Any nonzero result — timeout included — ends the wait; only 0 can be a spurious wakeup. */

@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Renderers map unified-diff line kinds to their own styles. Callers track whether the first hunk
  * has started; input is single-file, so that state never resets. */
 
@@ -20,5 +24,9 @@ enum diff_line_kind diff_line_classify(const char *line, size_t length, int in_h
 
 /* Return whether `line` is a unified-diff file header. Call only before the first hunk. */
 int diff_is_file_header(const char *line, size_t length);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_DIFF_COLOR_H */

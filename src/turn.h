@@ -7,6 +7,10 @@
 #include "buf.h"
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Pure state machine that assembles one provider stream into conversation items. */
 
 enum turn_state {
@@ -61,5 +65,9 @@ int turn_has_content(const struct turn *turn);
 
 /* Transfer the assembled item vector to the caller. `out_count` may be NULL. */
 struct item *turn_take_items(struct turn *turn, size_t *out_count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TURN_H */

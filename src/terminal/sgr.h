@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* A model of the SGR attributes a terminal has active, built from the CSI m sequences written to
  * it, so styling can be reopened after something else reset it. Zero-initialized is the default
  * style. */
@@ -31,5 +35,9 @@ void sgr_emit(const struct sgr_state *sgr, FILE *out);
 /* Apply one complete CSI sequence ending in 'm'. Codes the model does not know are ignored, and a
  * private-use prefix marks a sequence that is not SGR at all. */
 void sgr_apply(struct sgr_state *sgr, const char *sequence, size_t sequence_len);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_SGR_H */

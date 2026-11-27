@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Multi-line terminal editor with history, completion, and modal callback hooks.
  * Non-tty input uses canonical one-line reads without prompts or editing. */
 
@@ -90,5 +94,9 @@ void input_render_user_message_to(FILE *out, const char *text, size_t len, int d
 
 /* Return display_width() clamped to the current terminal width. */
 int input_display_cols(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_INPUT_H */

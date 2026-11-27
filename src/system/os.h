@@ -2,6 +2,10 @@
 #ifndef HAX_SYSTEM_OS_H
 #define HAX_SYSTEM_OS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Parse a freedesktop os-release file and return malloc'd PRETTY_NAME,
  * falling back to NAME + VERSION; return NULL if neither is available. */
 char *os_release_name(const char *path);
@@ -11,5 +15,9 @@ char *os_release_name_with_fallback(const char *primary_path, const char *fallba
 
 /* Return a malloc'd userland and kernel description for the Environment section. */
 char *os_description(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_OS_H */

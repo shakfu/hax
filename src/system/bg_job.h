@@ -2,6 +2,10 @@
 #ifndef HAX_SYSTEM_BG_JOB_H
 #define HAX_SYSTEM_BG_JOB_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct bg_job;
 
 typedef void (*bg_job_fn)(struct bg_job *job, void *arg);
@@ -27,5 +31,9 @@ int bg_job_wait_ms(struct bg_job *job, long timeout_ms);
 /* Wait for the worker, then free the job. A NULL job is allowed. Every successful spawn must be
  * joined exactly once, before any caller-owned state the worker may access is destroyed. */
 void bg_job_join(struct bg_job *job);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SYSTEM_BG_JOB_H */

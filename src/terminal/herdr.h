@@ -2,6 +2,10 @@
 #ifndef HAX_TERMINAL_HERDR_H
 #define HAX_TERMINAL_HERDR_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Agent state reports to herdr (https://herdr.dev), the terminal workspace manager. Each call runs
  * `$HERDR_BIN_PATH pane ...` detached and ignores its outcome. Calls are no-ops outside a herdr
  * pane: HERDR_ENV must be 1 and HERDR_PANE_ID, HERDR_BIN_PATH, and HERDR_SOCKET_PATH set. */
@@ -17,5 +21,9 @@ void herdr_report(enum herdr_state state, const char *session_id);
 
 /* Clear hax's state and resume command from the pane, on quit. */
 void herdr_release(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_HERDR_H */

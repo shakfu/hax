@@ -6,6 +6,10 @@
 
 #include "buf.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Return an owned copy of `url` with all trailing slashes removed. */
 char *url_trim_trailing_slashes(const char *url);
 
@@ -22,5 +26,9 @@ char *url_encode(const char *value);
  * or invalid escapes pass through literally rather than failing, since redirect queries arrive
  * from outside hax's control. Returns an owned string. */
 char *url_decode(const char *encoded, size_t len);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TEXT_URL_H */

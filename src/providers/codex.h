@@ -6,6 +6,10 @@
 
 #include "provider.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct provider_def; /* providers/registry.h */
 
 /* Hooks behind the codex def: a ChatGPT-subscription endpoint speaking OpenAI Responses with
@@ -39,5 +43,9 @@ int codex_model_is_hidden(const json_t *entry);
 
 /* Read the wire-compatible reasoning levels reported by one Codex catalog entry. */
 void codex_parse_model_efforts(const json_t *entry, struct effort_set *efforts);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_PROVIDERS_CODEX_H */

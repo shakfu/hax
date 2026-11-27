@@ -6,6 +6,10 @@
 
 #include "render/disp.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct footer;
 struct md_renderer;
 
@@ -98,5 +102,9 @@ void render_retry_label(const struct render_ctx *render, long now_ms, char *out,
 
 /* Repaint the retry label from the current retry state; a no-op without a pending retry. */
 void render_update_retry_label(struct render_ctx *render);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_RENDER_RENDER_CTX_H */

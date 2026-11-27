@@ -7,6 +7,10 @@
 #include "turn.h"
 #include "transport/api_error.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* One provider request as the agent consumes it: the turn assembled from its events, the usage
  * of every served attempt, and the user's stop request applied while it streams. Every agent
  * request streams through here, so a stop request means the same wherever it lands. */
@@ -57,5 +61,9 @@ int agent_stream_rejected_for_size(const struct agent_stream *stream, long conte
 
 /* True when any attempt reported billable usage. */
 int agent_stream_has_usage(const struct agent_stream *stream);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_STREAM_H */

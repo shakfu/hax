@@ -5,6 +5,10 @@
 #include <jansson.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Process-wide configuration, owned by the foreground thread. Settings resolve in this order:
  *
  *   run override -> resumed conversation -> environment -> state.json -> config.json -> default
@@ -214,5 +218,9 @@ void config_value_hint(const struct config_setting *setting, char *buffer, size_
 /* Return the allocated canonical enum choice matching `value`, or NULL for non-enums or no
  * match. */
 char *config_value_canonical(const struct config_setting *setting, const char *value);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_CONFIG_H */

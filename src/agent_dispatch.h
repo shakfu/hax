@@ -5,6 +5,10 @@
 #include "tool.h"
 #include "render/render_ctx.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Tool-call execution fused with its interactive presentation: dispatch_* run, refuse, or skip
  * a model call while rendering its tool block live; the render_* halves are also used alone to
  * replay recorded calls. */
@@ -33,5 +37,9 @@ void render_tool_solo_marker(struct render_ctx *render, const char *text);
 
 /* Resolve the call's configured and per-call preview mode. */
 enum tool_preview_mode tool_call_preview_mode(const struct item *call);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_DISPATCH_H */

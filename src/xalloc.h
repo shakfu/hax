@@ -5,6 +5,10 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Allocation failures are fatal. Zero-sized allocation requests return non-NULL. */
 void *xmalloc(size_t size);
 void *xcalloc(size_t count, size_t element_size);
@@ -28,5 +32,9 @@ size_t string_array_count(const char *const *strings);
 /* Owned concatenation of two NULL-terminated string arrays (either may be NULL), or NULL when
  * the result would be empty. Free with string_array_free. */
 char **string_array_concat(const char *const *first, const char *const *second);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_XALLOC_H */

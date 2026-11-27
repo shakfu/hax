@@ -5,6 +5,10 @@
 #include "provider.h"
 #include "tool.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Prepared local view of a model-issued call. original and tool are borrowed; effective is a
  * shallow copy that may point to owned_args_json. */
 struct agent_tool_call {
@@ -29,5 +33,9 @@ struct item agent_tool_result_make(const struct item *call, const char *output,
  * Existing history remains byte-stable for provider prefix caching. */
 void agent_tool_result_enforce_image_budget(const struct item *history, size_t n_history,
                                             struct item *result);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_AGENT_TOOL_H */

@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Replay cursor-addressed bytes against a one-row terminal model and write settled rows to out.
  *
  * Handles LF, CR, CSI nD/nC, and CSI K modes 0-2. Other escape sequences pass through as
@@ -18,5 +22,9 @@
  *
  * bytes is borrowed for the call; out is borrowed and remains open. */
 void vt_resolve(const char *bytes, size_t len, FILE *out);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_VT_RESOLVE_H */

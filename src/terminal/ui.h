@@ -2,6 +2,10 @@
 #ifndef HAX_TERMINAL_UI_H
 #define HAX_TERMINAL_UI_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* User-facing status lines and listing rows, printed to stdout so they interleave with the
  * on-screen conversation. Not for startup/CLI errors, which print "hax: ..." to stderr before the
  * REPL exists (hax_err() in diag.h), nor for mid-stream provider errors, which flow through the
@@ -31,5 +35,9 @@ void ui_wrapped_rows(const char *text, int indent, int columns, const char *styl
  * beside the label column, `text` stacks under the label at UI_ROW_STACKED_INDENT instead. */
 void ui_label_row(const char *label, const char *label_open, const char *text,
                   const char *text_open, int text_column, int columns);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_TERMINAL_UI_H */

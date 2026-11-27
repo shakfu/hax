@@ -4,6 +4,10 @@
 
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Cutoff derived from session_retention_days, or 0 when pruning is disabled. */
 time_t session_retention_cutoff(void);
 
@@ -19,5 +23,9 @@ int session_prune_before(time_t cutoff, const char *exclude_path);
  * process teardown. Both entry points are idempotent. */
 void session_prune_start(const char *exclude_path);
 void session_prune_shutdown(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* HAX_SESSION_PRUNE_H */

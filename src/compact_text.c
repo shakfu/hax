@@ -9,7 +9,6 @@
 #include "buf.h"
 #include "provider.h"
 #include "xalloc.h"
-#include "text/utf8.h"
 #include "tools/output_cap.h"
 
 /* How far a turn is shortened, each level removing more than the one before. */
@@ -51,24 +50,6 @@ struct text_turn {
     enum turn_level max_level;
 };
 
-/* Where a head of at most `budget` bytes ends: after whole lines, or at a character boundary when
- * its first line is longer. */
-static size_t head_end(const char *text, size_t budget)
-{
-    size_t end = whole_lines_head(text, budget, SIZE_MAX, NULL);
-    return end ? end : utf8_char_start(text, budget);
-}
-
-/* Where a tail of at most `budget` of the `length` > `budget` bytes starts: at whole lines, or at a
- * character boundary when its last line is longer. */
-static size_t tail_start(const char *text, size_t length, size_t budget)
-{
-    size_t window = length - budget;
-    int mid_line = text[window - 1] != '\n';
-    size_t start = whole_lines_tail(text + window, budget, mid_line, SIZE_MAX, NULL);
-    return mid_line && start == 0 ? utf8_char_start(text, window) : window + start;
-}
-
 /* `clip` may be NULL to append `text` whole. */
 static void append_clipped(struct buf *out, const char *text, const struct clip *clip)
 {
@@ -77,8 +58,8 @@ static void append_clipped(struct buf *out, const char *text, const struct clip 
         buf_append(out, text, length);
         return;
     }
-    size_t head = head_end(text, clip->head);
-    size_t tail = tail_start(text, length, clip->keep - clip->head);
+    size_t head = output_cap_head_end(text, clip->head);
+    size_t tail = output_cap_tail_start(text, length, clip->keep - clip->head);
     char marker[64];
     snprintf(marker, sizeof(marker), "%s[... %zu bytes omitted ...]\n",
              head > 0 && text[head - 1] != '\n' ? "\n" : "", tail - head);
